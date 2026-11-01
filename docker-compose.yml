@@ -1,0 +1,29 @@
+# Run the full production image locally: `docker compose up --build` → http://localhost:3000
+services:
+  db:
+    image: public.ecr.aws/docker/library/postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: strawvine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      retries: 20
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/strawvine
+      APP_PASSWORD: ${APP_PASSWORD:-strawvine}
+      SESSION_SECRET: ${SESSION_SECRET:-local-dev-secret-local-dev-secret-0000}
+      PORT: "3000"
+      NODE_ENV: development
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  pgdata:

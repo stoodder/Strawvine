@@ -36,8 +36,7 @@ export function goalDirection(trendWeight: number, targetLb: number | null | und
 
 /** Pace (absolute % bodyweight/week) after applying the safety limits. */
 export function cappedPace(settings: Pick<Settings, "limits">, direction: Direction, pacePct: number) {
-  const limit =
-    direction === "lose" ? settings.limits.maxLossPctPerWeek : direction === "gain" ? settings.limits.maxGainPctPerWeek : 0;
+  const limit = direction === "lose" ? settings.limits.maxLossPctPerWeek : direction === "gain" ? settings.limits.maxGainPctPerWeek : 0;
   return { pace: Math.min(Math.abs(pacePct), limit), capped: Math.abs(pacePct) > limit, limit };
 }
 
@@ -123,12 +122,13 @@ export function project(
 
   const observedRateLbPerWeek = weekAgoTrendWeight === null ? null : trendWeight - weekAgoTrendWeight;
   const rightWay =
-    observedRateLbPerWeek !== null &&
-    Math.abs(observedRateLbPerWeek) > 0.05 &&
-    Math.sign(observedRateLbPerWeek) === Math.sign(remainingLb);
+    observedRateLbPerWeek !== null && Math.abs(observedRateLbPerWeek) > 0.05 && Math.sign(observedRateLbPerWeek) === Math.sign(remainingLb);
   const observed = rightWay ? point(today, Math.abs(remainingLb) / Math.abs(observedRateLbPerWeek!)) : null;
 
-  const dates = [atPace, observed].filter((p): p is ProjectionPoint => p !== null).map((p) => p.date).sort();
+  const dates = [atPace, observed]
+    .filter((p): p is ProjectionPoint => p !== null)
+    .map((p) => p.date)
+    .sort();
   const range: [ISODate, ISODate] | null = dates.length ? [dates[0]!, dates[dates.length - 1]!] : null;
   return { direction, remainingLb, atPace, atLimit, observed, observedRateLbPerWeek, range };
 }

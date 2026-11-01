@@ -47,7 +47,18 @@ describe("buildSession", () => {
             {
               exerciseId: 11,
               measure: "seconds",
-              sets: [{ id: "s2", targetReps: 30, targetWeight: null, reps: 45, weight: null, done: true, amrap: false, appliedProgressionLb: null }],
+              sets: [
+                {
+                  id: "s2",
+                  targetReps: 30,
+                  targetWeight: null,
+                  reps: 45,
+                  weight: null,
+                  done: true,
+                  amrap: false,
+                  appliedProgressionLb: null,
+                },
+              ],
             },
           ],
         },

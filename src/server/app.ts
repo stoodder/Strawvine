@@ -84,11 +84,11 @@ export function createApp(opts: AppOptions) {
 
   // ---- auth -------------------------------------------------------------
   app.post("/api/auth/login", async (c) => {
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+    // Heroku's router appends the real client IP last; earlier entries are client-supplied.
+    const ip = c.req.header("x-forwarded-for")?.split(",").at(-1)?.trim() ?? "local";
     if (!allowLogin(ip)) return c.json({ error: "Too many attempts. Try again in a few minutes." }, 429);
     const body = z.object({ password: z.string().max(500) }).safeParse(await c.req.json().catch(() => null));
-    if (!body.success || !passwordMatches(body.data.password, opts.password))
-      return c.json({ error: "That's not it." }, 401);
+    if (!body.success || !passwordMatches(body.data.password, opts.password)) return c.json({ error: "That's not it." }, 401);
     setSessionCookie(c, opts.sessionSecret, opts.secureCookies);
     return c.json({ ok: true });
   });

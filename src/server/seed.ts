@@ -19,6 +19,9 @@ export async function ensureSeeded(db: Db, today: string = localToday()) {
       ids[s.key] = row!.id;
     }
     for (const a of SEED_ACCESSORIES) await tx.insert(exercises).values({ name: a.name, category: a.category, measure: a.measure });
-    await tx.insert(settings).values({ id: 1, data: defaultSettings(ids, today) }).onConflictDoNothing();
+    await tx
+      .insert(settings)
+      .values({ id: 1, data: defaultSettings(ids, today) })
+      .onConflictDoNothing();
   });
 }

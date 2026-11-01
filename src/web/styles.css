@@ -1,0 +1,146 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/*
+ * Strawvine — a futuristic training journal.
+ * Graphite surfaces, one calm accent for progress/action, warm amber reserved for PRs.
+ */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  --color-ink-950: #0a0b0d;
+  --color-ink-900: #0f1114;
+  --color-ink-850: #13161a;
+  --color-ink-800: #181b20;
+  --color-ink-700: #22262d;
+  --color-ink-600: #2e333b;
+
+  --color-fg: #eceef1;
+  --color-fg-2: #b4b9c2;
+  --color-mute: #7d838e;
+  --color-faint: #4f555f;
+
+  --color-accent: #b7f36a;
+  --color-accent-2: #8fd14a;
+  --color-accent-ink: #12200a;
+  --color-glow: #6ee7d8;
+  --color-gold: #f4b860;
+  --color-warn: #f08a6c;
+
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+    background: var(--color-ink-950);
+  }
+  body {
+    @apply bg-ink-950 text-fg font-sans antialiased;
+    min-height: 100dvh;
+    font-feature-settings: "cv11", "ss01";
+    overscroll-behavior-y: none;
+  }
+  /* Ambient glow painted once at the top of the page (not fixed: fixed backgrounds cause
+     repaint seams behind composited elements like glows and blurs). */
+  body::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 520px;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(120% 100% at 50% -20%, rgb(183 243 106 / 0.07), transparent 60%),
+      radial-gradient(80% 70% at 100% -10%, rgb(110 231 216 / 0.05), transparent 60%);
+  }
+  ::selection {
+    background: rgb(183 243 106 / 0.3);
+  }
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+  input::-webkit-outer-spin-button,
+  input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+  :focus-visible {
+    outline: 1.5px solid rgb(183 243 106 / 0.7);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+}
+
+/* Custom utilities (Tailwind v4 @utility so they can be composed with @apply). */
+@utility label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--color-mute);
+}
+@utility num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "cv11";
+}
+/* A hairline that fades out — used instead of boxes. */
+@utility rule {
+  height: 1px;
+  background: linear-gradient(90deg, rgb(255 255 255 / 0.09), rgb(255 255 255 / 0.02) 70%, transparent);
+}
+@utility glow {
+  filter: drop-shadow(0 0 14px rgb(183 243 106 / 0.28));
+}
+@utility glow-gold {
+  filter: drop-shadow(0 0 14px rgb(244 184 96 / 0.4));
+}
+@utility field {
+  width: 100%;
+  background: transparent;
+  outline: none;
+  &::placeholder {
+    color: var(--color-faint);
+  }
+}
+@utility tap {
+  transition: transform 150ms var(--ease-out-soft);
+  &:active {
+    transform: scale(0.97);
+  }
+}
+@utility btn {
+  @apply tap inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium;
+}
+@utility btn-primary {
+  @apply btn bg-accent text-accent-ink shadow-[0_0_32px_-8px_rgb(183_243_106/0.6)];
+}
+@utility btn-ghost {
+  @apply btn bg-white/[0.04] text-fg-2 hover:bg-white/[0.07];
+}
+@utility chip {
+  @apply tap inline-flex items-center rounded-full px-3 py-1 text-xs font-medium;
+}
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.pb-nav {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 6.5rem);
+}
+.pt-safe {
+  padding-top: max(env(safe-area-inset-top), 1rem);
+}

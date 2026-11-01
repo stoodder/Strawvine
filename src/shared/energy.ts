@@ -137,7 +137,6 @@ export function effectiveTdee(
   if (prior === null && day.avgTdee === null) return null;
   const confidence = day.avgTdee === null ? 0 : Math.min(1, day.loggedCount / CALIBRATION_DAYS);
   const measured = day.avgTdee;
-  const value =
-    measured === null ? prior! : prior === null ? measured : confidence * measured + (1 - confidence) * prior;
+  const value = measured === null ? prior! : prior === null ? measured : confidence * measured + (1 - confidence) * prior;
   return { value, measured, prior: prior ?? measured!, confidence, provisional: confidence < 1 };
 }

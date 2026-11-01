@@ -116,7 +116,10 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   const exName = (id: number) => data.exercises.find((e) => e.id === id)?.name ?? "Lift";
 
   // Calibration ramp-up.
-  const logged = data.days.filter((d) => isLogged(d) && d.date <= today).map((d) => d.date).sort();
+  const logged = data.days
+    .filter((d) => isLogged(d) && d.date <= today)
+    .map((d) => d.date)
+    .sort();
   const calib: Array<[number, string, string, string]> = [
     [1, "calib-1", "First entry", "Weight and calories logged. The engine is warming up."],
     [2, "calib-2", "First TDEE reading", "Two logged days — a first (rough) burn estimate."],
@@ -130,7 +133,8 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
 
   // Closed days & streaks.
   const closed = [...closedDates(data, today)].sort();
-  if (closed[0]) out.push({ key: "close-1", title: "Day closed", detail: "Every box checked for the first time.", date: closed[0], tier: "streak" });
+  if (closed[0])
+    out.push({ key: "close-1", title: "Day closed", detail: "Every box checked for the first time.", date: closed[0], tier: "streak" });
   let run = 0;
   let prev: ISODate | null = null;
   const reached = new Set<number>();
@@ -192,7 +196,13 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   }
   for (const [cycle, end] of cyclesWithWork)
     if (end <= today)
-      out.push({ key: `cycle-${cycle}`, title: `Cycle ${cycle} complete`, detail: `${program.weeks.length} weeks banked.`, date: end, tier: "milestone" });
+      out.push({
+        key: `cycle-${cycle}`,
+        title: `Cycle ${cycle} complete`,
+        detail: `${program.weeks.length} weeks banked.`,
+        date: end,
+        tier: "milestone",
+      });
 
   // Lifetime volume & steps.
   const sessions = [...data.sessions].filter((s) => s.date <= today).sort((a, b) => (a.date < b.date ? -1 : 1));
@@ -201,7 +211,13 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   for (const s of sessions) {
     volume += sessionVolume(s);
     while (vi < VOLUME_TIERS.length && volume >= VOLUME_TIERS[vi]!) {
-      out.push({ key: `volume-${VOLUME_TIERS[vi]}`, title: `${compact(VOLUME_TIERS[vi]!)} lb moved`, detail: "Lifetime training volume.", date: s.date, tier: "milestone" });
+      out.push({
+        key: `volume-${VOLUME_TIERS[vi]}`,
+        title: `${compact(VOLUME_TIERS[vi]!)} lb moved`,
+        detail: "Lifetime training volume.",
+        date: s.date,
+        tier: "milestone",
+      });
       vi++;
     }
   }
@@ -211,7 +227,13 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   for (const d of stepDays) {
     steps += d.steps ?? 0;
     while (si < STEP_TIERS.length && steps >= STEP_TIERS[si]!) {
-      out.push({ key: `steps-${STEP_TIERS[si]}`, title: `${compact(STEP_TIERS[si]!)} steps`, detail: "Lifetime steps logged.", date: d.date, tier: "milestone" });
+      out.push({
+        key: `steps-${STEP_TIERS[si]}`,
+        title: `${compact(STEP_TIERS[si]!)} steps`,
+        detail: "Lifetime steps logged.",
+        date: d.date,
+        tier: "milestone",
+      });
       si++;
     }
   }

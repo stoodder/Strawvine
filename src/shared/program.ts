@@ -43,12 +43,7 @@ export interface PlannedSet {
 }
 
 /** Working sets for the main lift in a given program week. */
-export function mainLiftSets(
-  program: Program,
-  maxLb: number,
-  week: ProgramWeek,
-  opts: { progressionDay: boolean },
-): PlannedSet[] {
+export function mainLiftSets(program: Program, maxLb: number, week: ProgramWeek, opts: { progressionDay: boolean }): PlannedSet[] {
   return week.reps.map((reps, i) => {
     const basisReps = week.basisReps ?? reps;
     const repMaxLb = maxLb * repMaxPct(program.repMaxPct, basisReps);
