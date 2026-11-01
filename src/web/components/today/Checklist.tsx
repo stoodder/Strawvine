@@ -7,6 +7,7 @@ import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { compactSteps, fmt, minutesToHM } from "../../lib/format";
 import { Bar, CheckDot } from "../ui";
 import { FuelEditor, MetconEditor, MorningEditor, StepsEditor, Zone2Editor } from "./editors";
+import { SavedTick, type SavedFlash } from "./saved";
 
 export interface LiftSummary {
   href: string;
@@ -31,6 +32,7 @@ export function DayChecklist({
   stepTarget,
   zone2Minutes,
   lift,
+  saved,
 }: {
   items: ChecklistItem[];
   day: DayLog;
@@ -38,21 +40,30 @@ export function DayChecklist({
   stepTarget: number;
   zone2Minutes: number;
   lift: LiftSummary;
+  /** Shows a brief "saved" on the row whose edit the server just acknowledged. */
+  saved?: SavedFlash;
 }) {
   const [open, setOpen] = useState<string | null>(null);
   const toggle = (k: string) => setOpen((o) => (o === k ? null : k));
 
   return (
     <div className="-mx-1">
+      <span role="status" className="sr-only">
+        {saved?.shown ? "Saved" : ""}
+      </span>
       {items.map((item) => {
         const summary = summaryFor(item, day, stepTarget, lift);
         if (item.key === "lift") return <LiftRow key={item.key} item={item} summary={summary} href={lift.href} />;
+        const rowPatch = (p: DayLogPatch) => {
+          saved?.mark(item.key);
+          patch(p);
+        };
         const onCheck =
           item.key === "metcon"
-            ? () => patch({ metconDone: !day.metconDone })
+            ? () => rowPatch({ metconDone: !day.metconDone })
             : item.key === "zone2"
               ? () =>
-                  patch({
+                  rowPatch({
                     zone2Done: !day.zone2Done,
                     zone2Minutes: !day.zone2Done && day.zone2Minutes === null ? zone2Minutes : day.zone2Minutes,
                   })
@@ -65,12 +76,13 @@ export function DayChecklist({
             onToggleOpen={() => toggle(item.key)}
             onCheck={onCheck}
             summary={summary}
+            saved={saved?.shown === item.key}
           >
-            {item.key === "morning" && <MorningEditor day={day} patch={patch} />}
-            {item.key === "fuel" && <FuelEditor day={day} patch={patch} />}
-            {item.key === "steps" && <StepsEditor day={day} patch={patch} target={stepTarget} />}
-            {item.key === "zone2" && <Zone2Editor day={day} patch={patch} />}
-            {item.key === "metcon" && <MetconEditor day={day} patch={patch} />}
+            {item.key === "morning" && <MorningEditor day={day} patch={rowPatch} />}
+            {item.key === "fuel" && <FuelEditor day={day} patch={rowPatch} />}
+            {item.key === "steps" && <StepsEditor day={day} patch={rowPatch} target={stepTarget} />}
+            {item.key === "zone2" && <Zone2Editor day={day} patch={rowPatch} />}
+            {item.key === "metcon" && <MetconEditor day={day} patch={rowPatch} />}
           </ChecklistRow>
         );
       })}
@@ -139,13 +151,15 @@ function StatusDot({ done, onActivate }: { done: boolean; onActivate?: () => voi
   );
 }
 
-function RowText({ item, summary, srState }: { item: ChecklistItem; summary: Summary; srState: boolean }) {
+function RowText({ item, summary, srState, saved = false }: { item: ChecklistItem; summary: Summary; srState: boolean; saved?: boolean }) {
   return (
     <>
       <span className="block min-w-0 flex-1">
         <span className={clsx("block text-[15px]", item.done ? "text-fg" : "text-fg-2")}>
           {item.label}
           {srState && <span className="sr-only">{item.done ? ", done" : ", not done"}</span>}
+          {/* Announced once by the checklist's status region, not from inside the button. */}
+          <SavedTick show={saved} live={false} className="ml-2.5 inline-block align-[1px]" />
         </span>
         {summary.sub && <span className="mt-0.5 block truncate text-xs text-mute">{summary.sub}</span>}
         {item.key === "steps" && !item.done && item.progress > 0 && <Bar className="mt-2 w-32" value={item.progress} />}
@@ -161,6 +175,7 @@ function ChecklistRow({
   onToggleOpen,
   onCheck,
   summary,
+  saved = false,
   children,
 }: {
   item: ChecklistItem;
@@ -169,6 +184,8 @@ function ChecklistRow({
   /** A real done/not-done toggle (metcon, zone 2); `null` for items done by entering a value. */
   onCheck: (() => void) | null;
   summary: Summary;
+  /** The server just acknowledged an edit made in this row. */
+  saved?: boolean;
   children: ReactNode;
 }) {
   const panelId = useId();
@@ -192,7 +209,7 @@ function ChecklistRow({
           onClick={onToggleOpen}
           className="flex min-w-0 flex-1 items-center gap-4 rounded-lg py-3.5 text-left"
         >
-          <RowText item={item} summary={summary} srState={!onCheck} />
+          <RowText item={item} summary={summary} srState={!onCheck} saved={saved} />
         </button>
       </div>
       <AnimatePresence initial={false}>

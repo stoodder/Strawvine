@@ -2,6 +2,7 @@ import clsx from "clsx";
 import { useMemo, useState } from "react";
 import { Check } from "lucide-react";
 import { addDays, formatShortDate } from "../../shared/dates";
+import { displayPrefs } from "../../shared/defaults";
 import { CALIBRATION_DAYS, computeEnergySeries } from "../../shared/energy";
 import { currentMax } from "../../shared/program";
 import type { Exercise } from "../../shared/schemas";
@@ -9,6 +10,7 @@ import { LineChart, Sparkline } from "../components/charts";
 import { MaxSheet } from "../components/MaxSheet";
 import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
+import { IntakeStrip } from "../components/progress/IntakeStrip";
 import { formatProjectedRange } from "../components/projection";
 import { useTitle } from "../components/useTitle";
 import { fmt, minutesToHM, signed } from "../lib/format";
@@ -40,6 +42,7 @@ export function ProgressScreen() {
   const loggedCount = model.todayEnergy?.loggedCount ?? 0;
   const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
   const goal = data.settings.weightGoal;
+  const strong = displayPrefs(data.settings).highContrast;
 
   return (
     <div>
@@ -225,6 +228,7 @@ export function ProgressScreen() {
           ]}
           refLine={goal ? { y: goal.targetLb, label: `goal ${goal.targetLb}` } : undefined}
           title="Bodyweight"
+          strong={strong}
           emptyText="Weigh in a couple of mornings to see your trend."
         />
       </Section>
@@ -251,10 +255,12 @@ export function ProgressScreen() {
           ]}
           emptyText="Two logged days and the burn estimate starts drawing."
           title="Energy balance"
+          strong={strong}
         />
         <p className="mt-3 text-xs leading-relaxed text-mute">
           Weighted 7-day averages. The gap between the lines is the surplus or deficit your scale is actually responding to.
         </p>
+        <IntakeStrip data={data} series={model.series} today={today} />
       </Section>
 
       {/* Lifts */}
@@ -289,7 +295,7 @@ export function ProgressScreen() {
                     {target && <span> · target {fmt(target.targetLb)}</span>}
                   </div>
                 </div>
-                <Sparkline points={entries.map((e) => e.valueLb)} width={72} height={24} />
+                <Sparkline points={entries.map((e) => e.valueLb)} width={72} height={24} strong={strong} />
                 <div className="num w-16 text-right text-2xl font-light">{cur ? fmt(cur.valueLb, cur.valueLb % 1 ? 1 : 0) : "—"}</div>
               </button>
             );

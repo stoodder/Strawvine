@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { Link, useNavigate, useParams } from "react-router";
 import { ChevronLeft, ChevronRight, Flame, Settings2, Sparkles, TriangleAlert, Info } from "lucide-react";
-import { addDays, formatShortDate, isISODate, weekdayName } from "../../shared/dates";
+import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { CALIBRATION_DAYS } from "../../shared/energy";
 import { checklist, isClosed } from "../../shared/gamify";
 import { targetsFor } from "../../shared/insights";
@@ -9,13 +9,16 @@ import { cyclePosition, programDayFor } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession } from "../../shared/session";
-import { Bar, Ring, Section, Stat } from "../components/ui";
+import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { JournalText } from "../components/TextArea";
 import { DayChecklist } from "../components/today/Checklist";
+import { DateJump } from "../components/today/DateJump";
+import { DayRing } from "../components/today/DayRing";
+import { SavedTick, useSavedFlash } from "../components/today/saved";
 import { fmt, minutesToHM, signed } from "../lib/format";
 import { success } from "../lib/haptics";
-import { useData, useSaveDay } from "../lib/store";
+import { useData, usePendingDates, useSaveDay } from "../lib/store";
 import { useTitle } from "../components/useTitle";
 
 export function TodayScreen() {
@@ -26,6 +29,8 @@ export function TodayScreen() {
   const isToday = date === today;
   const navigate = useNavigate();
   const save = useSaveDay();
+  const saved = useSavedFlash(date);
+  const pending = usePendingDates().has(date);
 
   const day: DayLog = data.days.find((d) => d.date === date) ?? emptyDayLog(date);
   const session = data.sessions.find((s) => s.date === date);
@@ -72,9 +77,7 @@ export function TodayScreen() {
           <button type="button" aria-label="Previous day" onClick={() => go(addDays(date, -1))} className="tap -ml-2 p-2 text-mute">
             <ChevronLeft size={18} />
           </button>
-          <div className="label text-fg-2">
-            {weekdayName(date, true)} · {formatShortDate(date)}
-          </div>
+          <DateJump date={date} today={today} pending={pending} onPick={go} />
           <button
             type="button"
             aria-label="Next day"
@@ -125,11 +128,11 @@ export function TodayScreen() {
               <div className="label mt-0.5">streak</div>
             </div>
           )}
-          <Ring value={items.length ? doneCount / items.length : 0} size={60} stroke={3.5}>
+          <DayRing date={date} closed={closed} value={items.length ? doneCount / items.length : 0} size={60} stroke={3.5}>
             <span className="num text-sm text-fg-2">
               {doneCount}/{items.length}
             </span>
-          </Ring>
+          </DayRing>
         </div>
       </div>
 
@@ -209,6 +212,7 @@ export function TodayScreen() {
             setsDone,
             setsTotal,
           }}
+          saved={saved}
         />
       </Section>
 
@@ -224,12 +228,15 @@ export function TodayScreen() {
       )}
 
       {/* Journal */}
-      <Section label="Journal">
+      <Section label="Journal" right={<SavedTick show={saved.shown === "journal"} />}>
         <JournalText
           key={date}
           ariaLabel="Journal"
           value={day.journal}
-          onSave={(v) => patch({ journal: v })}
+          onSave={(v) => {
+            saved.mark("journal");
+            patch({ journal: v });
+          }}
           placeholder="How did it feel? What moved, what didn't…"
           className="text-base"
           minRows={4}

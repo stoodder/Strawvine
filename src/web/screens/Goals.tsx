@@ -1,8 +1,9 @@
 import clsx from "clsx";
 import { motion } from "motion/react";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useNavigate } from "react-router";
 import { Award, Flame, Plus, Trash2, Trophy } from "lucide-react";
-import { addDays, formatShortDate, startOfWeek } from "../../shared/dates";
+import { addDays, formatShortDate, startOfWeek, weekdayName } from "../../shared/dates";
 import { checklist, type Achievement } from "../../shared/gamify";
 import { goalDirection } from "../../shared/nutrition";
 import { currentMax } from "../../shared/program";
@@ -306,9 +307,14 @@ function NextUp({ current }: { current: number }) {
   );
 }
 
-/** 16 weeks of days, Monday-first columns. Closed days glow; partial days fade in by progress. */
+/**
+ * 16 weeks of days, Monday-first columns. Closed days glow; partial days fade in by progress.
+ * Each past day is a button that opens it on Today; the grid is one tab stop (arrow keys move by
+ * day / week, Home / End jump), named by the overall summary.
+ */
 function Heatmap() {
   const { data, today } = useData();
+  const navigate = useNavigate();
   const weeks = 16;
   const start = addDays(startOfWeek(today), -(weeks - 1) * 7);
   const byDate = useMemo(() => new Map(data.days.map((d) => [d.date, d])), [data.days]);
@@ -316,50 +322,90 @@ function Heatmap() {
   const cols = Array.from({ length: weeks }, (_, w) =>
     Array.from({ length: 7 }, (_, d) => {
       const date = addDays(start, w * 7 + d);
-      if (date > today) return { date, v: -1 };
+      if (date > today) return { date, v: -1, done: 0, total: 0 };
       const day = byDate.get(date);
-      if (!day && !sessions.get(date)) return { date, v: 0 };
       const items = checklist(date, day, sessions.get(date), data.settings);
-      return { date, v: items.filter((i) => i.done).length / items.length };
+      const done = !day && !sessions.get(date) ? 0 : items.filter((i) => i.done).length;
+      return { date, v: items.length ? done / items.length : 0, done, total: items.length };
     }),
   );
-  const past = cols.flat().filter((c) => c.v >= 0);
+  const flat = cols.flat();
+  const past = flat.filter((c) => c.v >= 0);
   const closed = past.filter((c) => c.v >= 1).length;
   const partial = past.filter((c) => c.v > 0 && c.v < 1).length;
   const todayCell = past.find((c) => c.date === today);
   const summary =
     `Closed days, last ${weeks} weeks: ${closed} closed, ${partial} partly done, ${past.length - closed - partial} empty.` +
     (todayCell ? ` Today is ${todayCell.v >= 1 ? "closed" : `${Math.round(todayCell.v * 100)}% done`}.` : "");
+
+  // Roving focus: one cell is tabbable (today, until the person moves).
+  const lastPast = flat.findLastIndex((c) => c.v >= 0);
+  const [focus, setFocus] = useState<number | null>(null);
+  const active = focus !== null && focus <= lastPast ? focus : lastPast;
+  const cells = useRef<Array<HTMLButtonElement | null>>([]);
+  const moveTo = (i: number) => {
+    const n = Math.max(0, Math.min(lastPast, i));
+    setFocus(n);
+    cells.current[n]?.focus();
+  };
+  const onKey = (e: ReactKeyboardEvent, i: number) => {
+    const step: Record<string, number> = { ArrowUp: -1, ArrowDown: 1, ArrowLeft: -7, ArrowRight: 7 };
+    if (e.key in step) moveTo(i + step[e.key]!);
+    else if (e.key === "Home") moveTo(0);
+    else if (e.key === "End") moveTo(lastPast);
+    else return;
+    e.preventDefault();
+  };
+  const describe = (c: (typeof flat)[number]) =>
+    `${weekdayName(c.date)}, ${formatShortDate(c.date, c.date.slice(0, 4) !== today.slice(0, 4))}: ` +
+    (c.v >= 1 ? `closed, all ${c.total} done` : c.done ? `${c.done} of ${c.total} done` : "nothing logged") +
+    (c.date === today ? " (today)" : "");
+
   return (
-    <div className="mt-8 flex justify-between gap-[3px]" role="img" aria-label={summary}>
+    <div className="mt-8 flex justify-between gap-[3px]" role="group" aria-label={`${summary} Choose a day to open it.`}>
       {cols.map((col, i) => (
         <div key={i} className="flex flex-1 flex-col gap-[3px]">
-          {col.map((c) => (
-            <motion.div
-              key={c.date}
-              title={c.date}
-              className="relative grid aspect-square w-full place-items-center rounded-[3px]"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: i * 0.02 }}
-              style={{
-                background:
-                  c.v < 0
-                    ? "transparent"
-                    : c.v >= 1
-                      ? "var(--color-accent)"
-                      : c.v > 0
-                        ? `rgb(183 243 106 / ${0.08 + c.v * 0.3})`
-                        : "rgba(255,255,255,0.04)",
-                boxShadow: c.v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
-                outline: c.date === today ? "1px solid rgba(255,255,255,0.6)" : undefined,
-                outlineOffset: c.date === today ? 1 : undefined,
-              }}
-            >
-              {/* Today is marked by shape too, not just the outline colour. */}
-              {c.date === today && <span className={clsx("h-1 w-1 rounded-full", c.v >= 1 ? "bg-accent-ink" : "bg-fg")} />}
-            </motion.div>
-          ))}
+          {col.map((c, d) => {
+            const idx = i * 7 + d;
+            const style = {
+              background:
+                c.v < 0
+                  ? "transparent"
+                  : c.v >= 1
+                    ? "var(--color-accent)"
+                    : c.v > 0
+                      ? `rgb(183 243 106 / ${0.08 + c.v * 0.3})`
+                      : "rgba(255,255,255,0.04)",
+              boxShadow: c.v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
+              outline: c.date === today ? "1px solid rgba(255,255,255,0.6)" : undefined,
+              outlineOffset: c.date === today ? 1 : undefined,
+            };
+            const motionProps = { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { delay: i * 0.02 } };
+            const cls = "relative grid aspect-square w-full place-items-center rounded-[3px]";
+            // Today is marked by shape too, not just the outline colour.
+            const dot = c.date === today && <span className={clsx("h-1 w-1 rounded-full", c.v >= 1 ? "bg-accent-ink" : "bg-fg")} />;
+            if (c.v < 0) return <motion.div key={c.date} aria-hidden className={cls} style={style} {...motionProps} />;
+            return (
+              <motion.button
+                key={c.date}
+                ref={(el: HTMLButtonElement | null) => {
+                  cells.current[idx] = el;
+                }}
+                type="button"
+                tabIndex={idx === active ? 0 : -1}
+                aria-label={describe(c)}
+                title={describe(c)}
+                className={clsx(cls, "cursor-pointer")}
+                style={style}
+                {...motionProps}
+                onFocus={() => setFocus(idx)}
+                onKeyDown={(e) => onKey(e, idx)}
+                onClick={() => navigate(c.date === today ? "/" : `/day/${c.date}`)}
+              >
+                {dot}
+              </motion.button>
+            );
+          })}
         </div>
       ))}
     </div>

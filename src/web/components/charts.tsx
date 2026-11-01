@@ -2,7 +2,8 @@
  * Lightweight SVG charts: sparklines that sit inline with text, and a scrubbable line chart.
  */
 import clsx from "clsx";
-import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { formatShortDate } from "../../shared/dates";
 
 export interface Point {
@@ -15,11 +16,14 @@ export function Sparkline({
   width = 88,
   height = 26,
   color = "var(--color-accent)",
+  strong = false,
 }: {
   points: Array<number | null>;
   width?: number;
   height?: number;
   color?: string;
+  /** High-contrast display: a heavier line. */
+  strong?: boolean;
 }) {
   const vals = points.filter((p): p is number => p !== null);
   if (vals.length < 2) return <svg width={width} height={height} aria-hidden />;
@@ -38,7 +42,15 @@ export function Sparkline({
   const lastIdx = points.lastIndexOf(last);
   return (
     <svg width={width} height={height} aria-hidden className="overflow-visible">
-      <path d={d} fill="none" stroke={color} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" opacity={0.9} />
+      <path
+        d={d}
+        fill="none"
+        stroke={color}
+        strokeWidth={strong ? 2.25 : 1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity={strong ? 1 : 0.9}
+      />
       <circle cx={lastIdx * step} cy={height - 3 - ((last - min) / span) * (height - 6)} r={2.5} fill={color} />
     </svg>
   );
@@ -60,6 +72,7 @@ export function LineChart({
   formatY = (v) => v.toFixed(0),
   emptyText = "Not enough data yet.",
   title = "Chart",
+  strong = false,
 }: {
   series: Series[];
   height?: number;
@@ -68,9 +81,13 @@ export function LineChart({
   emptyText?: ReactNode;
   /** Names the chart for screen readers ("Bodyweight"); the summary is generated. */
   title?: string;
+  /** High-contrast display: heavier lines and dots, brighter grid. */
+  strong?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
+  const [table, setTable] = useState(false);
+  const tableId = useId();
   const width = 360;
   const pad = { t: 12, r: 8, b: 8, l: 8 };
 
@@ -87,6 +104,8 @@ export function LineChart({
   // outside it is pinned to the edge as a marker instead of squashing the lines flat.
   let min = Math.min(...all);
   let max = Math.max(...all);
+  const dataMin = min;
+  const dataMax = max;
   const span = max - min || Math.abs(max) * 0.05 || 1;
   let pinned: "above" | "below" | null = null;
   if (refLine) {
@@ -145,6 +164,14 @@ export function LineChart({
     .filter(Boolean)
     .join(" ");
   const pct = (v: number) => `${(v / height) * 100}%`;
+  // Axis values read in the main line's own format (e.g. one decimal for bodyweight).
+  const fmtAxis = (series.find((s) => s.kind === "line") ?? series[0])?.format ?? formatY;
+  const gridAt = dataMax > dataMin ? [dataMax, (dataMax + dataMin) / 2, dataMin] : [dataMax];
+  // The table: the most recent 14 days with any value, newest first.
+  const rows = dates
+    .filter((d) => series.some((s) => s.points.some((p) => p.x === d && p.y !== null)))
+    .slice(-14)
+    .reverse();
 
   return (
     <div className="relative">
@@ -174,14 +201,15 @@ export function LineChart({
         onBlur={() => setHover(null)}
       >
         <svg viewBox={`0 0 ${width} ${height}`} className="block w-full" aria-hidden>
-          {[0.25, 0.5, 0.75].map((f) => (
+          {/* Hairlines at the data's high, middle and low. */}
+          {gridAt.map((v) => (
             <line
-              key={f}
+              key={v}
               x1={pad.l}
               x2={width - pad.r}
-              y1={pad.t + f * (height - pad.t - pad.b)}
-              y2={pad.t + f * (height - pad.t - pad.b)}
-              stroke="rgba(255,255,255,0.04)"
+              y1={yOf(v)}
+              y2={yOf(v)}
+              stroke={strong ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.045)"}
             />
           ))}
           {refLine && !pinned && (
@@ -201,7 +229,7 @@ export function LineChart({
               return (
                 <g key={s.key}>
                   {pts.map(([x, y], i) => (
-                    <circle key={i} cx={x} cy={y} r={1.8} fill={s.color} opacity={0.55} />
+                    <circle key={i} cx={x} cy={y} r={strong ? 2.4 : 1.8} fill={s.color} opacity={strong ? 0.9 : 0.55} />
                   ))}
                 </g>
               );
@@ -209,13 +237,19 @@ export function LineChart({
             return (
               <g key={s.key}>
                 <path d={d} fill="none" stroke={s.color} strokeWidth={6} opacity={0.08} strokeLinejoin="round" />
-                <path d={d} fill="none" stroke={s.color} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" />
+                <path d={d} fill="none" stroke={s.color} strokeWidth={strong ? 2.75 : 1.75} strokeLinejoin="round" strokeLinecap="round" />
               </g>
             );
           })}
           {hover !== null && (
             <g>
-              <line x1={xOf(hover)} x2={xOf(hover)} y1={pad.t} y2={height - pad.b} stroke="rgba(255,255,255,0.18)" />
+              <line
+                x1={xOf(hover)}
+                x2={xOf(hover)}
+                y1={pad.t}
+                y2={height - pad.b}
+                stroke={strong ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.18)"}
+              />
               {series.map((s) => {
                 const p = s.points.find((q) => q.x === hoverDate);
                 return p?.y != null ? <circle key={s.key} cx={xOf(hover)} cy={yOf(p.y)} r={3} fill={s.color} /> : null;
@@ -223,6 +257,23 @@ export function LineChart({
             </g>
           )}
         </svg>
+        {/* High and low of the plotted data, at their own levels on the left. */}
+        <span
+          aria-hidden
+          className="pointer-events-none absolute left-2 -translate-y-full pb-0.5 font-mono text-[0.625rem] text-mute"
+          style={{ top: pct(yOf(dataMax)) }}
+        >
+          {fmtAxis(dataMax)}
+        </span>
+        {dataMax > dataMin && (
+          <span
+            aria-hidden
+            className="pointer-events-none absolute left-2 pt-0.5 font-mono text-[0.625rem] text-mute"
+            style={{ top: pct(yOf(dataMin)) }}
+          >
+            {fmtAxis(dataMin)}
+          </span>
+        )}
         {refLine && !pinned && (
           <span
             aria-hidden
@@ -244,9 +295,64 @@ export function LineChart({
           </span>
         )}
       </div>
-      <div aria-hidden className="mt-1.5 flex justify-between px-2 font-mono text-[0.625rem] text-mute">
-        <span>{formatShortDate(dates[0]!)}</span>
-        <span>{formatShortDate(dates[dates.length - 1]!)}</span>
+      <div className="mt-1.5 flex items-center justify-between px-2 font-mono text-[0.625rem] text-mute">
+        <span aria-hidden>{formatShortDate(dates[0]!)}</span>
+        <button
+          type="button"
+          aria-expanded={table}
+          aria-controls={tableId}
+          onClick={() => setTable((t) => !t)}
+          className="label hit inline-flex items-center gap-1 text-mute"
+        >
+          Table
+          <ChevronDown size={11} aria-hidden className={clsx("transition-transform", table && "rotate-180")} />
+        </button>
+        <span aria-hidden>{formatShortDate(dates[dates.length - 1]!)}</span>
+      </div>
+      <div id={tableId} hidden={!table}>
+        {table && (
+          <div
+            className="mt-3 max-h-60 overflow-y-auto overscroll-contain rounded-xl bg-white/[0.02] px-3"
+            tabIndex={0}
+            role="region"
+            aria-label={`${title} values`}
+          >
+            <table className="w-full text-xs">
+              <caption className="sr-only">
+                {title}, the {rows.length} most recent days with data, newest first
+              </caption>
+              <thead className="sticky top-0 bg-ink-950/95">
+                <tr>
+                  <th scope="col" className="label py-2 text-left font-normal">
+                    Date
+                  </th>
+                  {series.map((s) => (
+                    <th key={s.key} scope="col" className="label py-2 text-right font-normal">
+                      {s.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((d) => (
+                  <tr key={d} className="border-t border-white/[0.04]">
+                    <th scope="row" className="py-1.5 text-left font-normal text-fg-2">
+                      {formatShortDate(d)}
+                    </th>
+                    {series.map((s) => {
+                      const y = s.points.find((p) => p.x === d)?.y;
+                      return (
+                        <td key={s.key} className="num py-1.5 text-right text-fg">
+                          {y != null ? fmtOf(s)(y) : <span className="text-mute">—</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

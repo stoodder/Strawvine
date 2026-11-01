@@ -61,6 +61,8 @@ export function TextField({
   placeholder,
   className,
   maxLength = 120,
+  list,
+  describedBy,
 }: {
   value: string | null;
   onCommit: (v: string | null) => void;
@@ -68,6 +70,10 @@ export function TextField({
   placeholder?: string;
   className?: string;
   maxLength?: number;
+  /** Id of a <datalist> of suggestions. */
+  list?: string;
+  /** Id of an element that describes the field (e.g. a "best so far" line). */
+  describedBy?: string;
 }) {
   const f = useCommitField(value ?? "", (t) => {
     const v = t.trim() || null;
@@ -81,6 +87,8 @@ export function TextField({
       maxLength={maxLength}
       enterKeyHint="done"
       autoComplete="off"
+      list={list}
+      aria-describedby={describedBy}
       {...f.bind}
       className={clsx(BOX, className)}
     />
