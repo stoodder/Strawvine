@@ -50,7 +50,7 @@ export function PaceSlider({
           className="range absolute inset-0 h-11 w-full"
         />
       </div>
-      <div className="flex justify-between text-[0.625rem] text-mute">
+      <div className="flex justify-between text-2xs text-mute">
         <span>Gentle</span>
         <span className={clsx(atLimit && "text-fg-2")}>{atLimit ? `At your limit · ${limit}%` : `Limit ${limit}%`}</span>
       </div>

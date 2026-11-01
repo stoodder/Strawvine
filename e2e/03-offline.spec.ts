@@ -2,8 +2,7 @@
  * Offline: an edit made with no connection is kept on the device, survives a reload while still
  * offline, and reaches the server once back online.
  */
-import { expect, test } from "@playwright/test";
-import { dismissCelebrations, fillNumber, login, waitForDeviceCopy } from "./helpers";
+import { dismissCelebrations, expect, fillNumber, login, test, waitForDeviceCopy } from "./helpers";
 
 test.use({ serviceWorkers: "allow" });
 

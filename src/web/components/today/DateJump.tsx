@@ -17,11 +17,14 @@ export function DateJump({
   pending: boolean;
   onPick: (date: string) => void;
 }) {
-  const name = `Choose a day. Showing ${weekdayName(date)}, ${formatShortDate(date, date.slice(0, 4) !== today.slice(0, 4))}`;
+  const visible = `${weekdayName(date, true)} · ${formatShortDate(date)}`;
+  const otherYear = date.slice(0, 4) !== today.slice(0, 4);
+  // The name starts with the visible text (so "tap Mon · Nov 2" works for voice control).
+  const name = `${visible}${otherYear ? `, ${date.slice(0, 4)}` : ""} — choose a day`;
   return (
-    <label className="relative inline-flex cursor-pointer items-center gap-1.5 rounded-md px-1 py-2.5 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent/75">
+    <label className="focus-ring-within relative inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-md px-1">
       <span aria-hidden className="label text-fg-2">
-        {weekdayName(date, true)} · {formatShortDate(date)}
+        {visible}
       </span>
       {pending && (
         // Out of flow, so the header doesn't shift as it comes and goes.

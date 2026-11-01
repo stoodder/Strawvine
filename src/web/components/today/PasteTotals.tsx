@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from "react";
-import type { DayLogPatch } from "../../../shared/schemas";
+import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
 import { tick } from "../../lib/haptics";
 import { parseNutrition, type NutritionTotals } from "./parseNutrition";
@@ -33,11 +33,14 @@ export function totalsPatch(t: NutritionTotals): DayLogPatch {
  */
 export function PasteTotals({
   state,
+  current,
   onText,
   onUse,
   onClose,
 }: {
   state: PasteState;
+  /** The day's numbers now: when the paste would overwrite any, the readout says what it replaces. */
+  current: Pick<DayLog, "calories" | "proteinG" | "carbsG" | "fatG">;
   onText: (text: string) => void;
   onUse: (p: DayLogPatch) => void;
   onClose: () => void;
@@ -46,6 +49,10 @@ export function PasteTotals({
   const useBtn = useRef<HTMLButtonElement>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const readoutId = useId();
+  // What "Use these" would overwrite: only fields the paste writes, that are filled and differ.
+  const patch = parsed ? totalsPatch(parsed) : {};
+  const fields = ["calories", "proteinG", "carbsG", "fatG"] as const;
+  const replaces = fields.some((k) => k in patch && current[k] !== null && current[k] !== patch[k]);
 
   useEffect(() => {
     if (state.manual) areaRef.current?.focus();
@@ -98,12 +105,23 @@ export function PasteTotals({
             {cell("F", parsed.fatG, "g")}
           </div>
         ) : (
-          <p className="text-xs text-mute">
+          <p className="text-xs text-fg-2">
             {state.text.trim() ? "Can't read totals from that yet." : "Calories, protein, carbs, fat — in that order, or labelled."}
           </p>
         )}
+        {replaces && (
+          <p className="num mt-2 text-xs text-fg-2">
+            replaces{" "}
+            {fields.map((k, i) => (
+              <span key={k} className="whitespace-nowrap">
+                {i > 0 && " · "}
+                {current[k] !== null ? fmt(current[k]) : "—"}
+              </span>
+            ))}
+          </p>
+        )}
       </div>
-      <div className="mt-4 flex items-center gap-2">
+      <div className="mt-4 flex flex-wrap items-center gap-2">
         <button
           ref={useBtn}
           type="button"

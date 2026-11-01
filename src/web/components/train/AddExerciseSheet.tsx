@@ -78,14 +78,14 @@ export function AddExerciseSheet({
 
   return (
     <Sheet open={open} onClose={close} title={title} className="min-h-[80dvh]">
-      <div className="flex items-center gap-3 rounded-2xl bg-white/[0.05] px-4 py-3">
-        <Search size={16} className="text-mute" />
+      <div className="box-field flex items-center gap-3 rounded-2xl bg-white/[0.05] px-4 py-3">
+        <Search size={16} className="text-mute" aria-hidden />
         <input
           aria-label="Search or create exercise"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search or create…"
-          className="field flex-1 text-base"
+          className="field field-plain flex-1 text-base"
           autoFocus
         />
       </div>
@@ -145,7 +145,7 @@ export function AddExerciseSheet({
                 setQ("");
               }}
             >
-              <span className="text-[15px]">{e.name}</span>
+              <span className="text-[0.9375rem]">{e.name}</span>
               <span className="label shrink-0 pl-3">{tag(e)}</span>
             </button>
           </li>

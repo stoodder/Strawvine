@@ -1,6 +1,26 @@
-import { expect, type Page } from "@playwright/test";
+import { test as base, expect, type Page } from "@playwright/test";
 
+export { expect };
 export const PASSWORD = process.env.E2E_PASSWORD ?? "e2e-password-not-secret";
+
+/**
+ * The suite's `test`: before each test (and each retry) the runner (scripts/e2e.mjs) restarts
+ * the server on an empty database, so every test is self-sufficient and nothing leaks between
+ * them. Without E2E_CONTROL_URL (running Playwright by hand) the database is left alone.
+ */
+export const test = base.extend<{ freshDatabase: void }>({
+  freshDatabase: [
+    async ({}, use) => {
+      const control = process.env.E2E_CONTROL_URL;
+      if (control) {
+        const res = await fetch(`${control}/reset`, { method: "POST" });
+        if (!res.ok) throw new Error(`Resetting the e2e database failed: ${res.status} ${await res.text()}`);
+      }
+      await use();
+    },
+    { auto: true },
+  ],
+});
 
 /**
  * Local-time instants (the browser runs in the machine's zone). The suite pins the clock so the
@@ -45,7 +65,10 @@ export async function dismissCelebrations(page: Page): Promise<string[]> {
   return seen;
 }
 
-/** Sign in (unless a session cookie already does) and, on a fresh database, skip through onboarding. */
+/**
+ * Sign in (unless a session cookie already does) and, on a fresh database, skip through
+ * onboarding (bench press max 225; the cycle starts the Monday after the browser's today).
+ */
 export async function login(page: Page) {
   await page.goto("/");
   const pw = page.getByLabel("Password");
@@ -76,9 +99,10 @@ export async function fillNumber(page: Page, name: string | RegExp, value: strin
 }
 
 /**
- * Wait until this device has a trusted copy of the data (IndexedDB "strawvine" / kv / "base",
- * written a few seconds after a load, and no "strawvine:cache-invalid" mark from the sign-out
- * that preceded sign-in), so the app can open offline.
+ * Wait until this device has a trusted copy of the data (IndexedDB "strawvine" / kv: the
+ * "b:meta" record of the split copy, or the older single "base" record — written a few seconds
+ * after a load), and no "strawvine:cache-invalid" mark from the sign-out that preceded sign-in,
+ * so the app can open offline.
  */
 export async function waitForDeviceCopy(page: Page) {
   const trusted = () =>
@@ -91,9 +115,11 @@ export async function waitForDeviceCopy(page: Page) {
           req.onsuccess = () => {
             const db = req.result;
             if (!db.objectStoreNames.contains("kv")) return (db.close(), resolve(false));
-            const get = db.transaction("kv").objectStore("kv").get("base");
-            get.onsuccess = () => (db.close(), resolve(get.result != null));
-            get.onerror = () => (db.close(), resolve(false));
+            const store = db.transaction("kv").objectStore("kv");
+            const meta = store.get("b:meta");
+            const legacy = store.get("base");
+            legacy.onsuccess = () => (db.close(), resolve(meta.result != null || legacy.result != null));
+            legacy.onerror = () => (db.close(), resolve(false));
           };
         }),
     );

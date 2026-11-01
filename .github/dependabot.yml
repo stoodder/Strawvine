@@ -5,10 +5,22 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    # Let fresh releases settle (and get yanked if bad) before proposing routine bumps.
+    cooldown:
+      semver-minor-days: 7
+      semver-patch-days: 7
     groups:
       # One PR for the routine minor/patch bumps; majors stay separate.
       minor-and-patch:
         update-types: [minor, patch]
+
+  # The Node base image in the Dockerfile (pinned to an exact version).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: github-actions
     directory: /

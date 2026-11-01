@@ -12,6 +12,9 @@ export function useSyncState(): SyncState {
   return useSyncExternalStore(subscribeSync, getSyncState, getSyncState);
 }
 
+/** Retry / Discard: 32px pills whose tap target reaches 44px tall. */
+const ACTION = "tap relative min-h-8 rounded-full px-2.5 text-xs after:absolute after:inset-x-0 after:-inset-y-1.5 after:content-['']";
+
 type View = { tone: "idle" | "busy" | "warn"; label: string } | null;
 
 function view(s: SyncState, showBusy: boolean): View {
@@ -67,7 +70,8 @@ export function SyncStatus() {
               disabled={v.tone !== "warn" || !s.failed}
               onClick={() => setOpen((o) => !o)}
               aria-expanded={s.failed ? open : undefined}
-              className="label flex min-h-6 items-center gap-2 tracking-[0.12em] disabled:cursor-default"
+              // Looks 24px tall; the tap target reaches 44px (past the pill's padding).
+              className="label relative flex min-h-6 items-center gap-2 tracking-[0.12em] after:absolute after:-inset-x-3 after:-inset-y-2.5 after:content-[''] disabled:cursor-default"
             >
               <span
                 aria-hidden
@@ -80,12 +84,12 @@ export function SyncStatus() {
             </button>
             {open && s.failed > 0 && (
               <span className="flex items-center gap-1">
-                <button type="button" className="tap min-h-8 rounded-full px-2.5 text-xs font-medium text-accent" onClick={retryFailed}>
+                <button type="button" className={clsx(ACTION, "font-medium text-accent")} onClick={retryFailed}>
                   Retry
                 </button>
                 <button
                   type="button"
-                  className="tap min-h-8 rounded-full px-2.5 text-xs text-mute"
+                  className={clsx(ACTION, "text-mute")}
                   onClick={() => {
                     if (window.confirm(`Discard ${s.failed} change${s.failed === 1 ? "" : "s"} the server rejected?`)) discardFailed();
                   }}

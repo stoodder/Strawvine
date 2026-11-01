@@ -115,7 +115,15 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
     case "fuel":
       return {
         value: day.calories !== null ? <Value n={fmt(day.calories)} unit="kcal" /> : null,
-        sub: day.proteinG !== null ? `P ${fmt(day.proteinG)} · C ${fmt(day.carbsG)} · F ${fmt(day.fatG)}` : "Daily totals",
+        sub:
+          day.proteinG !== null ? (
+            <>
+              <span className="whitespace-nowrap">P {fmt(day.proteinG)}</span> ·{" "}
+              <span className="whitespace-nowrap">C {fmt(day.carbsG)}</span> · <span className="whitespace-nowrap">F {fmt(day.fatG)}</span>
+            </>
+          ) : (
+            "Daily totals"
+          ),
       };
     case "steps":
       return {
@@ -155,7 +163,7 @@ function RowText({ item, summary, srState, saved = false }: { item: ChecklistIte
   return (
     <>
       <span className="block min-w-0 flex-1">
-        <span className={clsx("block text-[15px]", item.done ? "text-fg" : "text-fg-2")}>
+        <span className={clsx("block text-[0.9375rem]", item.done ? "text-fg" : "text-fg-2")}>
           {item.label}
           {srState && <span className="sr-only">{item.done ? ", done" : ", not done"}</span>}
           {/* Announced once by the checklist's status region, not from inside the button. */}

@@ -1,8 +1,10 @@
 import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 import type { Session } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
+import { useDockHeight } from "../Dock";
+import { afterLayout, revealAboveDock } from "./reveal";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -88,23 +90,53 @@ export function FinishPanel({
   const [confirming, setConfirming] = useState(false);
   const hintId = useId();
   const unlogged = totalSets - doneSets;
-  const confirmRef = useRef<HTMLDivElement>(null);
-  // Bring the question clear of the floating rest timer.
-  useEffect(() => {
-    if (confirming) confirmRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [confirming]);
+  const dockHeight = useDockHeight();
+  /**
+   * Where focus goes once the next view mounts: the control that was pressed (Finish, Keep
+   * logging, Reopen) is replaced, so without this focus would drop to <body>. Only set by a
+   * press here — opening an already finished session doesn't steal focus or scroll.
+   */
+  const focusNext = useRef<"recap" | "finish" | null>(null);
+  /**
+   * The question card, as it mounts (after the Finish button's exit): bring it clear of the dock
+   * (rest timer, toasts).
+   */
+  const confirmCard = useCallback((el: HTMLDivElement | null) => {
+    if (el) afterLayout(() => revealAboveDock(el, { center: true }));
+  }, []);
+
+  const finish = () => {
+    focusNext.current = "recap";
+    onFinish();
+  };
+  /** The recap's heading: take focus and centre the recap above the dock after a finish. */
+  const recapHeading = (el: HTMLHeadingElement | null) => {
+    if (!el || focusNext.current !== "recap") return;
+    focusNext.current = null;
+    el.focus({ preventScroll: true });
+    afterLayout(() => revealAboveDock(el.closest("[data-recap]"), { center: true }));
+  };
+  const finishButton = (el: HTMLButtonElement | null) => {
+    if (!el || focusNext.current !== "finish") return;
+    focusNext.current = null;
+    el.focus({ preventScroll: true });
+    afterLayout(() => revealAboveDock(el));
+  };
 
   if (session.completedAt) {
     const lines = recapLines(session, exName);
     return (
       <motion.div
+        data-recap=""
         className="flex flex-col items-center text-center"
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, ease: EASE }}
       >
         <DoneMark value={totalSets ? doneSets / totalSets : 1} />
-        <h2 className="label mt-4 text-accent">Session complete</h2>
+        <h2 ref={recapHeading} tabIndex={-1} className="label mt-4 text-accent">
+          Session complete
+        </h2>
         <dl className="mt-4 flex gap-8">
           <div>
             <dt className="label">Sets</dt>
@@ -138,7 +170,14 @@ export function FinishPanel({
             ))}
           </ul>
         )}
-        <button type="button" className="btn-ghost mt-6" onClick={onReopen}>
+        <button
+          type="button"
+          className="btn-ghost mt-6"
+          onClick={() => {
+            focusNext.current = "finish";
+            onReopen();
+          }}
+        >
           Reopen
         </button>
       </motion.div>
@@ -148,10 +187,17 @@ export function FinishPanel({
   if (doneSets === 0)
     return (
       <div className="flex w-full flex-col items-center gap-2">
-        <button type="button" disabled aria-describedby={hintId} className="btn-ghost w-full py-3.5 text-base disabled:opacity-50">
+        <button type="button" disabled aria-describedby={hintId} className="btn-ghost w-full py-3.5 text-base">
           Finish session
         </button>
-        <p id={hintId} className="text-xs text-mute">
+        <p
+          id={hintId}
+          // A disabled Finish can't take focus: drop a pending hand-off rather than firing it later.
+          ref={(el) => {
+            if (el && focusNext.current === "finish") focusNext.current = null;
+          }}
+          className="text-xs text-mute"
+        >
           Log a set to finish.
         </p>
       </div>
@@ -163,10 +209,11 @@ export function FinishPanel({
         {confirming ? (
           <motion.div
             key="confirm"
-            ref={confirmRef}
+            ref={confirmCard}
             role="group"
             aria-labelledby={hintId}
             className="rounded-2xl bg-white/[0.04] p-4"
+            style={{ scrollMarginBottom: dockHeight + 16 }}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
@@ -176,7 +223,15 @@ export function FinishPanel({
               Finish with <span className="num text-fg">{unlogged}</span> {unlogged === 1 ? "set" : "sets"} unlogged?
             </p>
             <div className="mt-3 flex flex-wrap gap-3">
-              <button type="button" className="btn-ghost flex-1 whitespace-nowrap" onClick={() => setConfirming(false)} autoFocus>
+              <button
+                type="button"
+                className="btn-ghost flex-1 whitespace-nowrap"
+                onClick={() => {
+                  focusNext.current = "finish";
+                  setConfirming(false);
+                }}
+                autoFocus
+              >
                 Keep logging
               </button>
               <button
@@ -184,7 +239,7 @@ export function FinishPanel({
                 className="btn-primary flex-1 whitespace-nowrap"
                 onClick={() => {
                   setConfirming(false);
-                  onFinish();
+                  finish();
                 }}
               >
                 Finish
@@ -194,9 +249,10 @@ export function FinishPanel({
         ) : (
           <motion.div key="finish" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
             <button
+              ref={finishButton}
               type="button"
               className="btn-primary w-full py-3.5 text-base"
-              onClick={() => (unlogged > 0 ? setConfirming(true) : onFinish())}
+              onClick={() => (unlogged > 0 ? setConfirming(true) : finish())}
             >
               Finish session
             </button>

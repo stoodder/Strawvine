@@ -20,8 +20,9 @@ interface StripDay {
 
 /**
  * The last seven days of calories eaten against each day's own target (from `targetsFor`, i.e.
- * the engine as of the day before). Under or on target in lime, over in warn; a day without
- * calories or a target is a dim stub. Today is still in progress and says so.
+ * the engine as of the day before). Under or on target in lime; over is neutral up to the target
+ * with the excess in warn; a day without calories or a target is a dim stub. Today is still in
+ * progress and says so.
  */
 export function IntakeStrip({ data, series, today }: { data: AppData; series: ReadonlyArray<EnergyDay>; today: string }) {
   const reduce = useReducedMotion();
@@ -68,8 +69,8 @@ export function IntakeStrip({ data, series, today }: { data: AppData; series: Re
                   <motion.div
                     className={clsx(
                       "absolute inset-x-0 bottom-0 rounded-[4px]",
-                      // Over: the part up to the target stays quiet, the excess above it carries the warn tone.
-                      over ? "bg-warn/25" : "bg-accent",
+                      // Over: the part up to the target stays neutral, the excess above it carries the warn tone.
+                      over ? "bg-fg-2/20" : "bg-accent",
                       isToday && "opacity-60",
                     )}
                     initial={reduce ? false : { height: 0 }}
@@ -90,8 +91,12 @@ export function IntakeStrip({ data, series, today }: { data: AppData; series: Re
                 {d.target !== null && <div className="absolute inset-x-0 h-px bg-fg-2/60" style={{ bottom: `${TARGET_AT * 100}%` }} />}
               </div>
               <div aria-hidden className="mt-1.5 text-center">
-                <div className={clsx("label", isToday ? "text-fg-2" : undefined)}>{weekdayName(d.date, true)}</div>
-                <div className={clsx("num mt-0.5 truncate text-[0.625rem]", over ? "text-warn" : "text-mute")}>
+                <div className={clsx("label", isToday ? "text-fg-2" : undefined)}>
+                  {/* One letter when the columns get too narrow for three. */}
+                  <span className="max-[16rem]:hidden">{weekdayName(d.date, true)}</span>
+                  <span className="hidden max-[16rem]:inline">{weekdayName(d.date, true).slice(0, 1)}</span>
+                </div>
+                <div className={clsx("num mt-0.5 truncate text-2xs", over ? "text-warn" : "text-mute")}>
                   {diff === null ? "—" : compactDiff(diff)}
                 </div>
               </div>

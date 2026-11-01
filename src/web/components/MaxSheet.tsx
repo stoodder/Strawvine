@@ -33,6 +33,20 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
   // The last deleted entry, offered back inline: a toast can't be reached while this sheet is open.
   const [removed, setRemoved] = useState<MaxEntry | null>(null);
   const restoredIds = useRef(new Set<number>());
+  /** Forget what was typed: a half-entered value (or a Correction toggle) must not outlive the sheet. */
+  const resetForm = () => {
+    setText("");
+    setNote("");
+    setCorrection(false);
+  };
+  // A different lift (or the sheet reopening on one) starts from a clean form.
+  const formKey = open ? (exercise?.id ?? null) : null;
+  const [shownKey, setShownKey] = useState(formKey);
+  if (shownKey !== formKey) {
+    setShownKey(formKey);
+    resetForm();
+    setRemoved(null);
+  }
   if (!exercise) return null;
   const entries = data.maxEntries
     .filter((e) => e.exerciseId === exercise.id)
@@ -52,9 +66,7 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
     });
     // Belt and braces: a correction is never a PR moment, whatever the celebration rules say.
     if (isCorrection) markSeen([`max-${saved.id}`]);
-    setText("");
-    setNote("");
-    setCorrection(false);
+    resetForm();
   };
 
   const restore = (e: MaxEntry) => {
@@ -82,6 +94,7 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
       });
     }
     setRemoved(null);
+    resetForm();
     onClose();
   };
 
@@ -169,7 +182,7 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
             <button
               type="button"
               aria-label={`Delete ${fmtLb(e.valueLb)} lb entry from ${formatShortDate(e.date, true)}`}
-              className="tap -mr-2 grid h-11 w-11 shrink-0 place-items-center text-faint hover:text-warn"
+              className="tap -mr-2 grid h-11 w-11 shrink-0 place-items-center text-mute hover:text-warn"
               onClick={() => remove(e)}
             >
               <Trash2 size={14} />

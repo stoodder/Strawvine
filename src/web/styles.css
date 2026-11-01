@@ -1,6 +1,50 @@
 @import "tailwindcss";
-@import "@fontsource-variable/inter";
-@import "@fontsource-variable/jetbrains-mono";
+
+/*
+ * Fonts: only the latin + latin-ext subsets (the packages' index.css also declares Cyrillic,
+ * Greek and Vietnamese, which would all be bundled and precached for nothing).
+ */
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("../../node_modules/@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("../../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191,
+    U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url("../../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-ext-wght-normal.woff2")
+    format("woff2-variations");
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url("../../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191,
+    U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
 
 /*
  * Strawvine — a futuristic training journal.
@@ -44,6 +88,7 @@
   --focus-width: 2px;
   --control-edge: transparent; /* outline on ghost buttons / chips / switches; visible in high contrast */
   --label-size: 0.65625rem; /* 10.5px at default size; scales with the user's font size */
+  --micro-size: 0.625rem; /* text-2xs: axis ticks, scale ends, nav labels (10px) */
 }
 
 /*
@@ -59,12 +104,13 @@
   --color-faint: #959ba6;
   --color-warn: #ff9d82;
   --hairline: rgb(255 255 255 / 0.22);
-  --edge-soft: rgb(255 255 255 / 0.3);
+  --edge-soft: rgb(255 255 255 / 0.38); /* ≥ 3:1 against ink-950 */
   --edge: rgb(255 255 255 / 0.36);
   --edge-focus: var(--color-accent);
   --focus-width: 3px;
-  --control-edge: rgb(255 255 255 / 0.28);
+  --control-edge: rgb(255 255 255 / 0.38); /* ≥ 3:1 against ink-950 */
   --label-size: 0.71875rem; /* 11.5px */
+  --micro-size: 0.6875rem; /* 11px */
 }
 
 @layer base {
@@ -132,6 +178,10 @@
   letter-spacing: 0.16em;
   color: var(--color-mute);
 }
+/* The smallest text (10px; a step larger in high contrast). Decorative-adjacent readouts only. */
+@utility text-2xs {
+  font-size: var(--micro-size);
+}
 @utility num {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum", "cv11";
@@ -193,33 +243,45 @@
   }
 }
 /*
- * Text that edits in place (InlineText): reads as text; a hairline appears on hover and turns
- * lime on focus.
+ * Text that edits in place (InlineText): reads as text over a faint resting hairline (the
+ * "editable" cue, for touch too), which brightens on hover and turns lime on focus. The input is
+ * a 44px-tall target that takes the room of a py-1 line: the extra padding is cancelled by
+ * negative margins, and the hairline is painted 4px under the text rather than at the box edge.
  */
 @utility inline-text {
+  --inline-line: var(--edge-soft);
+  --inline-line-w: 1px;
+  display: block;
   width: 100%;
   min-width: 0;
-  background: transparent;
   border-radius: 0;
+  background: linear-gradient(var(--inline-line), var(--inline-line)) no-repeat;
+  background-size: 100% var(--inline-line-w);
+  /* Without lh support: a plain py-1 line with the hairline at the bottom edge. */
   padding-block: 0.25rem;
-  box-shadow: inset 0 -1px 0 transparent;
-  transition: box-shadow 150ms var(--ease-out-soft);
+  background-position: 0 100%;
+  @supports (height: 1lh) {
+    padding-block: calc((2.75rem - 1lh) / 2);
+    margin-block: calc((2.75rem - 1lh) / -2 + 0.25rem);
+    background-position: 0 calc(100% - (2.75rem - 1lh) / 2 + 0.25rem);
+  }
   text-overflow: ellipsis;
   &::placeholder {
     color: var(--color-faint);
   }
   @media (hover: hover) {
     &:hover {
-      box-shadow: inset 0 -1px 0 var(--edge-soft);
+      --inline-line: var(--edge);
     }
   }
   &:focus,
   &:focus-visible {
     outline: none;
-    box-shadow: inset 0 calc(var(--focus-width) * -1) 0 var(--edge-focus);
+    --inline-line: var(--edge-focus);
+    --inline-line-w: var(--focus-width);
   }
   &[aria-invalid="true"] {
-    box-shadow: inset 0 -1px 0 var(--color-warn);
+    --inline-line: var(--color-warn);
   }
 }
 /* Number inputs that size to their content (falls back to an inline ch width). */
@@ -259,7 +321,7 @@
   }
 }
 @utility btn {
-  @apply tap inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium;
+  @apply tap inline-flex min-h-11 items-center justify-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium;
 }
 @utility btn-primary {
   @apply btn bg-accent text-accent-ink shadow-[0_0_32px_-8px_rgb(183_243_106/0.6)];
@@ -327,6 +389,13 @@
     box-shadow:
       0 0 0 3px var(--color-ink-950),
       0 0 0 calc(3px + var(--focus-width)) var(--edge-focus);
+  }
+}
+/* A wrapper that shows the focus ring for a control inside it (e.g. an invisible native input). */
+@utility focus-ring-within {
+  &:has(:focus-visible) {
+    outline: var(--focus-width) solid var(--edge-focus);
+    outline-offset: 2px;
   }
 }
 @utility scrollbar-none {

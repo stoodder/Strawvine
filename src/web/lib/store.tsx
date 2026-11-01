@@ -38,7 +38,7 @@ import {
   type SyncInfoState,
 } from "./sync";
 
-export { BOOT_KEY, clearCache, queryClient } from "./sync";
+export { BOOT_KEY, clearCache, queryClient, signOut } from "./sync";
 import { BOOT_KEY } from "./sync";
 
 /** Latest cached session for a date (for handlers that run after an await). */
@@ -222,6 +222,10 @@ export function useMarkSeen() {
 
 export type { SyncItem } from "./sync";
 
+/**
+ * Sync details. `pending` excludes rejected changes (`failed`); `unsynced` = both — what a
+ * sign-out would leave behind. Sign-out itself is `signOut({ keepUnsynced })` (exported above).
+ */
 export interface SyncInfo extends SyncInfoState {
   /** Send everything queued now and re-read the server's copy; resolves when done (never rejects). */
   syncNow(): Promise<void>;

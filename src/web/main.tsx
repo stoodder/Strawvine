@@ -5,7 +5,7 @@ import { MotionConfig } from "motion/react";
 import { App, applyContrast, CONTRAST_KEY } from "./App";
 import { DockProvider } from "./components/Dock";
 import { ToastProvider } from "./components/Toast";
-import { BUILD_ID, watchForNewBuild } from "./lib/build";
+import { startServiceWorker, watchForNewBuild } from "./lib/build";
 import { initSync, queryClient } from "./lib/sync";
 import "./styles.css";
 
@@ -38,8 +38,8 @@ void initSync().finally(() => {
 });
 
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
-  // One worker per build: a new build installs a fresh worker with its own precached shell.
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register(`/sw.js?v=${encodeURIComponent(BUILD_ID)}`, { updateViaCache: "none" }).catch(() => {});
-  });
+  // One worker per build: a new build installs a fresh worker with its own precached shell
+  // (registered for the newest build the server has reported; see lib/build.ts).
+  if (document.readyState === "complete") startServiceWorker();
+  else window.addEventListener("load", startServiceWorker);
 }

@@ -3,17 +3,22 @@ import type { Bootstrap, Session, Settings } from "../../shared/schemas";
 import {
   ackEntry,
   addOp,
+  allocTempId,
   applyAcked,
+  dependentsOfFailed,
   discardFailed,
   emptyOutbox,
   ensureIdempotencyKeys,
   failEntry,
+  mergeOutbox,
   nextSendable,
   opLabel,
   overlay,
   pendingDates,
+  pruneAcked,
   request,
   retryFailed,
+  validateOp,
   type OutboxState,
   type OverlayCache,
 } from "./outbox-core";
@@ -214,5 +219,161 @@ describe("sync details", () => {
     expect(opLabel({ kind: "createExercise", tempId: -1, name: "Row", category: "accessory", measure: "reps", tracksMax: false })).toBe(
       "New exercise · Row",
     );
+  });
+});
+
+describe("rejected entries", () => {
+  const day = (patch: Record<string, number>) => ({ kind: "day", date: "2026-01-01", patch }) as const;
+
+  it("never merges a later edit into a failed entry; the later one is still sent", () => {
+    let s = addOp(emptyOutbox(), day({ steps: 999_999 }), null);
+    s = failEntry(s, s.entries[0]!.seq, "too many");
+    s = addOp(s, day({ calories: 5 }), null);
+    expect(s.entries.map((e) => [e.state, e.op])).toEqual([
+      ["failed", day({ steps: 999_999 })],
+      ["pending", day({ calories: 5 })],
+    ]);
+    expect(nextSendable(s.entries)?.op).toEqual(day({ calories: 5 }));
+    // Discard drops only the failed one.
+    s = discardFailed(s);
+    expect(s.entries.map((e) => e.op)).toEqual([day({ calories: 5 })]);
+  });
+
+  it("a newer whole document supersedes a failed one", () => {
+    let s = addOp(emptyOutbox(), { kind: "session", date: "2026-01-01", doc: session("2026-01-01", 1, "a") }, null);
+    s = failEntry(s, s.entries[0]!.seq, "bad");
+    s = addOp(s, { kind: "session", date: "2026-01-01", doc: session("2026-01-01", 1, "b") }, null);
+    expect(s.entries).toHaveLength(1);
+    expect(s.entries[0]).toMatchObject({ state: "pending", op: { doc: { notes: "b" } } });
+  });
+
+  it("names the edits a discard takes with it", () => {
+    let s = addOp(
+      emptyOutbox(),
+      { kind: "createExercise", tempId: -1, name: "Row", category: "accessory", measure: "reps", tracksMax: false },
+      null,
+    );
+    s = addOp(s, { kind: "updateExercise", id: -1, patch: { archived: true } }, null);
+    s = addOp(s, day({ steps: 1 }), null);
+    s = failEntry(s, s.entries[0]!.seq, "bad");
+    expect(dependentsOfFailed(s).map((e) => e.op.kind)).toEqual(["updateExercise"]);
+    expect(discardFailed(s).entries.map((e) => e.op.kind)).toEqual(["day"]);
+  });
+
+  it("validates the limits a workout can hit before queueing", () => {
+    const ex = { exerciseId: 1, measure: "reps", sets: [] };
+    const doc = (exercises: number) =>
+      ({
+        ...session("2026-01-01", 1),
+        label: "",
+        blocks: [{ id: "a", kind: "accessory", exercises: Array(exercises).fill(ex) }],
+      }) as unknown as Session;
+    expect(validateOp({ kind: "session", date: "2026-01-01", doc: doc(6) })).toBeNull();
+    expect(validateOp({ kind: "session", date: "2026-01-01", doc: doc(7) })).toMatch(/superset/);
+    expect(validateOp({ kind: "day", date: "2026-01-01", patch: { steps: 1 } })).toBeNull();
+  });
+});
+
+describe("two windows", () => {
+  it("seqs and temp ids carry the tab number, so concurrent windows never collide", () => {
+    const a = addOp(emptyOutbox(), { kind: "day", date: "2026-01-01", patch: { steps: 1 } }, null, 7);
+    const b = addOp(emptyOutbox(), { kind: "day", date: "2026-01-02", patch: { steps: 2 } }, null, 9);
+    expect(a.entries[0]!.seq).not.toBe(b.entries[0]!.seq);
+    expect(allocTempId(emptyOutbox(), 7)[0]).not.toBe(allocTempId(emptyOutbox(), 9)[0]);
+    expect(allocTempId(emptyOutbox(), 7)[0]).toBeLessThan(0);
+  });
+
+  it("merging keeps both windows' edits, an ack over a pending copy, and honours removals", () => {
+    const start = addOp(emptyOutbox(), { kind: "day", date: "2026-01-01", patch: { steps: 1 } }, null, 1);
+    // Both windows saw `start`; then each changes it without seeing the other.
+    const a = addOp(ackEntry(start, start.entries[0]!.seq, { date: "2026-01-01", steps: 1 }), { kind: "settings", settings }, null, 1);
+    const b = addOp(start, { kind: "day", date: "2026-01-03", patch: { steps: 3 } }, null, 2);
+    const m = mergeOutbox(a, b);
+    expect(m.entries.map((e) => [e.op.kind, e.state])).toEqual([
+      ["day", "acked"],
+      ["settings", "pending"],
+      ["day", "pending"],
+    ]);
+    expect(mergeOutbox(b, a).entries.map((e) => e.seq)).toEqual(m.entries.map((e) => e.seq));
+    // A prune in one window isn't undone by the other's older copy.
+    const pruned = pruneAcked(m, new Set([m.entries[0]!.seq]));
+    expect(mergeOutbox(pruned, a).entries).toHaveLength(2);
+    // Nothing new: same object back.
+    expect(mergeOutbox(m, JSON.parse(JSON.stringify(m)) as OutboxState)).toBe(m);
+  });
+
+  it("a sign-out reset (newer epoch) replaces the older generation", () => {
+    const old = addOp(emptyOutbox(), { kind: "day", date: "2026-01-01", patch: { steps: 1 } }, null, 1);
+    const reset: OutboxState = { ...emptyOutbox(), epoch: 5 };
+    expect(mergeOutbox(old, reset).entries).toEqual([]);
+    expect(mergeOutbox(reset, old).entries).toEqual([]);
+  });
+});
+
+describe("identity", () => {
+  it("an ack that confirms what's shown keeps the displayed arrays", () => {
+    const b0 = { ...boot(), days: [{ date: "2026-01-01", steps: 1 } as Bootstrap["days"][number]] };
+    const cache: OverlayCache = {};
+    let s = addOp(emptyOutbox(), { kind: "day", date: "2026-01-01", patch: { steps: 2 } }, null);
+    const shown = overlay(b0, s.entries, cache);
+    const result = { ...shown.days[0]! };
+    s = ackEntry(s, s.entries[0]!.seq, result);
+    const b1 = applyAcked(b0, s.entries);
+    expect(b1.days).not.toBe(b0.days);
+    const after = overlay(b1, s.entries, cache, shown);
+    expect(after).toBe(shown); // nothing recomputes
+    // And re-applying the same result to a base that has it changes nothing.
+    expect(applyAcked(b1, s.entries)).toBe(b1);
+  });
+
+  it("recomputes when a queued op is rewritten in place (temp id remapped), not keyed on seqs", () => {
+    const cache: OverlayCache = {};
+    let s = addOp(
+      emptyOutbox(),
+      { kind: "addMax", tempId: -1, exerciseId: 1, date: "2026-01-01", valueLb: 100, source: "amrap", note: null, createdAt: "" },
+      null,
+    );
+    s = addOp(s, { kind: "seen", keys: ["max--1"] }, null);
+    const shown = overlay(boot(), s.entries, cache);
+    expect(shown.seenAchievements).toEqual(["max--1"]);
+    s = ackEntry(s, s.entries[0]!.seq, {
+      id: 7,
+      exerciseId: 1,
+      date: "2026-01-01",
+      valueLb: 100,
+      source: "amrap",
+      note: null,
+      createdAt: "x",
+    });
+    const b1 = applyAcked(boot(), s.entries);
+    expect(overlay(b1, s.entries, cache, shown).seenAchievements).toEqual(["max-7"]);
+  });
+
+  it("sends createdAt with a queued max", () => {
+    const op = {
+      kind: "addMax",
+      tempId: -1,
+      exerciseId: 1,
+      date: "2026-01-01",
+      valueLb: 100,
+      source: "manual",
+      note: null,
+      createdAt: "2026-01-01T10:00:00.000Z",
+    } as const;
+    expect(request(op).body).toMatchObject({ createdAt: "2026-01-01T10:00:00.000Z" });
+  });
+});
+
+describe("a rejected edit under a newer one", () => {
+  it("doesn't cover a field a later (even acked) edit set", () => {
+    const b0 = { ...boot(), days: [{ date: "2026-01-01", journal: "old", steps: 1 } as unknown as Bootstrap["days"][number]] };
+    let s = addOp(emptyOutbox(), { kind: "day", date: "2026-01-01", patch: { journal: "rejected", steps: 99 } }, null);
+    s = failEntry(s, s.entries[0]!.seq, "bad");
+    s = addOp(s, { kind: "day", date: "2026-01-01", patch: { journal: "later" } }, null);
+    s = ackEntry(s, s.entries[1]!.seq, { date: "2026-01-01", journal: "later", steps: 1 });
+    const cache: OverlayCache = {};
+    const shown = overlay(applyAcked(b0, s.entries), s.entries, cache);
+    expect(shown.days[0]).toMatchObject({ journal: "later", steps: 99 });
+    expect(overlay(applyAcked(b0, s.entries), s.entries, cache, shown)).toBe(shown);
   });
 });

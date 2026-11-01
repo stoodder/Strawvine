@@ -140,7 +140,7 @@ export function SleepField({ value, onCommit }: { value: number | null; onCommit
           id={hintId}
           aria-live="polite"
           className={clsx(
-            "num absolute top-full left-0 mt-1 text-[11px] whitespace-nowrap",
+            "num absolute top-full left-0 mt-1 text-[0.6875rem] whitespace-nowrap",
             parsed === undefined ? "text-warn" : "text-mute",
           )}
         >

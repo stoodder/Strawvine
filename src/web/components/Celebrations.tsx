@@ -17,19 +17,20 @@ const TIER_LABEL: Record<Achievement["tier"], string> = {
 /** How often to re-check whether the moment is right, and how many calm checks in a row it takes. */
 const CHECK_MS = 500;
 const CALM_CHECKS = 2;
-/** An open checklist editor holds celebrations while the person is still working in it. */
-const EDITOR_IDLE_MS = 8000;
 /** Taps that land in the first instant of the overlay were meant for what was underneath. */
 const ARM_MS = 450;
 
-/** True while showing an overlay would interrupt data entry. */
-function isBusy(lastInteraction: number): boolean {
+/**
+ * True while showing an overlay would interrupt data entry. An expanded checklist editor
+ * (`data-celebration-hold`) holds celebrations for as long as it stays open — the moment comes
+ * when it collapses or the person leaves the screen, not after some idle time mid-entry.
+ */
+function isBusy(): boolean {
   if (document.visibilityState !== "visible") return true;
   const el = document.activeElement as HTMLElement | null;
   if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return true;
   if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return true;
-  if (document.querySelector("[data-celebration-hold]") && Date.now() - lastInteraction < EDITOR_IDLE_MS) return true;
-  return false;
+  return !!document.querySelector("[data-celebration-hold]");
 }
 
 /**
@@ -66,20 +67,7 @@ export function Celebrations() {
 
   // Wait for a calm moment. Once showing, stay up until the queue is through.
   const [ready, setReady] = useState(false);
-  const lastInteraction = useRef(0);
   const returnTo = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    const mark = () => (lastInteraction.current = Date.now());
-    const opts = { capture: true, passive: true } as const;
-    document.addEventListener("pointerdown", mark, opts);
-    document.addEventListener("keydown", mark, opts);
-    document.addEventListener("input", mark, opts);
-    return () => {
-      document.removeEventListener("pointerdown", mark, opts);
-      document.removeEventListener("keydown", mark, opts);
-      document.removeEventListener("input", mark, opts);
-    };
-  }, []);
   useEffect(() => {
     if (!current) {
       setReady(false);
@@ -88,7 +76,7 @@ export function Celebrations() {
     if (ready) return;
     let calm = 0;
     const id = window.setInterval(() => {
-      calm = isBusy(lastInteraction.current) ? 0 : calm + 1;
+      calm = isBusy() ? 0 : calm + 1;
       if (calm >= CALM_CHECKS) {
         // Remember where focus was (the overlay's button takes it on mount) to hand it back.
         returnTo.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -236,7 +224,7 @@ export function Celebrations() {
                   e.stopPropagation();
                   dismiss();
                 }}
-                className="label mt-8 min-h-11 rounded-full px-5 text-mute focus-visible:outline-mute"
+                className="label mt-8 min-h-11 rounded-full px-5 text-mute"
               >
                 Continue{more > 0 ? ` · ${more} more` : ""}
               </button>

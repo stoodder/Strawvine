@@ -1,23 +1,35 @@
 name: CI
 
+# Pushes to the main branches and Claude's work branches, plus pull requests — a branch with an
+# open PR isn't built twice for every push.
 on:
   push:
+    branches: [main, master, "claude/**"]
   pull_request:
+  schedule:
+    # Weekly dependency audit (see the `audit` job), independent of code changes.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
+# Actions are pinned to major versions. For stricter supply-chain hygiene pin each to a full
+# commit SHA (with the version in a comment) — Dependabot's github-actions updates keep SHAs current.
+
 jobs:
   check:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
       postgres:
-        image: postgres:16
+        # Docker Hub's library image via its public ECR mirror (no Docker Hub pull limits).
+        image: public.ecr.aws/docker/library/postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_HOST_AUTH_METHOD: trust
@@ -48,7 +60,16 @@ jobs:
         run: npm run typecheck
 
       - name: Style lint
-        run: npm run check:style
+        run: npm run check:style -- --strict
+
+      - name: Migrations match the schema (drizzle drift)
+        run: |
+          npx drizzle-kit generate --name drift-check
+          if [ -n "$(git status --porcelain drizzle/)" ]; then
+            echo "::error::src/server/db/schema.ts changed without a migration. Run 'npm run db:generate' and commit drizzle/."
+            git status --porcelain drizzle/
+            exit 1
+          fi
 
       - name: Unit, API and component tests
         run: npm test
@@ -56,11 +77,20 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install Chromium for Playwright
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium's system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
 
       - name: End-to-end tests
         run: npm run e2e
@@ -77,7 +107,38 @@ jobs:
             e2e/.results
           retention-days: 7
 
+  # A new advisory in some dependency shouldn't fail an unrelated change: on pushes and PRs the
+  # audit reports (job summary + warning) without blocking; the weekly scheduled run fails loudly.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ github.event_name != 'schedule' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Audit production dependencies
+        run: |
+          set +e
+          npm audit --omit=dev --audit-level=high > audit.txt 2>&1
+          status=$?
+          {
+            echo "### npm audit (production dependencies)"
+            echo '```'
+            tail -n 40 audit.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ $status -ne 0 ]; then
+            echo "::warning::npm audit found high-severity advisories in production dependencies (see the job summary)."
+          fi
+          exit $status
+
   docker:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

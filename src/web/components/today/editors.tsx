@@ -1,12 +1,14 @@
 import clsx from "clsx";
 import { ClipboardPaste } from "lucide-react";
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { benchmarkBest, benchmarkNames, isBetterScore, normalizeBenchmark, parseScore, type ParsedScore } from "../../../shared/benchmarks";
 import { formatShortDate } from "../../../shared/dates";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
 import { useData } from "../../lib/store";
+import { useToast } from "../Toast";
 import { BoxNumber, DotScale, NumberInput } from "../ui";
+import { useFocusAfter } from "../useFocusAfter";
 import { JournalText } from "../TextArea";
 import { SleepField, TextField } from "./fields";
 import { filledCount, parseNutrition } from "./parseNutrition";
@@ -80,6 +82,30 @@ export function FuelEditor({ day, patch }: EditorProps) {
   const [showMicros, setShowMicros] = useState(!!day.micros && Object.keys(day.micros).length > 0);
   // Totals from a meal app, waiting for one-tap confirm.
   const [paste, setPaste] = useState<PasteState | null>(null);
+  const toast = useToast();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const focusAfter = useFocusAfter();
+  // The Paste button unmounts while the panel is open: when the panel closes, focus goes back to
+  // it (or to Calories, should it not be there).
+  const closePaste = () => {
+    setPaste(null);
+    focusAfter(
+      () =>
+        rootRef.current?.querySelector<HTMLElement>("[data-paste-trigger]") ??
+        rootRef.current?.querySelector<HTMLElement>('input[aria-label="Calories"]') ??
+        null,
+    );
+  };
+  const applyPaste = (p: DayLogPatch) => {
+    // What the paste overwrites, so it can be put back.
+    const before: DayLogPatch = {};
+    for (const k of ["calories", "proteinG", "carbsG", "fatG"] as const) if (k in p) before[k] = day[k];
+    const changed = (Object.keys(before) as Array<keyof typeof before>).some((k) => before[k] !== p[k]);
+    patch(p);
+    closePaste();
+    if (changed && Object.values(before).some((v) => v !== null))
+      toast.show({ message: "Totals replaced", action: { label: "Undo", onAction: () => patch(before) } });
+  };
 
   const openPaste = async () => {
     const text = await readClipboard();
@@ -89,6 +115,7 @@ export function FuelEditor({ day, patch }: EditorProps) {
 
   return (
     <div
+      ref={rootRef}
       className="space-y-5"
       // Pasting several numbers into any Fuel field ("2140 212 150 70") offers them all at once.
       onPasteCapture={(e) => {
@@ -113,8 +140,10 @@ export function FuelEditor({ day, patch }: EditorProps) {
         {!paste && (
           <button
             type="button"
+            data-paste-trigger
             aria-label="Paste totals from a meal app"
-            className="label hit ml-auto inline-flex items-center gap-1.5 self-center text-mute"
+            // 44px target; looks like the label it was.
+            className="label -mr-2 ml-auto inline-flex min-h-11 items-center gap-1.5 self-center px-2 text-mute"
             onClick={() => void openPaste()}
           >
             <ClipboardPaste size={13} aria-hidden />
@@ -125,12 +154,10 @@ export function FuelEditor({ day, patch }: EditorProps) {
       {paste && (
         <PasteTotals
           state={paste}
+          current={day}
           onText={(text) => setPaste({ text, manual: true })}
-          onUse={(p) => {
-            patch(p);
-            setPaste(null);
-          }}
-          onClose={() => setPaste(null)}
+          onUse={applyPaste}
+          onClose={closePaste}
         />
       )}
       {!paste && fromMacros !== null && fromMacros !== day.calories && (
@@ -163,7 +190,7 @@ export function FuelEditor({ day, patch }: EditorProps) {
       {showMicros ? (
         <Micros micros={day.micros} onChange={(m) => patch({ micros: m })} />
       ) : (
-        <button type="button" className="label -my-2 py-2 text-mute" onClick={() => setShowMicros(true)}>
+        <button type="button" className="label -my-3 flex min-h-11 items-center text-mute" onClick={() => setShowMicros(true)}>
           + Micronutrients
         </button>
       )}

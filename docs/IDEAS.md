@@ -1,56 +1,66 @@
 # Ideas & follow-ups
 
-Collected from the adversarial reviews (security, design, UX, accessibility, reliability) and the fix passes.
-Nothing here is required for daily use; it's a menu to pick from. Rough priority within each group.
+Collected from two rounds of adversarial reviews (security, data integrity, UX, design/accessibility,
+performance/ops/CI) and the implementation passes. Nothing here is required for daily use; it's a menu.
+Rough priority within each group. Items already built have been removed.
 
 ## Data & sync
 
-- **Idempotent creates.** Offline-created exercises/maxes can duplicate if a POST times out after the server applied
-  it. Accept an `Idempotency-Key` (or client-generated UUID ids, which would also remove temp-id remapping).
-- **Conflict safety across devices.** Sessions are whole documents (last write wins). Add `updatedAt`/If-Match.
-- **Incremental sync** (`/bootstrap?since=`) so refetches stay small as years of data accumulate; a per-table version
-  so unchanged data can 304 without a DB read.
-- Call `navigator.storage.persist()` after onboarding so iOS is less likely to evict the offline copy.
-- Settings → "Last synced", list of unsynced changes, "Sync now".
-- Bump the session epoch after a database restore (a restore rolls revocations back).
+- **Version-checked whole-document saves.** Sessions and settings are saved whole; a stale window that saves before
+  its revalidation returns can still overwrite. Add `If-Match` (revision / `updatedAt`) → 409 → reload and re-apply.
+- **Writes return the new dataset version** so the client's stored ETag stays current (today, returning to the app
+  after your own writes costs one full download instead of a 304).
+- **Incremental sync** (`/bootstrap?since=`, per-collection deltas) for multi-year datasets.
+- Client-generated UUIDs for rows (removes temp-id remapping and dependency holds).
+- Idempotency: also verify the body hash on replay from older clients; move the login limiter state to Postgres so it
+  holds across dynos.
+- A "Couldn't save" banner in Settings → Sync for edits refused at queue time (today: a toast).
+- Cross-window sender lock in a SharedWorker where available.
 
 ## Training
 
-- **Real "skip today"** for an accessory without dropping it from next week's template (needs a schema field).
-- **Preview future sessions** read-only (Train currently stops at today).
-- Per-exercise rest targets (e.g. main lift 180 s, accessories 90 s); next set's plates inside the rest pill.
-- "Log all remaining sets" for an exercise / superset round; interleaved superset order (A1, B1, A2, B2).
-- Accessory progression hints ("hit all reps last week → +5").
-- Benchmark metcon library with autocomplete, previous best and PR moments; AMRAP rep PRs (both promised in SPEC §5).
-- An explicit "correction" source for max edits so fixing an old typo days later isn't celebrated.
-- A shared `planMatches(session, program)` helper so Today and Train agree on "plan changed".
+- "Do this session today": swap a previewed day into today (travel / rest-day Sunday).
+- "Skip main lift today" (injury) without unlogged-set prompts.
+- Per-exercise rest targets; next set's plates inside the rest pill.
+- Interleaved superset order (A1, B1, A2, B2); swipe-to-skip on accessory rows.
+- Progression hint: "dismiss for today", a "hold" hint after missed reps, pyramid-aware suggestions
+  (today it suggests the heaviest load + increment for every open set).
+- Preview: projected AMRAP-driven max changes; a configurable horizon; link from Today's next session.
+- A per-benchmark history sheet; "CAP+12" time-capped scores; kg/lb preference.
+- Explicit choice whether a correction should hide the PR earned by the typo it fixes.
 
 ## Daily logging
 
-- Paste nutrition totals from the meal app in one go (e.g. "2140 212 150 70").
-- Evening steps reminder (web push requires the app installed to the home screen on iOS).
-- Date picker on Today/Train headers; tap a heatmap day to open it.
-- Small "saved" tick on inline fields; per-row pending indicator when the outbox holds that day's writes.
+- Settings-level aliases for app-specific nutrition labels; optional one-decimal macros.
+- Heatmap: long-press preview before navigating, month labels.
+- Evening steps reminder (web push; iOS requires the installed app).
+- Bigger / tappable pending-sync indicator on Today's date ("tap to sync now").
 
 ## Motivation & feedback
 
-- Session recap and weekly check-in as share-worthy moments; a lighter "day closed" ring sweep on Today.
+- Shareable session recap and weekly check-in (best hint applied, skipped exercises, vs. last same weekday).
+- Day-closed sweep also when returning to Today after finishing a lift elsewhere; optional soft sound.
 - Streak protection tied to deload/rest days.
 - Optional AI-written weekly check-in on top of the rule-based signals.
 
 ## Design & accessibility
 
-- High-contrast "outdoor" mode for gym glare (thicker chart lines, brighter muted text); Dynamic Type support.
-- Charts: "view as table" disclosure, min/max axis labels, 7-day intake-vs-target strip.
-- `InlineText` primitive for inline renames; `Label`/`Value` primitives to stop type-scale drift.
-- Lint rule against `text-faint` on information-bearing text and px font sizes.
-- Rest timer and toasts can stack over the bottom of the page; give them a shared bottom "dock".
+- Settings jump list (the page is long at 320 px); rest settings shown as m:ss.
+- Downsample the bodyweight dots to weekly points for ranges over ~1 year.
+- Profile IntakeStrip (`targetsFor` ×7 per render) and the remaining ~150 ms model build on 10-year data.
+- `useFocusAfter` that retries a few frames and skips inert targets (Train uses a local `focusWhenReady`).
+- `DateJump` optional `max` prop (Train passes today + 14 as `today`); dock top edge in context for scroll helpers.
+- Small leftovers: focus after the skip toast's Undo; rest pill widens slightly when "/3:00" appears.
+- Lint: flag `text-mute` on tinted surfaces; arbitrary rem sizes outside the type scale; `bg-white/[…]` bypassing tokens.
 
 ## Engineering
 
-- CI: `npm run typecheck && npm test && npm run build`, Docker build, `npm audit --omit=dev`, Dependabot/Renovate.
-- Promote the Playwright walkthroughs (onboarding, logging, training, offline/sync, celebrations) into `e2e/` in CI.
-- Component tests for `Sheet` (focus trap/inert/restore), `Stepper` editable, `DotScale` keys.
-- Drop the remaining client zod imports (Onboarding `dayLogFields`) and consider `LazyMotion` (~88 KB + ~60 KB).
-- Code-split Progress/Goals/Settings/Onboarding; `Server-Timing` and simple client performance metrics.
-- Optional passkey / PIN lock before showing the offline copy; login alerts.
+- Pin GitHub Actions to commit SHAs (Dependabot keeps them current); `lock_timeout` on migration statements.
+- A periodic "restore the export into a fresh database" check; Server-Timing headers on `/api/bootstrap`.
+- e2e: paste → Undo, the sign-out question, celebration hold, Settings renames, high-contrast persistence,
+  a toast's Undo while a sheet is open, axe checks per sheet, `activeElement !== body` after key actions,
+  `scrollWidth <= clientWidth` per screen at 195 px.
+- `LazyMotion` (`m.*` everywhere) for ~60–100 KB; name the shared vendor chunk.
+- Optional passkey / PIN app lock before showing cached data; "forget this device"; login alerts;
+  zxcvbn-style check for `APP_PASSWORD`.
+- CSP: trial dropping `style-src 'unsafe-inline'` with Report-Only.

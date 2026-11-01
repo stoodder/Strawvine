@@ -1,10 +1,14 @@
+import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { platesPerSide } from "../../../shared/program";
 import type { Measure, SetEntry } from "../../../shared/schemas";
 import { celebrate, success } from "../../lib/haptics";
 import { Sheet, Stepper } from "../ui";
+
+/** Ref callback: focus an element as it mounts (after the control that was pressed went away). */
+const focusOnMount = (el: HTMLElement | null) => el?.focus({ preventScroll: true });
 
 export function measureUnit(m: Measure): string {
   return m === "seconds" ? "s" : m === "meters" ? "m" : "";
@@ -25,13 +29,13 @@ export function Plates({ weight }: { weight: number | null }) {
       {plates.map((p, i) => (
         <span
           key={i}
-          className="num grid place-items-center rounded-[5px] bg-white/[0.06] text-[10px] text-fg-2"
+          className="num grid place-items-center rounded-[5px] bg-white/[0.06] text-[0.625rem] text-fg-2"
           style={{ height: 14 + Math.min(p, 45) * 0.45, minWidth: 22, padding: "0 4px" }}
         >
           {p}
         </span>
       ))}
-      {remainder > 0 && <span className="text-[10px] text-warn">+{remainder}</span>}
+      {remainder > 0 && <span className="text-[0.625rem] text-warn">+{remainder}</span>}
     </div>
   );
 }
@@ -148,8 +152,16 @@ export function SetEditSheet({
   );
 }
 
+/** A rep PR on this AMRAP (more reps than any earlier AMRAP of the lift at this load or heavier). */
+export interface AmrapRepPr {
+  reps: number;
+  weightLb: number;
+  previousReps: number;
+}
+
 /**
- * The AMRAP moment: count reps big, then — if the target was beaten — offer the max bump.
+ * The AMRAP moment: count reps big, then — if the target was beaten — offer the max bump. A rep
+ * PR is shown on the same result screen (one celebration per AMRAP, not two).
  */
 export function AmrapSheet({
   open,
@@ -169,13 +181,18 @@ export function AmrapSheet({
   currentMaxLb: number | null;
   lbPerExtraRep: number;
   progressionEnabled: boolean;
-  onLog: (reps: number, weight: number | null) => void;
+  /** Logs the set; returns the rep PR it sets, if any (shown here, so it isn't celebrated again). */
+  onLog: (reps: number, weight: number | null) => AmrapRepPr | null;
   onApply: (gainLb: number, reps: number) => Promise<void>;
 }) {
   const [reps, setReps] = useState(0);
   const [weight, setWeight] = useState(0);
   const [phase, setPhase] = useState<"count" | "result">("count");
+  const resultId = useId();
   const [busy, setBusy] = useState(false);
+  const [repPr, setRepPr] = useState<AmrapRepPr | null>(null);
+  // Whether the result offers the max bump (frozen: logging updates `set`).
+  const [offerGain, setOfferGain] = useState(false);
   // The max before the bump, frozen for the result: Apply updates currentMaxLb while pending.
   const [maxBefore, setMaxBefore] = useState<number | null>(null);
   // Reset only when the sheet opens for a set — logging reps updates `set` and must not
@@ -187,6 +204,8 @@ export function AmrapSheet({
       setWeight(set.weight ?? set.targetWeight ?? 0);
       setPhase("count");
       setBusy(false);
+      setRepPr(null);
+      setOfferGain(false);
       setMaxBefore(currentMaxLb);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -232,10 +251,13 @@ export function AmrapSheet({
               type="button"
               className="btn-primary mt-6 w-full py-3.5 text-base"
               onClick={() => {
-                onLog(reps, weight || null);
-                if (gain > 0 && !alreadyApplied) {
+                const pr = onLog(reps, weight || null);
+                const bump = gain > 0 && !alreadyApplied;
+                if (bump || pr) {
                   celebrate();
                   setMaxBefore(currentMaxLb);
+                  setRepPr(pr);
+                  setOfferGain(bump);
                   setPhase("result");
                 } else {
                   success();
@@ -249,46 +271,72 @@ export function AmrapSheet({
         ) : (
           <motion.div
             key="result"
+            role="status"
+            aria-labelledby={resultId}
             initial={{ opacity: 0, scale: 0.96 }}
             animate={{ opacity: 1, scale: 1 }}
             className="flex flex-col items-center pb-2 text-center"
           >
-            <div className="label text-gold">Target beaten</div>
+            {/* Focus lands here: the Log button the person pressed is gone. */}
+            <h3 id={resultId} ref={focusOnMount} tabIndex={-1} className="label text-gold">
+              {offerGain ? "Target beaten" : "Rep PR"}
+            </h3>
             <motion.div
               className="glow-gold num mt-6 text-7xl font-light text-gold"
               initial={{ y: 10, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
               transition={{ type: "spring", stiffness: 300, damping: 20, delay: 0.1 }}
             >
-              +{gain} lb
+              {offerGain ? (
+                `+${gain} lb`
+              ) : (
+                <>
+                  {repPr?.reps} <span className="text-2xl">reps</span>
+                </>
+              )}
             </motion.div>
-            {maxBefore !== null && (
+            {offerGain && maxBefore !== null && (
               <div className="mt-4 text-sm text-fg-2">
                 {exerciseName} max <span className="num">{maxBefore}</span> → <span className="num text-gold">{maxBefore + gain}</span>
               </div>
             )}
-            <div className="mt-10 flex w-full gap-3">
-              <button type="button" className="btn-ghost flex-1" onClick={onClose}>
-                Not now
+            {repPr && (
+              <div className={clsx("text-sm", offerGain ? "glow-gold mt-2 text-gold" : "mt-4 text-fg-2")}>
+                {offerGain ? "Rep PR — " : `${exerciseName} · `}
+                <span className="num">
+                  {repPr.reps} @ {repPr.weightLb}
+                </span>
+                , best was <span className="num">{repPr.previousReps}</span>
+              </div>
+            )}
+            {offerGain ? (
+              <div className="mt-10 flex w-full gap-3">
+                <button type="button" className="btn-ghost flex-1" onClick={onClose}>
+                  Not now
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  className="btn flex-1 bg-gold font-medium text-ink-950 shadow-[0_0_32px_-8px_rgb(244_184_96/0.7)]"
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await onApply(gain, reps);
+                      success();
+                      onClose();
+                    } catch {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Apply
+                </button>
+              </div>
+            ) : (
+              <button type="button" className="btn-ghost mt-10 w-full" onClick={onClose}>
+                Done
               </button>
-              <button
-                type="button"
-                disabled={busy}
-                className="btn flex-1 bg-gold font-medium text-ink-950 shadow-[0_0_32px_-8px_rgb(244_184_96/0.7)]"
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await onApply(gain, reps);
-                    success();
-                    onClose();
-                  } catch {
-                    setBusy(false);
-                  }
-                }}
-              >
-                Apply
-              </button>
-            </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>

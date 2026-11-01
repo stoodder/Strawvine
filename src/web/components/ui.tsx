@@ -33,10 +33,11 @@ export function Section({
 }) {
   return (
     <section className={clsx("mt-10", className)}>
-      <div className="mb-4 flex items-center gap-3">
+      {/* When the row runs out of room (narrow screens, zoom), `right` wraps under the label, right-aligned. */}
+      <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
         <h2 className="label shrink-0">{label}</h2>
-        <div className="rule flex-1" />
-        {right}
+        <div className="rule min-w-4 flex-1" />
+        {right && <div className="ml-auto flex shrink-0 items-center">{right}</div>}
       </div>
       {children}
     </section>
@@ -71,6 +72,8 @@ export function Stat({
         )}
       >
         {value}
+        {/* The unit may drop to its own line when there's no room (zoom), instead of overflowing. */}
+        {unit && <wbr />}
         {unit && <span className="ml-1 text-[max(0.45em,0.6875rem)] font-normal tracking-normal text-mute">{unit}</span>}
       </div>
       {sub && <div className="mt-1.5 text-xs text-mute">{sub}</div>}
@@ -585,7 +588,7 @@ export function DotScale({
         })}
       </div>
       {(lowLabel || highLabel) && (
-        <div className="mt-1 flex w-[200px] justify-between text-[0.625rem] text-mute">
+        <div className="mt-1 flex w-[200px] justify-between text-2xs text-mute">
           <span>{lowLabel}</span>
           <span>{highLabel}</span>
         </div>
@@ -826,8 +829,9 @@ export function Field({
   }
   return (
     <div className="py-3">
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0">
+      {/* The control wraps under the label (right-aligned) when both don't fit — e.g. at 200% zoom. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0 flex-[1_1_6rem]">
           <div id={ids.labelId} className="text-sm text-fg-2">
             {label}
           </div>
@@ -837,7 +841,7 @@ export function Field({
             </div>
           )}
         </div>
-        <div className="shrink-0">
+        <div className="ml-auto max-w-full shrink-0">
           <FieldContext.Provider value={ids}>{control}</FieldContext.Provider>
         </div>
       </div>

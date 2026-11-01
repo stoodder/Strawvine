@@ -48,9 +48,7 @@ export function BottomNav() {
               )}
               <Icon size={18} aria-hidden strokeWidth={active ? 2.2 : 1.8} className={clsx("relative shrink-0", active && "text-accent")} />
               {/* rem so it follows the user's font size; truncates (or hides, when very narrow) instead of overflowing. */}
-              <span className="relative max-w-full truncate px-0.5 text-[0.625rem] font-medium tracking-wide max-[16rem]:sr-only">
-                {t.label}
-              </span>
+              <span className="relative max-w-full truncate px-0.5 text-2xs font-medium tracking-wide max-[16rem]:sr-only">{t.label}</span>
             </NavLink>
           );
         })}

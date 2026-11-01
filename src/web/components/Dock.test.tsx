@@ -26,6 +26,8 @@ describe("Dock", () => {
     // Portaled outside #root, into <body>.
     expect(document.getElementById("root")!.contains(stack())).toBe(false);
     expect(stack().textContent).toBe("syncresttoast");
+    // A landmark, so its toasts / timer / sync pill can be found outside the app's own regions.
+    expect(screen.getByRole("region", { name: "Notifications" })).toBe(stack());
   });
 
   it("keeps mount order for equal priorities and reorders when items come and go", () => {

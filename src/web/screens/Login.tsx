@@ -1,11 +1,51 @@
 import { motion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowRight } from "lucide-react";
 import { api } from "../lib/api";
 import { Logo } from "../components/Logo";
 import { useTitle } from "../components/useTitle";
 
+const OFFLINE_KEY = "sv-signed-out-offline";
+const OFFLINE_EVENT = "strawvine:signed-out-offline";
+
+/**
+ * Settings calls this when a sign-out couldn't reach the server (the device is signed out; the
+ * server side finishes on the next contact). The sign-in screen is usually already showing by
+ * then, so it hears the event; a sign-in screen mounted later reads the session flag.
+ */
+export function noteOfflineSignOut() {
+  try {
+    sessionStorage.setItem(OFFLINE_KEY, "1");
+  } catch {
+    /* storage blocked: the event below still reaches a mounted sign-in screen */
+  }
+  window.dispatchEvent(new Event(OFFLINE_EVENT));
+}
+
+function offlineSignOut(): boolean {
+  try {
+    return sessionStorage.getItem(OFFLINE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function Login({ onSuccess }: { onSuccess: () => void }) {
+  const [offlineNotice, setOfflineNotice] = useState(offlineSignOut);
+  useEffect(() => {
+    const on = () => setOfflineNotice(true);
+    window.addEventListener(OFFLINE_EVENT, on);
+    return () => window.removeEventListener(OFFLINE_EVENT, on);
+  }, []);
+  useEffect(() => {
+    // Said once: a later visit to the sign-in screen shouldn't repeat it.
+    if (!offlineNotice) return;
+    try {
+      sessionStorage.removeItem(OFFLINE_KEY);
+    } catch {
+      /* ignore */
+    }
+  }, [offlineNotice]);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -31,6 +71,10 @@ export function Login({ onSuccess }: { onSuccess: () => void }) {
         <Logo size={40} />
         <h1 className="mt-8 text-4xl font-light tracking-tight">Strawvine</h1>
         <p className="mt-2 text-sm text-mute">A journal for pushing the boundaries.</p>
+        {/* Always present, so the notice is announced when it arrives after the screen. */}
+        <p role="status" className={offlineNotice ? "mt-6 text-sm leading-relaxed text-fg-2" : "sr-only"}>
+          {offlineNotice ? "Signed out on this device. We'll finish signing out on the server when you're back online." : ""}
+        </p>
         <form onSubmit={submit} className="mt-14">
           <label className="label" htmlFor="pw">
             Password

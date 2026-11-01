@@ -1,20 +1,37 @@
 // Strawvine service worker: offline app shell, one cache per build.
 //
-// - Registered as /sw.js?v=<build id>; a new build means a new worker with its own cache, and
-//   older caches are deleted when it activates.
+// - Registered as /sw.js?v=<build id>; a new build means a new worker with its own cache. The
+//   page registers the new build's worker in the background as soon as an API response says a
+//   newer build is live (see lib/build.ts), so the next launch opens the new version.
 // - Install precaches the shell and every built asset listed in /build.json (emitted by the
-//   Vite build), so the app opens offline right after the first visit.
-// - Navigations race the network against a short timeout and fall back to this build's
-//   shell; the cached shell is only ever this build's (never overwritten at runtime), so it
-//   always matches the assets cached next to it.
+//   Vite build). Hashed /assets/* files are immutable, so ones an older build already cached
+//   (fonts, icons, unchanged chunks) are copied over instead of downloaded again.
+// - Navigations get this build's cached shell straight away (no waiting on a weak signal); the
+//   shell is never overwritten at runtime, so it always matches the assets cached with it.
+//   Without a cached shell (first visit), the network.
+// - Activation keeps the previous build's cache (a window still running it can lazy-load its
+//   chunks) and deletes older ones. Hashed assets are looked up across both.
 // - Only successful same-origin responses are cached. /api/* is never touched: the app keeps
 //   its own copy of your data.
 const VERSION = new URL(self.location.href).searchParams.get("v") || "dev";
-const CACHE = `strawvine-${VERSION}`;
+const PREFIX = "strawvine-";
+const CACHE = `${PREFIX}${VERSION}`;
 const STATIC = ["/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"];
-const NAV_TIMEOUT_MS = 2000;
 
 const cacheable = (res) => res && res.ok && res.type === "basic";
+const isHashedAsset = (path) => path.startsWith("/assets/");
+
+/** A hashed asset from any of this app's caches (same name = same bytes). */
+async function fromAnyCache(url) {
+  const names = (await caches.keys()).filter((k) => k.startsWith(PREFIX));
+  // Our own cache first, then newest to oldest (keys() lists caches in creation order).
+  const order = [CACHE, ...names.filter((k) => k !== CACHE).reverse()];
+  for (const name of order) {
+    const hit = await (await caches.open(name)).match(url, { ignoreSearch: true });
+    if (hit) return hit;
+  }
+  return undefined;
+}
 
 async function precache() {
   const cache = await caches.open(CACHE);
@@ -26,6 +43,10 @@ async function precache() {
   const urls = ["/", ...STATIC, ...manifest.assets.map((a) => `/${a}`)];
   await Promise.all(
     urls.map(async (url) => {
+      if (isHashedAsset(url)) {
+        const old = await fromAnyCache(url);
+        if (old) return cache.put(url, old);
+      }
       const res = await fetch(new Request(url, { cache: "reload" }));
       if (!cacheable(res)) throw new Error(`precache failed: ${url} (${res.status})`);
       await cache.put(url, res);
@@ -41,7 +62,11 @@ self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k.startsWith("strawvine-") && k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => {
+        const others = keys.filter((k) => k.startsWith(PREFIX) && k !== CACHE);
+        const keep = others.at(-1); // the build this one replaces
+        return Promise.all(others.filter((k) => k !== keep).map((k) => caches.delete(k)));
+      })
       .then(() => self.clients.claim()),
   );
 });
@@ -51,25 +76,15 @@ async function fromCache(req) {
   return cache.match(req, { ignoreSearch: true });
 }
 
-/** Network first, but don't keep a poor connection waiting: after a moment, use the shell. */
+/** This build's shell at once; the network only when it isn't cached yet. */
 async function navigate(req) {
-  const raw = fetch(req);
-  const network = raw.then((res) => (res.ok ? res : Promise.reject(new Error(`status ${res.status}`))));
-  network.catch(() => {}); // a late failure after the shell was served is fine
-  const shell = (await fromCache("/")) || null;
-  if (!shell) return raw;
-  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), NAV_TIMEOUT_MS));
-  try {
-    const res = await Promise.race([network, timeout]);
-    return res || shell;
-  } catch {
-    return shell;
-  }
+  const shell = await fromCache("/");
+  return shell || fetch(req);
 }
 
 /** Cache first; misses go to the network and are kept only if they're a real success. */
-async function cacheFirst(req) {
-  const hit = await fromCache(req);
+async function cacheFirst(req, path) {
+  const hit = isHashedAsset(path) ? await fromAnyCache(req) : await fromCache(req);
   if (hit) return hit;
   const res = await fetch(req);
   if (cacheable(res)) {
@@ -90,7 +105,7 @@ self.addEventListener("fetch", (e) => {
     e.respondWith(navigate(req));
     return;
   }
-  if (url.pathname.startsWith("/assets/") || STATIC.includes(url.pathname)) {
-    e.respondWith(cacheFirst(req));
+  if (isHashedAsset(url.pathname) || STATIC.includes(url.pathname)) {
+    e.respondWith(cacheFirst(req, url.pathname));
   }
 });

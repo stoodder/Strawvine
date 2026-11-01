@@ -61,6 +61,7 @@ describe("idempotent creates", () => {
   });
 
   it("keys creates found in an outbox saved by an older version", async () => {
+    localStorage.setItem("strawvine:signed-in", "1");
     localStorage.setItem(
       "strawvine:outbox",
       JSON.stringify({ entries: [{ seq: 1, op: { ...exercise }, state: "pending" }], nextSeq: 2, nextAck: 1, nextTemp: -2, tempMap: {} }),
@@ -70,6 +71,30 @@ describe("idempotent creates", () => {
     await sync.initSync();
     await sync.syncNow();
     expect(calls.find((c) => c.path === "/exercises")?.headers["Idempotency-Key"]).toMatch(/^[A-Za-z0-9._:-]{8,80}$/);
+  });
+});
+
+describe("replay", () => {
+  it("an edit queued while a pass is finishing (right after an ack) is still sent promptly", async () => {
+    const sync = await load();
+    replies = [
+      { status: 201, body: { id: 9, exerciseId: 1, date: "2026-11-01", valueLb: 100, source: "initial", note: null, createdAt: "x" } },
+      { status: 200, body: { onboarded: true } },
+    ];
+    const seq = sync.enqueue({
+      kind: "addMax",
+      tempId: sync.takeTempId(),
+      exerciseId: 1,
+      date: "2026-11-01",
+      valueLb: 100,
+      source: "initial",
+      note: null,
+      createdAt: new Date().toISOString(),
+    });
+    // Like onboarding: await the create's ack, then queue the settings.
+    await sync.waitForAck(seq, 3000);
+    sync.enqueue({ kind: "settings", settings: { onboarded: true } as Settings });
+    await vi.waitFor(() => expect(calls.map((c) => c.method + " " + c.path)).toContain("PUT /settings"), { timeout: 500 });
   });
 });
 

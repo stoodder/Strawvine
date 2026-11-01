@@ -126,6 +126,9 @@ export function DockProvider({ children }: { children: ReactNode }) {
           <div
             ref={stackRef}
             data-dock=""
+            // A landmark, so toasts / the rest timer / the sync pill can be found outside #root.
+            role="region"
+            aria-label="Notifications"
             className="pointer-events-none fixed inset-x-0 z-[55] mx-auto flex max-w-lg flex-col items-center px-5"
             style={{
               gap: GAP_PX,

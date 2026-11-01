@@ -1,6 +1,8 @@
 /**
- * Inline text editing: an input that reads as plain text until it's focused, when a hairline
- * appears under it. Commits on blur / Enter (trimmed, only when changed), Escape reverts.
+ * Inline text editing: an input that reads as text over a faint hairline (the editable cue, at
+ * rest too, for touch), which turns lime on focus. The tap target is 44px tall without taking
+ * more room than a line of text (see the `inline-text` utility). Commits on blur / Enter
+ * (trimmed, only when changed), Escape reverts.
  * `required` keeps an empty value from being saved and says why; `maxLength` caps the length.
  *
  *   <InlineText ariaLabel="Program name" value={program.name} required maxLength={60}

@@ -8,7 +8,7 @@ import { targetsFor } from "../../shared/insights";
 import { cyclePosition, programDayFor } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
-import { buildSession } from "../../shared/session";
+import { buildSession, sessionCounts } from "../../shared/session";
 import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { JournalText } from "../components/TextArea";
@@ -57,8 +57,8 @@ export function TodayScreen() {
   const sess = session ?? draft;
   const primaryEx = sess?.blocks.find((b) => b.kind === "primary")?.exercises[0];
   const primaryName = primaryEx ? data.exercises.find((e) => e.id === primaryEx.exerciseId)?.name : null;
-  const setsDone = sess?.blocks.reduce((n, b) => n + b.exercises.reduce((m, e) => m + e.sets.filter((s) => s.done).length, 0), 0) ?? 0;
-  const setsTotal = sess?.blocks.reduce((n, b) => n + b.exercises.reduce((m, e) => m + e.sets.length, 0), 0) ?? 0;
+  // Same count as Train's header: skipped exercises don't count.
+  const { done: setsDone, total: setsTotal } = sess ? sessionCounts(sess) : { done: 0, total: 0 };
 
   const loggedCount = energy?.loggedCount ?? 0;
   const calibrating = loggedCount < CALIBRATION_DAYS;
@@ -73,8 +73,13 @@ export function TodayScreen() {
     <div>
       {/* Header */}
       <header className="flex items-center justify-between pt-2">
-        <div className="flex items-center gap-1">
-          <button type="button" aria-label="Previous day" onClick={() => go(addDays(date, -1))} className="tap -ml-2 p-2 text-mute">
+        <div className="flex items-center">
+          <button
+            type="button"
+            aria-label="Previous day"
+            onClick={() => go(addDays(date, -1))}
+            className="tap -ml-3 grid h-11 w-11 place-items-center text-mute"
+          >
             <ChevronLeft size={18} />
           </button>
           <DateJump date={date} today={today} pending={pending} onPick={go} />
@@ -83,20 +88,23 @@ export function TodayScreen() {
             aria-label="Next day"
             disabled={isToday}
             onClick={() => go(addDays(date, 1))}
-            className="tap p-2 text-mute disabled:opacity-20"
+            className="tap grid h-11 w-11 place-items-center text-mute disabled:opacity-20"
           >
             <ChevronRight size={18} />
           </button>
         </div>
-        <Link to="/settings" aria-label="Settings" className="tap -mr-2 p-2 text-mute">
+        <Link to="/settings" aria-label="Settings" className="tap -mr-3 grid h-11 w-11 place-items-center text-mute">
           <Settings2 size={18} />
         </Link>
       </header>
 
       {/* Hero */}
-      <div className="mt-6 flex items-center justify-between gap-5">
-        <div className="min-w-0 flex-1">
-          <h1 className="text-[clamp(34px,11vw,44px)] leading-none font-light tracking-tight">{isToday ? "Today" : weekdayName(date)}</h1>
+      {/* At 200% zoom the streak and ring wrap under the title instead of squeezing it. */}
+      <div className="mt-6 flex flex-wrap items-center justify-between gap-x-5 gap-y-4">
+        <div className="min-w-32 flex-1">
+          <h1 className="text-[clamp(2.125rem,11vw,2.75rem)] leading-none font-light tracking-tight">
+            {isToday ? "Today" : weekdayName(date)}
+          </h1>
           <p className="mt-3 text-sm text-mute">
             {closed ? (
               <span className="text-accent">Day closed. Nicely done.</span>
@@ -113,8 +121,9 @@ export function TodayScreen() {
             )}
           </p>
           {!isToday && (
-            <Link to="/" className="label mt-3 inline-block text-accent">
-              Back to today →
+            // Same as Train's: 44px tall, without pushing the hero down.
+            <Link to="/" className="label mt-0.5 -mb-3.5 inline-flex min-h-11 items-center text-accent">
+              ← Today
             </Link>
           )}
         </div>
@@ -140,7 +149,8 @@ export function TodayScreen() {
       <Section label="Fuel" right={targets.tdee?.provisional ? <span className="label text-mute">provisional</span> : null}>
         {rec ? (
           <>
-            <div className="flex items-end justify-between gap-4">
+            {/* Wraps (eaten under the target) when zoomed in or very narrow. */}
+            <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
               <Stat
                 label="Target"
                 value={fmt(rec.calories)}
@@ -164,7 +174,7 @@ export function TodayScreen() {
                 +{fmt(overKcal)} <span className="text-mute">kcal over</span>
               </div>
             )}
-            <div className="mt-5 grid grid-cols-3 gap-5">
+            <div className="mt-5 grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
               <Macro label="Protein" eaten={day.proteinG} target={rec.macros.proteinG} />
               <Macro label="Carbs" eaten={day.carbsG} target={rec.macros.carbsG} />
               <Macro label="Fat" eaten={day.fatG} target={rec.macros.fatG} />
@@ -219,7 +229,7 @@ export function TodayScreen() {
       {/* Recovery snapshot */}
       {(day.sleepMinutes !== null || day.sleepScore !== null || day.hrvMs !== null || day.energy !== null || day.soreness !== null) && (
         <Section label="Recovery">
-          <div className="grid grid-cols-3 gap-5">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
             <Stat label="Sleep" value={day.sleepMinutes !== null ? minutesToHM(day.sleepMinutes) : "—"} size="sm" />
             <Stat label="Score" value={fmt(day.sleepScore)} size="sm" />
             <Stat label="HRV" value={fmt(day.hrvMs)} unit={day.hrvMs !== null ? "ms" : undefined} size="sm" />
@@ -254,7 +264,7 @@ export function TodayScreen() {
                 >
                   {i.tone === "good" ? <Sparkles size={15} /> : i.tone === "warn" ? <TriangleAlert size={15} /> : <Info size={15} />}
                 </span>
-                <span className="text-fg-2">{i.text}</span>
+                <span className="text-fg-2">{trueMinus(i.text)}</span>
               </li>
             ))}
           </ul>
@@ -262,6 +272,11 @@ export function TodayScreen() {
       )}
     </div>
   );
+}
+
+/** Typographic minus for negative numbers in copy ("-0.8 lb" → "−0.8 lb"), matching `signed()`. */
+function trueMinus(text: string): string {
+  return text.replace(/(^|[\s(])-(?=\d)/g, "$1\u2212");
 }
 
 function Macro({ label, eaten, target }: { label: string; eaten: number | null; target: number }) {
@@ -276,7 +291,7 @@ function Macro({ label, eaten, target }: { label: string; eaten: number | null; 
         <span className="text-xs text-mute"> / {hasTarget ? `${fmt(target)}g` : "—"}</span>
       </div>
       <Bar className="mt-2" value={hasTarget && eaten ? eaten / target : 0} tone={over ? "mute" : "accent"} />
-      {over > 0 && <div className="num mt-1 text-[11px] text-mute">+{fmt(over)}g over</div>}
+      {over > 0 && <div className="num mt-1 text-[0.6875rem] text-mute">+{fmt(over)}g over</div>}
     </div>
   );
 }

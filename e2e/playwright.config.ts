@@ -1,6 +1,7 @@
 /**
  * Playwright config for the e2e suite. Run it through `npm run e2e` (scripts/e2e.mjs), which
- * builds, starts the server on a fresh database and sets E2E_BASE_URL / E2E_PASSWORD.
+ * builds, starts the server, resets the database before each test and sets E2E_BASE_URL /
+ * E2E_PASSWORD / E2E_CONTROL_URL.
  *
  * Browsers: CI runs `npx playwright install --with-deps chromium`; locally a preinstalled set is
  * used through PLAYWRIGHT_BROWSERS_PATH, or point E2E_CHROMIUM at a Chromium binary.
@@ -11,7 +12,8 @@ const executablePath = process.env.E2E_CHROMIUM || undefined;
 
 export default defineConfig({
   testDir: ".",
-  // The specs share one database and build on each other (01 onboards, later ones train/log).
+  // One server and one database: tests run one at a time. Each starts from an empty database
+  // (the `test` fixture in helpers.ts resets it), so they're independent and a retry starts clean.
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,

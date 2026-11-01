@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { motion } from "motion/react";
-import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useNavigate } from "react-router";
 import { Award, Flame, Plus, Trash2, Trophy } from "lucide-react";
 import { addDays, formatShortDate, startOfWeek, weekdayName } from "../../shared/dates";
@@ -69,7 +69,7 @@ export function GoalsScreen() {
       <Section label="Goal weight">
         {goal ? (
           <>
-            <div className="flex items-end justify-between">
+            <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
               <div>
                 <div className="num text-5xl font-light tracking-tight">
                   {fmt(goal.targetLb, goal.targetLb % 1 ? 1 : 0)}
@@ -117,7 +117,8 @@ export function GoalsScreen() {
             )}
             <button
               type="button"
-              className="label hit mt-6 text-mute"
+              // 44px tall; the text sits where it did (mt-6 minus the extra height above it).
+              className="label mt-3 -mb-3 inline-flex min-h-11 items-center text-mute"
               onClick={() => undoable({ weightGoal: null }, "Goal cleared", () => ({ weightGoal: goal }))}
             >
               Clear goal
@@ -291,8 +292,8 @@ function NextUp({ current }: { current: number }) {
   if (!next) return null;
   return (
     <div className="mt-6 flex items-center gap-4">
-      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-dashed border-white/20 text-faint">
-        <Flame size={15} aria-hidden />
+      <div aria-hidden className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-dashed border-white/20 text-faint">
+        <Flame size={15} />
       </div>
       <div className="min-w-0 flex-1">
         <div className="text-[0.9375rem] text-mute">
@@ -307,15 +308,36 @@ function NextUp({ current }: { current: number }) {
   );
 }
 
+/** Heatmap cell gap and the smallest cell worth showing (WCAG 2.5.8: targets ≥ 24px). */
+const HEAT_GAP = 3;
+const HEAT_MIN_CELL = 25;
+
 /**
- * 16 weeks of days, Monday-first columns. Closed days glow; partial days fade in by progress.
+ * Up to 16 weeks of days, Monday-first columns — as many weeks as fit with cells of at least
+ * 25px (12 on a phone, 16 on a wide screen, fewer when zoomed). Closed days glow; partial days
+ * fade in by progress.
  * Each past day is a button that opens it on Today; the grid is one tab stop (arrow keys move by
  * day / week, Home / End jump), named by the overall summary.
  */
 function Heatmap() {
   const { data, today } = useData();
   const navigate = useNavigate();
-  const weeks = 16;
+  // Fit the number of weeks to the width, measured before paint so it never flashes.
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [weeks, setWeeks] = useState(12);
+  useLayoutEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    const fit = () => {
+      const w = el.getBoundingClientRect().width;
+      if (w > 0) setWeeks(Math.max(4, Math.min(16, Math.floor((w + HEAT_GAP) / (HEAT_MIN_CELL + HEAT_GAP)))));
+    };
+    fit();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const start = addDays(startOfWeek(today), -(weeks - 1) * 7);
   const byDate = useMemo(() => new Map(data.days.map((d) => [d.date, d])), [data.days]);
   const sessions = useMemo(() => new Map(data.sessions.map((s) => [s.date, s])), [data.sessions]);
@@ -362,9 +384,15 @@ function Heatmap() {
     (c.date === today ? " (today)" : "");
 
   return (
-    <div className="mt-8 flex justify-between gap-[3px]" role="group" aria-label={`${summary} Choose a day to open it.`}>
+    <div
+      ref={gridRef}
+      className="mt-8 flex justify-between"
+      style={{ gap: HEAT_GAP }}
+      role="group"
+      aria-label={`${summary} Choose a day to open it.`}
+    >
       {cols.map((col, i) => (
-        <div key={i} className="flex flex-1 flex-col gap-[3px]">
+        <div key={i} className="flex min-w-0 flex-1 flex-col" style={{ gap: HEAT_GAP }}>
           {col.map((c, d) => {
             const idx = i * 7 + d;
             const style = {
@@ -377,11 +405,14 @@ function Heatmap() {
                       ? `rgb(183 243 106 / ${0.08 + c.v * 0.3})`
                       : "rgba(255,255,255,0.04)",
               boxShadow: c.v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
-              outline: c.date === today ? "1px solid rgba(255,255,255,0.6)" : undefined,
-              outlineOffset: c.date === today ? 1 : undefined,
             };
             const motionProps = { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { delay: i * 0.02 } };
-            const cls = "relative grid aspect-square w-full place-items-center rounded-[3px]";
+            // Today's ring is drawn by ::after, so the focus outline (:focus-visible) still shows on it.
+            const cls = clsx(
+              "relative grid aspect-square w-full place-items-center rounded-[3px]",
+              c.date === today &&
+                "after:pointer-events-none after:absolute after:-inset-[2px] after:rounded-[5px] after:border after:border-white/60 after:content-['']",
+            );
             // Today is marked by shape too, not just the outline colour.
             const dot = c.date === today && <span className={clsx("h-1 w-1 rounded-full", c.v >= 1 ? "bg-accent-ink" : "bg-fg")} />;
             if (c.v < 0) return <motion.div key={c.date} aria-hidden className={cls} style={style} {...motionProps} />;

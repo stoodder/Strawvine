@@ -1,13 +1,15 @@
 /**
  * Monday, week 1: the bench AMRAP last set beats its target and the max bump is applied.
+ * (Onboarded the day before, on Sunday, so Monday is the first day of the first cycle.)
  */
-import { expect, test } from "@playwright/test";
-import { dismissCelebrations, login, MONDAY } from "./helpers";
+import { dismissCelebrations, expect, login, MONDAY, SUNDAY, test } from "./helpers";
 
 test("Monday session: log the main lift, beat the AMRAP and apply the bump", async ({ page }) => {
-  await page.clock.setFixedTime(MONDAY);
+  await page.clock.setFixedTime(SUNDAY);
   await dismissCelebrations(page);
   await login(page);
+  await page.clock.setFixedTime(MONDAY);
+  await page.goto("/");
 
   await page.getByRole("link", { name: "Train" }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(/Push/);

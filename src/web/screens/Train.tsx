@@ -1,19 +1,44 @@
 import clsx from "clsx";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router";
-import { Check, ChevronLeft, ChevronRight, Link2, ListChecks, MoreHorizontal, Plus, RefreshCw, SkipForward, Trash2 } from "lucide-react";
-import { addDays, formatShortDate, isISODate, weekdayName } from "../../shared/dates";
+import {
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Link2,
+  ListChecks,
+  MoreHorizontal,
+  Plus,
+  RefreshCw,
+  SkipForward,
+  Trash2,
+  Unlink2,
+} from "lucide-react";
+import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { trainingPrefs } from "../../shared/defaults";
+import { amrapPrs } from "../../shared/gamify";
 import { currentMax, cyclePosition, programDayFor, progressionGain } from "../../shared/program";
 import type { Block, BlockExercise, Exercise, Session, SetEntry } from "../../shared/schemas";
-import { accessoryHint, blankSet, buildSession, isSessionStarted, newId, planMatches, sessionVolume } from "../../shared/session";
+import {
+  accessoryHint,
+  blankSet,
+  buildSession,
+  isSessionStarted,
+  newId,
+  planChanged,
+  sessionCounts,
+  sessionVolume,
+} from "../../shared/session";
+import { useDockHeight } from "../components/Dock";
 import { CheckDot, Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
+import { DateJump } from "../components/today/DateJump";
 import { AddExerciseSheet } from "../components/train/AddExerciseSheet";
 import { FinishPanel } from "../components/train/FinishPanel";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
+import { afterLayout, focusWhenReady, revealAboveDock, whenReady } from "../components/train/reveal";
 import { MainSetButton, PlannedChip, SetChip } from "../components/train/SetControls";
-import { AmrapSheet, measureUnit, Plates, SetEditSheet } from "../components/train/SetSheets";
+import { AmrapSheet, measureUnit, Plates, SetEditSheet, type AmrapRepPr } from "../components/train/SetSheets";
 import {
   describeSet,
   findSet,
@@ -30,10 +55,22 @@ import { MaxSheet } from "../components/MaxSheet";
 import { JournalText } from "../components/TextArea";
 import { fmt } from "../lib/format";
 import { success, tick } from "../lib/haptics";
-import { cachedSession, useAddMax, useCreateExercise, useData, useDeleteSession, useMarkSeen, useSaveSession } from "../lib/store";
+import {
+  cachedSession,
+  useAddMax,
+  useCreateExercise,
+  useData,
+  useDeleteSession,
+  useMarkSeen,
+  usePendingDates,
+  useSaveSession,
+} from "../lib/store";
 import { useTitle } from "../components/useTitle";
 
+/** Server limits (sessionSchema): sets per exercise, exercises per superset, blocks per session. */
 const MAX_SETS = 30;
+const MAX_SUPERSET = 6;
+const MAX_BLOCKS = 30;
 /** How far ahead the planned sessions can be previewed (read-only). */
 const PREVIEW_DAYS = 14;
 
@@ -78,6 +115,8 @@ export function TrainScreen() {
   const toast = useToast();
   const rest = useRestTimer();
   const hintId = useId();
+  const dockHeight = useDockHeight();
+  const pending = usePendingDates().has(date);
 
   const saved = data.sessions.find((s) => s.date === date) ?? null;
   const program = data.settings.program;
@@ -85,6 +124,7 @@ export function TrainScreen() {
   /** Default rest after a set: longer after the main lift than after accessories (Settings). */
   const restFor = (kind: Block["kind"]) => (kind === "primary" ? prefs.restSecondsMain : prefs.restSecondsAccessory);
   const programDay = programDayFor(program, date);
+  const weekday = weekdayName(date);
   const pos = cyclePosition(program, date);
 
   /** Today's plan as the program + history would build it right now. */
@@ -178,6 +218,28 @@ export function TrainScreen() {
     return f ? `${exName(f.ex.exerciseId)} · set ${f.index + 1}` : "Set";
   };
 
+  /**
+   * After logging, bring the next open set (in page order) clear of the dock, where the rest pill
+   * just appeared — only if it's covered.
+   */
+  const revealNextOpen = (afterSetId: string) => {
+    const logged = () => document.querySelector(`[data-set="${afterSetId}"]`);
+    // Wait for the logged state to reach the screen (a draft's first save goes through the store).
+    whenReady(
+      () => !!logged() && !logged()!.hasAttribute("data-open"),
+      () =>
+        afterLayout(() => {
+          const el = logged();
+          const next =
+            el &&
+            [...document.querySelectorAll("[data-set][data-open]")].find(
+              (x) => el.compareDocumentPosition(x) & Node.DOCUMENT_POSITION_FOLLOWING,
+            );
+          revealAboveDock(next ?? null);
+        }),
+    );
+  };
+
   const toggleDone = (ref: SetRef) => {
     const found = findSet(session, ref);
     if (!found) return;
@@ -187,8 +249,15 @@ export function TrainScreen() {
       x.done ? { ...x, done: false } : { ...x, done: true, reps: x.reps ?? x.targetReps, weight: x.weight ?? x.targetWeight },
     );
     tick();
-    commit(next, { message: `${setLabel(ref)} ${logging ? "logged" : "unlogged"}`, scope: ref, duration: 4000 });
-    if (logging) rest.start(restFor(found.block.kind));
+    // A main-lift set gets no undo toast: tapping the row again unlogs it, and the toast would sit
+    // in the dock right over the next set. Accessory chips are small and dense, so they keep a
+    // short one.
+    if (found.block.kind === "primary") commit(next);
+    else commit(next, { message: `${setLabel(ref)} ${logging ? "logged" : "unlogged"}`, scope: ref, duration: 4000 });
+    if (logging) {
+      rest.start(restFor(found.block.kind));
+      revealNextOpen(ref.setId);
+    }
   };
 
   const deleteSet = (ref: SetRef) => {
@@ -212,12 +281,11 @@ export function TrainScreen() {
   const freshPrimary = fresh.blocks.find((b) => b.kind === "primary");
 
   const maxChanged = !!saved && !!primaryBlock && !!primaryMax && session.primaryMaxLb !== primaryMax.valueLb && !primaryStarted;
-  // A saved session nothing has been logged in yet, whose main lift no longer matches the program
-  // (the same test Today uses).
-  const shapeDiffers = !!saved && !planMatches(session, data);
-  const planChanged = !!saved && !session.completedAt && !isSessionStarted(session) && shapeDiffers;
+  // A saved session nothing has been logged in yet, whose program prescription changed since it
+  // was built (the same test Today uses). Editing its own targets isn't a plan change.
+  const programMoved = !!saved && !session.completedAt && !isSessionStarted(session) && planChanged(session, data);
   const missingPrimary = !!saved && !primaryBlock && !!freshPrimary && !session.completedAt;
-  const offerRecalc = !isPreview && (planChanged || maxChanged || missingPrimary);
+  const offerRecalc = !isPreview && (programMoved || maxChanged || missingPrimary);
 
   const recalcPrimary = () => {
     commit(
@@ -228,6 +296,7 @@ export function TrainScreen() {
         week: fresh.week,
         deload: fresh.deload,
         primaryMaxLb: fresh.primaryMaxLb ?? session.primaryMaxLb,
+        planSig: fresh.planSig,
         blocks: [...(freshPrimary ? [freshPrimary] : []), ...session.blocks.filter((b) => b.kind !== "primary")],
       },
       { message: "Main lift recalculated" },
@@ -292,6 +361,19 @@ export function TrainScreen() {
     rest.start(restFor("accessory"));
   };
 
+  /** After a sheet action logged sets: show the next open set below the block, if covered. */
+  const revealNextAfterBlock = (blockId: string) =>
+    afterLayout(() => {
+      const block = document.querySelector(`[data-block="${blockId}"]`);
+      const inBlock = block?.querySelector("[data-set][data-open]");
+      const after = block
+        ? [...document.querySelectorAll("[data-set][data-open]")].find(
+            (el) => block.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING,
+          )
+        : null;
+      revealAboveDock(inBlock ?? after ?? null);
+    });
+
   /** Log the next open set of each exercise in a superset: one round (A1, A2, …). */
   const logRound = (blockId: string, what: string) => {
     let n = 0;
@@ -310,7 +392,10 @@ export function TrainScreen() {
     rest.start(restFor("accessory"));
   };
 
-  /** Skip an accessory for today only: the next session of this day type still carries it. */
+  /**
+   * Skip an accessory for today only: the next session of this day type still carries it.
+   * Skipping offers an Undo; the skipped row's own "Unskip" reverses it any time later.
+   */
   const setSkipped = (ref: ExRef, skipped: boolean) =>
     commit(
       mapExercise(session, ref, (e) => {
@@ -318,7 +403,12 @@ export function TrainScreen() {
         const { skipped: _unskip, ...kept } = e;
         return kept;
       }),
+      // The exercise is named by the row that just changed; keep the toast short.
+      skipped ? { message: `Skipped today · stays in next ${weekday}'s plan`, scope: ref } : undefined,
     );
+  /** The skipped row's Unskip button, or (once unskipped) that exercise's options button. */
+  const exControl = (ref: ExRef, which: "unskip" | "options") => () =>
+    document.querySelector<HTMLElement>(`[data-ex="${ref.blockId}:${ref.exIdx}"][data-control="${which}"]`);
 
   /** Move the open sets of an accessory to the suggested load (never automatic). */
   const applyHint = (ref: ExRef, weight: number, name: string) => {
@@ -349,36 +439,38 @@ export function TrainScreen() {
   const actionsBlock = actions ? session.blocks.find((b) => b.id === actions.blockId) : undefined;
   const actionsEx = actions ? actionsBlock?.exercises[actions.exIdx] : undefined;
   const volume = sessionVolume(session);
-  // Exercises skipped today count toward nothing.
-  const counted = session.blocks.flatMap((b) => b.exercises.filter((e) => !e.skipped));
-  const totalSets = counted.reduce((n, e) => n + e.sets.length, 0);
-  const doneSets = counted.reduce((n, e) => n + e.sets.filter((s) => s.done).length, 0);
+  // Exercises skipped today count toward nothing (the same counts Today shows).
+  const { done: doneSets, total: totalSets } = sessionCounts(session);
+  const blocksFull = session.blocks.length >= MAX_BLOCKS;
 
   /** Edited set can be deleted: any accessory set, or a main-lift set added beyond the plan. */
   const canDelete = (f: NonNullable<ReturnType<typeof findSet>>) =>
     f.block.kind === "accessory" || (!f.set.amrap && f.index >= plannedCount);
 
   const go = (d: string) => navigate(d === today ? "/train" : `/train/${d}`);
-  const weekday = weekdayName(date);
 
   let supersetCount = 0;
 
   return (
     <div>
       <header className="flex items-center justify-between gap-2 pt-2">
-        <div className="flex min-w-0 items-center gap-1">
-          <button type="button" aria-label="Previous day" onClick={() => go(addDays(date, -1))} className="tap -ml-2 p-2 text-mute">
+        <div className="flex min-w-0 items-center">
+          <button
+            type="button"
+            aria-label="Previous day"
+            onClick={() => go(addDays(date, -1))}
+            className="tap -ml-3 grid h-11 w-11 place-items-center text-mute"
+          >
             <ChevronLeft size={18} />
           </button>
-          <div className="label whitespace-nowrap text-fg-2">
-            {weekdayName(date, true)} · {formatShortDate(date)}
-          </div>
+          {/* Jump to any day, up to the last previewable one (DateJump's `today` is its upper bound). */}
+          <DateJump date={date} today={lastPreview} pending={pending} onPick={go} />
           <button
             type="button"
             aria-label="Next day"
             disabled={date >= lastPreview}
             onClick={() => go(addDays(date, 1))}
-            className="tap p-2 text-mute disabled:opacity-20"
+            className="tap grid h-11 w-11 place-items-center text-mute disabled:opacity-20"
           >
             <ChevronRight size={18} />
           </button>
@@ -386,7 +478,7 @@ export function TrainScreen() {
         {pos && (
           <div className="label whitespace-nowrap">
             <span aria-hidden>
-              C{pos.cycle} · {pos.week.deload ? <span className="text-glow">Deload</span> : `W${pos.weekIndex + 1}/${program.weeks.length}`}
+              C{pos.cycle} · {pos.week.deload ? <span className="text-fg-2">Deload</span> : `W${pos.weekIndex + 1}/${program.weeks.length}`}
             </span>
             <span className="sr-only">
               Cycle {pos.cycle}, {pos.week.deload ? "deload week" : `week ${pos.weekIndex + 1} of ${program.weeks.length}`}
@@ -396,7 +488,7 @@ export function TrainScreen() {
       </header>
 
       <div className="mt-6">
-        <h1 className="text-[44px] leading-none font-light tracking-tight">{session.label}</h1>
+        <h1 className="text-[clamp(2.125rem,11vw,2.75rem)] leading-none font-light tracking-tight">{session.label}</h1>
         <p className="mt-3 text-sm text-mute">
           {isPreview ? (
             <>
@@ -497,7 +589,7 @@ export function TrainScreen() {
               <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-3">
                 <div className="text-2xl font-light">{primaryName}</div>
                 {session.deload && (
-                  <span className="label whitespace-nowrap text-glow">
+                  <span className="label whitespace-nowrap text-fg-2">
                     deload · {repScheme(primaryEx.sets.slice(0, plannedCount).map((s) => s.targetReps))}
                   </span>
                 )}
@@ -528,17 +620,17 @@ export function TrainScreen() {
                             × {s.targetReps}
                             {s.amrap && "+"}
                           </span>
-                          {tag && <span className={clsx("label whitespace-nowrap", s.amrap ? "text-accent" : "text-faint")}>{tag}</span>}
+                          {tag && <span className={clsx("label whitespace-nowrap", s.amrap ? "text-accent" : "text-mute")}>{tag}</span>}
                         </span>
                       </div>
                     );
                   return (
-                    <div key={s.id} className="flex items-center gap-4 py-2">
+                    <div key={s.id} data-set={s.id} data-open={s.done ? undefined : ""} className="flex items-center gap-4 py-2">
                       <span className="label w-5" aria-hidden>
                         {i + 1}
                       </span>
                       <MainSetButton
-                        label={`${primaryName} set ${i + 1}: ${describeSet(s, "reps")}${s.amrap ? `, AMRAP${beat ? `, ${over} over target` : ""}` : ""}`}
+                        srPrefix={`${primaryName} set ${i + 1}:`}
                         pressed={s.done}
                         describedBy={hintId}
                         onTap={() => toggleDone(ref)}
@@ -547,14 +639,19 @@ export function TrainScreen() {
                         <span className={clsx("num text-3xl font-light tracking-tight", s.done ? "text-fg" : "text-fg-2")}>
                           {s.done ? s.weight : s.targetWeight}
                         </span>
+                        {/* Flex items drop the spaces between them; keep them in the accessible name. */}
+                        <span className="sr-only">{"\u00a0"}</span>
                         <span className="text-sm whitespace-nowrap text-mute">
                           × {s.done ? s.reps : s.targetReps}
                           {s.amrap && !s.done && "+"}
                         </span>
                         {tag && (
-                          <span className={clsx("label whitespace-nowrap", s.amrap ? (beat ? "text-gold" : "text-accent") : "text-faint")}>
-                            {tag}
-                          </span>
+                          <>
+                            <span className="sr-only">{"\u00a0"}</span>
+                            <span className={clsx("label whitespace-nowrap", s.amrap ? (beat ? "text-gold" : "text-accent") : "text-mute")}>
+                              {tag}
+                            </span>
+                          </>
                         )}
                       </MainSetButton>
                       <CheckDot
@@ -606,7 +703,7 @@ export function TrainScreen() {
                 const superset = b.exercises.length > 1;
                 const letter = superset ? String.fromCharCode(65 + supersetCount++) : "";
                 return (
-                  <div key={b.id} className="mb-8">
+                  <div key={b.id} data-block={b.id} className="mb-8">
                     {superset && (
                       <div className="mb-2 flex items-center gap-2 text-glow">
                         <Link2 size={12} />
@@ -621,7 +718,7 @@ export function TrainScreen() {
                         if (e.skipped)
                           return (
                             <div key={exIdx} className={clsx("flex min-h-11 items-center justify-between gap-3", exIdx > 0 && "mt-3")}>
-                              <div className="min-w-0 truncate text-[15px] text-mute">
+                              <div className="min-w-0 truncate text-[0.9375rem] text-mute">
                                 {tagLabel}
                                 {name}
                               </div>
@@ -634,11 +731,16 @@ export function TrainScreen() {
                                     </span>
                                     <button
                                       type="button"
-                                      aria-label={`Undo skipping ${name}`}
+                                      aria-label={`Unskip ${name}`}
+                                      data-ex={`${b.id}:${exIdx}`}
+                                      data-control="unskip"
                                       className="tap label -mr-2 min-h-11 px-2 text-accent"
-                                      onClick={() => setSkipped(ref, false)}
+                                      onClick={() => {
+                                        setSkipped(ref, false);
+                                        focusWhenReady(exControl(ref, "options"));
+                                      }}
                                     >
-                                      Undo
+                                      Unskip
                                     </button>
                                   </>
                                 )}
@@ -653,7 +755,7 @@ export function TrainScreen() {
                         return (
                           <div key={exIdx} className={clsx(exIdx > 0 && "mt-5")}>
                             <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
-                              <div className="text-[15px]">
+                              <div className="text-[0.9375rem]">
                                 {tagLabel}
                                 {name}
                               </div>
@@ -662,6 +764,8 @@ export function TrainScreen() {
                                   type="button"
                                   aria-label={`${name} options`}
                                   aria-haspopup="dialog"
+                                  data-ex={`${b.id}:${exIdx}`}
+                                  data-control="options"
                                   className="tap -mr-3 grid h-11 w-11 place-items-center text-mute"
                                   onClick={() => setActions(ref)}
                                 >
@@ -678,7 +782,7 @@ export function TrainScreen() {
                                 <button
                                   type="button"
                                   aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
-                                  className="tap label -my-2 min-h-9 px-1 text-accent"
+                                  className="tap label -my-2 min-h-11 px-1.5 text-accent"
                                   onClick={() => applyHint(ref, hint.suggestedWeight, name)}
                                 >
                                   Apply
@@ -698,6 +802,8 @@ export function TrainScreen() {
                                   return (
                                     <SetChip
                                       key={s.id}
+                                      dataSet={s.id}
+                                      open={!s.done}
                                       exerciseName={name}
                                       index={si}
                                       set={s}
@@ -712,7 +818,7 @@ export function TrainScreen() {
                                   <button
                                     type="button"
                                     aria-label={`Add ${name} set`}
-                                    className="tap grid h-[52px] w-11 place-items-center rounded-2xl text-faint ring-1 ring-white/[0.06] ring-inset"
+                                    className="tap grid h-[52px] w-11 place-items-center rounded-2xl text-mute ring-1 ring-white/[0.06] ring-inset"
                                     onClick={() => addAccessorySet(ref)}
                                   >
                                     <Plus size={14} />
@@ -741,13 +847,25 @@ export function TrainScreen() {
               </p>
             ) : (
               <>
-                <div className="flex gap-3">
-                  <button type="button" className="btn-ghost" onClick={() => setAdding({ mode: "new" })}>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    disabled={blocksFull}
+                    aria-describedby={blocksFull ? `${hintId}-full` : undefined}
+                    onClick={() => setAdding({ mode: "new" })}
+                  >
                     <Plus size={16} /> Exercise
                   </button>
+                  {blocksFull && (
+                    <span id={`${hintId}-full`} className="text-xs text-mute">
+                      A session holds up to {MAX_BLOCKS} blocks
+                    </span>
+                  )}
                 </div>
                 <p id={hintId} className="mt-4 text-xs text-mute">
                   Tap a set to log it · hold to edit
+                  <span className="sr-only">. With a keyboard, press Shift+F10 or the context-menu key on a set to edit it.</span>
                 </p>
               </>
             )}
@@ -783,7 +901,7 @@ export function TrainScreen() {
                 {saved && !isSessionStarted(session) && !session.completedAt && (
                   <button
                     type="button"
-                    className="label min-h-11 px-3 text-faint"
+                    className="label min-h-11 px-3 text-mute"
                     onClick={() => {
                       const before = session;
                       deleteSession(date);
@@ -799,9 +917,9 @@ export function TrainScreen() {
         </>
       )}
 
-      {/* Room for the rest pill in the bottom dock, so it never covers the last controls. */}
-      {rest.from !== null && <div className="h-14" aria-hidden />}
-      <RestTimer from={rest.from} target={rest.target} onTarget={rest.setTarget} onDismiss={rest.stop} />
+      {/* Room for whatever the bottom dock holds (rest pill, toasts, sync), so it never covers the last controls. */}
+      <div aria-hidden style={{ height: dockHeight }} />
+      <RestTimer from={rest.from} target={rest.target} base={rest.base} onTarget={rest.setTarget} onDismiss={rest.stop} />
 
       <SetEditSheet
         open={!!editingFound}
@@ -844,27 +962,38 @@ export function TrainScreen() {
         currentMaxLb={primaryMax?.valueLb ?? null}
         lbPerExtraRep={program.progression.lbPerExtraRep}
         progressionEnabled={program.progression.enabled}
-        onLog={(reps, weight) => {
-          if (!amrap) return;
+        onLog={(reps, weight): AmrapRepPr | null => {
+          if (!amrap || !amrapFound) return null;
           // No undo toast here: it would sit over the sheet's Apply step. Tap the set to unlog.
-          commit(mapSet(session, amrap, (x) => ({ ...x, done: true, reps, weight: weight ?? x.targetWeight })));
+          const next = mapSet(session, amrap, (x) => ({ ...x, done: true, reps, weight: weight ?? x.targetWeight }));
+          // A rep PR shows on the sheet's result screen; mark it seen first (same tick as the save)
+          // so the full-screen celebration doesn't follow it.
+          const key = `amrap-${date}-${amrapFound.ex.exerciseId}`;
+          const pr = amrapPrs([...data.sessions.filter((x) => x.date !== date), next], date).find((p) => p.key === key) ?? null;
+          if (pr) markSeen([key]);
+          commit(next);
           rest.start(restFor("primary"));
+          return pr && { reps: pr.reps, weightLb: pr.weightLb, previousReps: pr.previousReps };
         }}
         onApply={async (gain, reps) => {
           if (!amrap || !amrapFound || !primaryMax) return;
           const g = progressionGain(program, amrapFound.set.targetReps ?? 0, reps) || gain;
-          const fromSession = cachedSession(date);
-          const loggedWeight = findSet(fromSession ?? session, amrap)?.set.weight ?? amrapFound.set.targetWeight;
-          const entry = await addMax({
+          const fromSession = cachedSession(date) ?? session;
+          if (findSet(fromSession, amrap)?.set.appliedProgressionLb) return; // already applied
+          const loggedWeight = findSet(fromSession, amrap)?.set.weight ?? amrapFound.set.targetWeight;
+          // Queue the max and record the bump on the set in the same step (no waiting for the
+          // server's row in between), so the set can never show the AMRAP as unapplied while the
+          // max is already raised — which would offer the bump twice.
+          const entry = addMax({
             exerciseId: amrapFound.ex.exerciseId,
             valueLb: primaryMax.valueLb + g,
             date,
             source: "amrap",
             note: `${reps} reps vs ${amrapFound.set.targetReps} @ ${loggedWeight} lb`,
           });
-          markSeen([`max-${entry.id}`]);
-          // Read the freshest copy after the await: onLog just marked the set done.
-          saveSession(mapSet(cachedSession(date) ?? session, amrap, (x) => ({ ...x, done: true, reps, appliedProgressionLb: g })));
+          saveSession(mapSet(fromSession, amrap, (x) => ({ ...x, done: true, reps, appliedProgressionLb: g })));
+          // The sheet just showed the bump: don't celebrate it again (a temp id is remapped on sync).
+          markSeen([`max-${(await entry).id}`]);
         }}
       />
 
@@ -911,11 +1040,12 @@ export function TrainScreen() {
                         onClick={() => {
                           setActions(null);
                           logRemaining(actions, name);
+                          revealNextAfterBlock(actions.blockId);
                         }}
                       >
                         <ListChecks size={16} className="shrink-0 text-accent" />
                         <span className="flex-1">Log remaining sets</span>
-                        <span className="num text-sm text-mute">{exOpen}</span>
+                        <span className="num text-sm text-fg-2">{exOpen}</span>
                       </button>
                     )}
                     {isSuperset && roundSize > 1 && (
@@ -925,11 +1055,12 @@ export function TrainScreen() {
                         onClick={() => {
                           setActions(null);
                           logRound(actionsBlock.id, `Superset ${letter}`);
+                          revealNextAfterBlock(actionsBlock.id);
                         }}
                       >
                         <Link2 size={16} className="shrink-0 text-glow" />
                         <span className="flex-1">Log next round of Superset {letter}</span>
-                        <span className="num text-sm text-mute">{roundSize}</span>
+                        <span className="num text-sm text-fg-2">{roundSize}</span>
                       </button>
                     )}
                     {isSuperset && blockOpen > exOpen && (
@@ -939,11 +1070,12 @@ export function TrainScreen() {
                         onClick={() => {
                           setActions(null);
                           logRemaining({ blockId: actionsBlock.id }, `Superset ${letter}`);
+                          revealNextAfterBlock(actionsBlock.id);
                         }}
                       >
                         <Link2 size={16} className="shrink-0 text-glow" />
                         <span className="flex-1">Log all of Superset {letter}</span>
-                        <span className="num text-sm text-mute">{blockOpen}</span>
+                        <span className="num text-sm text-fg-2">{blockOpen}</span>
                       </button>
                     )}
                   </div>
@@ -1001,20 +1133,31 @@ export function TrainScreen() {
             )}
 
             <div className="mt-6 space-y-2">
-              <button
-                type="button"
-                className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
-                onClick={() => {
-                  setAdding({ mode: "pair", blockId: actions.blockId });
-                  setActions(null);
-                }}
-              >
-                <Link2 size={16} className="text-glow" /> Superset with another exercise
-              </button>
+              {(() => {
+                const full = actionsBlock.exercises.length >= MAX_SUPERSET;
+                return (
+                  <button
+                    type="button"
+                    disabled={full}
+                    className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left disabled:opacity-60"
+                    onClick={() => {
+                      setAdding({ mode: "pair", blockId: actions.blockId });
+                      setActions(null);
+                    }}
+                  >
+                    <Link2 size={16} className="shrink-0 text-glow" />
+                    <span>
+                      Superset with another exercise
+                      {full && <span className="block text-xs text-fg-2">A superset holds up to {MAX_SUPERSET} exercises</span>}
+                    </span>
+                  </button>
+                );
+              })()}
               {actionsBlock.exercises.length > 1 && (
                 <button
                   type="button"
-                  className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
+                  disabled={blocksFull}
+                  className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left disabled:opacity-60"
                   onClick={() => {
                     const without = mapBlock(session, actionsBlock.id, (b) => ({
                       ...b,
@@ -1027,7 +1170,11 @@ export function TrainScreen() {
                     setActions(null);
                   }}
                 >
-                  Split out of superset
+                  <Unlink2 size={16} className="shrink-0 text-mute" />
+                  <span>
+                    Split out of superset
+                    {blocksFull && <span className="block text-xs text-fg-2">A session holds up to {MAX_BLOCKS} blocks</span>}
+                  </span>
                 </button>
               )}
               <button
@@ -1036,12 +1183,14 @@ export function TrainScreen() {
                 onClick={() => {
                   setSkipped(actions, true);
                   setActions(null);
+                  // The options button that opened this sheet is gone with the row it was on.
+                  focusWhenReady(exControl(actions, "unskip"));
                 }}
               >
                 <SkipForward size={16} className="shrink-0 text-mute" />
                 <span>
                   Skip today
-                  <span className="block text-xs text-mute">Stays in next {weekday}'s plan</span>
+                  <span className="block text-xs text-fg-2">Stays in next {weekday}'s plan</span>
                 </span>
               </button>
               <button
@@ -1065,7 +1214,7 @@ export function TrainScreen() {
         )}
       </Sheet>
 
-      <MaxSheet exercise={maxFor} open={!!maxFor} onClose={() => setMaxFor(null)} />
+      <MaxSheet key={maxFor?.id ?? "none"} exercise={maxFor} open={!!maxFor} onClose={() => setMaxFor(null)} />
     </div>
   );
 }

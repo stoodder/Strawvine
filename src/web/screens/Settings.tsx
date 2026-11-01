@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { ChevronLeft, Download, LogOut, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { isISODate, startOfWeek, WEEKDAY_SHORT } from "../../shared/dates";
 import { displayPrefs, trainingPrefs } from "../../shared/defaults";
@@ -8,11 +8,12 @@ import { repMaxPct } from "../../shared/program";
 import { settingsSchema, type Program, type ProgramWeek, type Settings } from "../../shared/schemas";
 import { InlineText } from "../components/InlineText";
 import { useToast } from "../components/Toast";
+import { useFocusAfter } from "../components/useFocusAfter";
 import { BoxNumber, Field, Section, Toggle } from "../components/ui";
 import { useTitle } from "../components/useTitle";
 import { fmt } from "../lib/format";
-import { api } from "../lib/api";
-import { clearCache, useCreateExercise, useData, useSaveSettings, useSyncInfo, useUpdateExercise } from "../lib/store";
+import { signOut, useCreateExercise, useData, useSaveSettings, useSyncInfo, useUpdateExercise } from "../lib/store";
+import { noteOfflineSignOut } from "./Login";
 
 // Weekday order shown Monday-first; values are JS weekday indices.
 const ORDER = [1, 2, 3, 4, 5, 6, 0];
@@ -267,8 +268,6 @@ export function SettingsScreen() {
         </div>
       </Section>
 
-      <ProgramEditor program={s.program} setProgram={setProgram} />
-
       <Section label="Training">
         <div className="divide-y divide-white/[0.04]">
           <NumSetting
@@ -307,8 +306,6 @@ export function SettingsScreen() {
         </div>
       </Section>
 
-      <LiftsEditor />
-
       <Section label="Display">
         <Field label="High contrast" hint="Brighter text and stronger edges for gym glare and sunlight">
           <Toggle
@@ -319,6 +316,10 @@ export function SettingsScreen() {
         </Field>
       </Section>
 
+      <ProgramEditor program={s.program} setProgram={setProgram} />
+
+      <LiftsEditor />
+
       <SyncSection />
 
       <Section label="Data">
@@ -326,17 +327,7 @@ export function SettingsScreen() {
           <a href="/api/export" className="btn-ghost" download>
             <Download size={16} /> Export JSON
           </a>
-          <button
-            type="button"
-            className="btn-ghost"
-            onClick={async () => {
-              await api("/auth/logout", { method: "POST" }).catch(() => {});
-              clearCache();
-              window.location.href = "/";
-            }}
-          >
-            <LogOut size={16} /> Sign out
-          </button>
+          <SignOut />
         </div>
       </Section>
       {/* decor: a sign-off, not information */}
@@ -362,7 +353,8 @@ function DayPicker({ label, value, onChange }: { label: string; value: boolean[]
           >
             <span
               className={clsx(
-                "grid h-8 w-8 place-items-center rounded-full text-[0.6875rem] font-medium",
+                // 32px round; shrinks (never overlaps its neighbour) when seven don't fit.
+                "grid aspect-square w-full max-w-8 place-items-center rounded-full text-[0.6875rem] font-medium",
                 value[d] ? "bg-accent text-accent-ink" : "bg-white/[0.04] text-mute",
               )}
             >
@@ -516,8 +508,8 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
         <div className="space-y-6">
           {program.weeks.map((w, i) => (
             <div key={i}>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-2">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3">
+                <div className="flex min-w-0 flex-[1_1_8rem] items-center gap-2">
                   <span className="label w-5 shrink-0 text-accent" aria-hidden>
                     {String(i + 1).padStart(2, "0")}
                   </span>
@@ -528,11 +520,11 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
                     required
                     requiredMessage="Name the week."
                     onCommit={(label) => setWeek(i, { label })}
-                    className="w-40"
+                    className="w-40 min-w-0 shrink"
                     inputClassName="text-sm"
                   />
                 </div>
-                <div className="flex shrink-0 items-center gap-3">
+                <div className="ml-auto flex shrink-0 items-center gap-3">
                   <span className="text-xs text-mute" aria-hidden>
                     Deload
                   </span>
@@ -566,8 +558,8 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
                   )}
                 </div>
               </div>
-              <div className="flex items-start gap-3 pl-7">
-                <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-start gap-3 pl-7">
+                <div className="min-w-[7rem] flex-1">
                   <RepsInput
                     key={w.reps.join()}
                     ariaLabel={`Week ${i + 1} reps per set`}
@@ -638,12 +630,12 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
                   <Toggle label={`${name} lifting day`} on={!!day} onChange={(v) => setDay(v ? {} : null)} />
                 </div>
                 {day && (
-                  <div className="mt-2 flex items-center gap-3 min-[25rem]:pl-[3.25rem]">
+                  <div className="mt-2 flex flex-wrap items-center gap-3 min-[25rem]:pl-[3.25rem]">
                     <select
                       aria-label={`${name} main lift`}
                       value={day.primaryExerciseId ?? ""}
                       onChange={(e) => setDay({ primaryExerciseId: e.target.value ? Number(e.target.value) : null })}
-                      className="field min-w-0 flex-1 rounded-xl bg-white/[0.05] px-3 py-2 text-base [color-scheme:dark]"
+                      className="field min-w-[8rem] flex-1 rounded-xl bg-white/[0.05] px-3 py-2 text-base [color-scheme:dark]"
                     >
                       <option value="">No main lift</option>
                       {tracked.map((e) => (
@@ -652,7 +644,7 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
                         </option>
                       ))}
                     </select>
-                    <span className="text-xs text-mute" aria-hidden>
+                    <span className="ml-auto text-xs text-mute" aria-hidden>
                       AMRAP
                     </span>
                     <Toggle label={`${name} AMRAP progression`} on={day.progression} onChange={(v) => setDay({ progression: v })} />
@@ -781,6 +773,98 @@ function LiftsEditor() {
         </button>
       </div>
     </Section>
+  );
+}
+
+/**
+ * Sign out. Edits that haven't reached the server yet are the one thing a sign-out can lose, so
+ * with any pending it first asks whether to keep them on this device (they sync after the next
+ * sign-in) or discard them. Offline, the device signs out at once and the server side is
+ * finished on the next contact — the sign-in screen says so (see `noteOfflineSignOut`).
+ */
+function SignOut() {
+  const info = useSyncInfo();
+  const navigate = useNavigate();
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const focusAfter = useFocusAfter();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const firstChoiceRef = useRef<HTMLButtonElement>(null);
+  const questionId = useId();
+
+  const run = async (keepUnsynced: boolean) => {
+    setBusy(true);
+    setFailed(false);
+    // signOut switches the app to the sign-in screen at once (the server call finishes after);
+    // land on Today when signing back in, not here.
+    const pending = signOut({ keepUnsynced });
+    navigate("/", { replace: true });
+    let r: Awaited<ReturnType<typeof signOut>>;
+    try {
+      r = await pending;
+    } catch {
+      setBusy(false);
+      setFailed(true);
+      return;
+    }
+    // Offline, this device is signed out and the server side finishes on the next contact.
+    if (!r.ok && r.reason === "offline") noteOfflineSignOut();
+  };
+
+  // Count rejected-but-unsaved edits too: discarding them at sign-out loses them just the same.
+  const unsynced = info.unsynced ?? info.pending;
+  if (asking && unsynced > 0)
+    return (
+      <div role="group" aria-labelledby={questionId} className="w-full rounded-2xl bg-white/[0.03] p-4">
+        <p id={questionId} className="text-sm text-fg-2">
+          {unsynced} {unsynced === 1 ? "change hasn't" : "changes haven't"} synced.
+        </p>
+        <p className="mt-1 text-xs text-mute">Keep them on this device to sync after you sign back in, or discard them.</p>
+        <div className="mt-4 flex flex-wrap gap-3">
+          <button ref={firstChoiceRef} type="button" className="btn-ghost" disabled={busy} onClick={() => void run(true)}>
+            Keep on this device
+          </button>
+          <button type="button" className="btn-ghost text-warn" disabled={busy} onClick={() => void run(false)}>
+            Discard
+          </button>
+          <button
+            type="button"
+            className="btn text-mute"
+            disabled={busy}
+            onClick={() => {
+              setAsking(false);
+              focusAfter(() => triggerRef.current);
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="btn-ghost"
+        disabled={busy}
+        onClick={() => {
+          if (unsynced > 0) {
+            setAsking(true);
+            focusAfter(() => firstChoiceRef.current);
+          } else void run(false);
+        }}
+      >
+        <LogOut size={16} /> {busy ? "Signing out…" : "Sign out"}
+      </button>
+      {failed && (
+        <p role="alert" className="w-full text-xs text-warn">
+          Couldn't sign out. Try again.
+        </p>
+      )}
+    </>
   );
 }
 

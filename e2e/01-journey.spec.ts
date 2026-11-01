@@ -2,8 +2,7 @@
  * The first day: sign in → onboarding → Today. Logging weight, sleep, nutrition and steps closes
  * the (Sunday) day, which is celebrated.
  */
-import { expect, test } from "@playwright/test";
-import { dismissCelebrations, fillNumber, PASSWORD, startClockAt, SUNDAY } from "./helpers";
+import { dismissCelebrations, expect, fillNumber, PASSWORD, startClockAt, SUNDAY, test } from "./helpers";
 
 test("sign in, onboard and close the first day", async ({ page }) => {
   await startClockAt(page, SUNDAY);

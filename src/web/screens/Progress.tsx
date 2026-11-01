@@ -6,7 +6,7 @@ import { displayPrefs } from "../../shared/defaults";
 import { CALIBRATION_DAYS, computeEnergySeries } from "../../shared/energy";
 import { currentMax } from "../../shared/program";
 import type { Exercise } from "../../shared/schemas";
-import { LineChart, Sparkline } from "../components/charts";
+import { LineChart, Sparkline, type Series } from "../components/charts";
 import { MaxSheet } from "../components/MaxSheet";
 import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
@@ -39,6 +39,50 @@ export function ProgressScreen() {
     return computeEnergySeries(data.days, from, today, data.settings.nutrition.kcalPerLb);
   }, [data.days, data.settings.nutrition.kcalPerLb, range, today, first]);
 
+  // Stable series for the charts, so hovering or opening a table never rebuilds years of points.
+  const weightSeries = useMemo<Series[]>(
+    () => [
+      {
+        key: "raw",
+        label: "Scale",
+        kind: "dots",
+        color: "var(--color-fg-2)",
+        points: series.map((d) => ({ x: d.date, y: d.weightLb })),
+        format: (v) => v.toFixed(1),
+      },
+      {
+        key: "avg",
+        label: "Trend",
+        kind: "line",
+        color: "var(--color-accent)",
+        points: series.map((d) => ({ x: d.date, y: d.avgWeight })),
+        format: (v) => v.toFixed(1),
+      },
+    ],
+    [series],
+  );
+  const energySeries = useMemo<Series[]>(
+    () => [
+      {
+        key: "intake",
+        label: "Intake",
+        kind: "line",
+        color: "var(--color-fg-2)",
+        points: series.map((d) => ({ x: d.date, y: d.avgCalories })),
+        format: (v) => fmt(v),
+      },
+      {
+        key: "tdee",
+        label: "TDEE",
+        kind: "line",
+        color: "var(--color-accent)",
+        points: series.map((d) => ({ x: d.date, y: d.avgTdee })),
+        format: (v) => fmt(v),
+      },
+    ],
+    [series],
+  );
+
   const loggedCount = model.todayEnergy?.loggedCount ?? 0;
   const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
   const goal = data.settings.weightGoal;
@@ -67,7 +111,7 @@ export function ProgressScreen() {
           </p>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-x-6 gap-y-7">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(7.5rem,1fr))] gap-x-6 gap-y-7">
               <Stat
                 label="TDEE"
                 value={fmt(c.tdee?.value)}
@@ -125,7 +169,7 @@ export function ProgressScreen() {
               />
             </div>
 
-            <div className="mt-8 grid grid-cols-3 gap-5">
+            <div className="mt-8 grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
               {(
                 [
                   ["Lifts", c.lifts],
@@ -133,6 +177,7 @@ export function ProgressScreen() {
                   ["Zone 2", c.zone2],
                 ] as const
               ).map(([label, v]) => {
+                // A routine week done is progress (lime); gold stays for PRs and goals.
                 const met = v.planned > 0 && v.done >= v.planned;
                 return (
                   <div key={label}>
@@ -145,12 +190,12 @@ export function ProgressScreen() {
                       {/* Not colour alone: a met week also gets a check. */}
                       {met && (
                         <>
-                          <Check size={14} strokeWidth={2.5} className="text-gold" aria-hidden />
+                          <Check size={14} strokeWidth={2.5} className="text-accent" aria-hidden />
                           <span className="sr-only">all done</span>
                         </>
                       )}
                     </div>
-                    <Bar className="mt-2" value={v.planned ? v.done / v.planned : 0} tone={met ? "gold" : "accent"} />
+                    <Bar className="mt-2" value={v.planned ? v.done / v.planned : 0} />
                   </div>
                 );
               })}
@@ -160,13 +205,15 @@ export function ProgressScreen() {
         {c.next && c.daysLogged > 0 && (
           <div className="mt-8 rounded-3xl bg-gradient-to-br from-accent/[0.09] to-transparent p-5 ring-1 ring-accent/15">
             <div className="label text-accent">Next week</div>
-            <div className="mt-3 flex items-end justify-between gap-4">
+            <div className="mt-3 flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
               <div className="num text-4xl font-light tracking-tight">
                 {fmt(c.next.calories)}
                 <span className="ml-1 text-sm text-mute">kcal/day</span>
               </div>
               <div className="num pb-1 text-right text-xs leading-relaxed text-fg-2">
-                P {fmt(c.next.macros.proteinG)} · C {fmt(c.next.macros.carbsG)} · F {fmt(c.next.macros.fatG)}
+                <span className="whitespace-nowrap">P {fmt(c.next.macros.proteinG)}</span> ·{" "}
+                <span className="whitespace-nowrap">C {fmt(c.next.macros.carbsG)}</span> ·{" "}
+                <span className="whitespace-nowrap">F {fmt(c.next.macros.fatG)}</span>
               </div>
             </div>
             {c.projection?.range && goal && (
@@ -208,24 +255,7 @@ export function ProgressScreen() {
         }
       >
         <LineChart
-          series={[
-            {
-              key: "raw",
-              label: "Scale",
-              kind: "dots",
-              color: "var(--color-fg-2)",
-              points: series.map((d) => ({ x: d.date, y: d.weightLb })),
-              format: (v) => v.toFixed(1),
-            },
-            {
-              key: "avg",
-              label: "Trend",
-              kind: "line",
-              color: "var(--color-accent)",
-              points: series.map((d) => ({ x: d.date, y: d.avgWeight })),
-              format: (v) => v.toFixed(1),
-            },
-          ]}
+          series={weightSeries}
           refLine={goal ? { y: goal.targetLb, label: `goal ${goal.targetLb}` } : undefined}
           title="Bodyweight"
           strong={strong}
@@ -235,24 +265,7 @@ export function ProgressScreen() {
 
       <Section label="Energy balance">
         <LineChart
-          series={[
-            {
-              key: "intake",
-              label: "Intake",
-              kind: "line",
-              color: "var(--color-fg-2)",
-              points: series.map((d) => ({ x: d.date, y: d.avgCalories })),
-              format: (v) => fmt(v),
-            },
-            {
-              key: "tdee",
-              label: "TDEE",
-              kind: "line",
-              color: "var(--color-accent)",
-              points: series.map((d) => ({ x: d.date, y: d.avgTdee })),
-              format: (v) => fmt(v),
-            },
-          ]}
+          series={energySeries}
           emptyText="Two logged days and the burn estimate starts drawing."
           title="Energy balance"
           strong={strong}

@@ -5,7 +5,7 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-/** Identifies this web build: `BUILD_ID` if set (the server honours the same variable), else `<git sha>-<timestamp>`. */
+/** Identifies this web build: `BUILD_ID` if set, else `<git sha>-<timestamp>`. */
 function buildId(): string {
   const env = process.env.BUILD_ID?.trim();
   if (env) return env;

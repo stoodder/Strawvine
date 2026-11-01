@@ -1,7 +1,19 @@
-import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { onlineManager } from "@tanstack/react-query";
 import { createBrowserRouter, Outlet, RouterProvider, ScrollRestoration } from "react-router";
 import { DataProvider, useBootstrapQuery, useData } from "./lib/store";
-import { onSignedOut, resumeAfterLogin } from "./lib/sync";
+import { probeSession } from "./lib/api";
+import {
+  getSyncInfo,
+  getSyncState,
+  isSignedIn,
+  onSignedOut,
+  resumeAfterLogin,
+  SIGNED_IN_EVENT,
+  SIGNED_OUT_EVENT,
+  subscribeSync,
+  syncNow,
+} from "./lib/sync";
 import { SyncStatus } from "./components/SyncStatus";
 import { BottomNav } from "./components/BottomNav";
 import { Celebrations } from "./components/Celebrations";
@@ -122,8 +134,33 @@ function Splash({ message }: { message?: string }) {
   );
 }
 
+/**
+ * No data and no way to get it right now (offline, or the server unreachable): say so calmly,
+ * with what's waiting on this device, instead of an endless splash.
+ */
+function OfflineState({ onRetry, busy }: { onRetry: () => void; busy: boolean }) {
+  const info = useSyncExternalStore(subscribeSync, getSyncInfo, getSyncInfo);
+  return (
+    <div className="grid min-h-dvh place-items-center px-6">
+      <div className="flex max-w-xs flex-col items-center gap-4 text-center" role="status">
+        <Logo size={44} />
+        <p className="text-base text-fg">{info.online ? "Couldn't reach Strawvine" : "You're offline"}</p>
+        <p className="text-sm text-mute">
+          This device doesn't have a copy of your journal yet. It will load as soon as there's a connection.
+          {info.unsynced > 0 && ` ${info.unsynced} unsynced ${info.unsynced === 1 ? "change is" : "changes are"} safe on this device.`}
+        </p>
+        <button type="button" className="btn-ghost min-h-11" disabled={busy} onClick={onRetry}>
+          {busy ? "Trying…" : "Try again"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Authed() {
   const q = useBootstrapQuery(true);
+  const sync = useSyncExternalStore(subscribeSync, getSyncState, getSyncState);
+  const [retrying, setRetrying] = useState(false);
   if (q.data) {
     return (
       <DataProvider data={q.data}>
@@ -131,44 +168,75 @@ function Authed() {
       </DataProvider>
     );
   }
-  if (q.isError)
+  // Waiting on this device's copy (slow storage) or the first attempt: the splash.
+  const stuck = q.isError || q.fetchStatus === "paused" || q.failureCount > 0 || (!sync.online && q.fetchStatus !== "fetching");
+  if (stuck && !sync.restoring) {
     return (
-      <div className="grid min-h-dvh place-items-center">
-        <div className="flex flex-col items-center gap-4">
-          <Logo size={44} />
-          <p className="max-w-xs text-center text-sm text-mute">Couldn't reach Strawvine. Check your connection.</p>
-          <button type="button" className="btn-ghost" onClick={() => void q.refetch()}>
-            Try again
-          </button>
-        </div>
-      </div>
+      <OfflineState
+        busy={retrying}
+        onRetry={() => {
+          setRetrying(true);
+          // navigator.onLine is often wrong on a weak signal: just try.
+          onlineManager.setOnline(true);
+          void Promise.all([q.refetch(), syncNow()]).finally(() => {
+            setRetrying(false);
+            onlineManager.setOnline(navigator.onLine);
+          });
+        }}
+      />
     );
+  }
   return <Splash />;
 }
 
 /**
- * No blocking auth check: the app renders straight from this device's copy (if any) while the
- * bootstrap request doubles as the auth check. Only a definite 401 shows the sign-in screen,
- * and unsynced edits survive it (they resume after sign-in).
+ * No blocking auth check: a signed-in device renders straight from its copy (if any) while the
+ * bootstrap request doubles as the auth check; a definite 401 shows the sign-in screen, and
+ * unsynced edits survive it (they resume after sign-in). A device that isn't signed in (signed
+ * out, or never) never shows cached data: it starts at sign-in, skipping it only if the browser
+ * still holds a valid session.
  */
 export function App() {
-  const [authed, setAuthed] = useState(true);
+  const [authed, setAuthed] = useState(isSignedIn);
 
   useEffect(() => {
     const onUnauthorized = () => {
       setAuthed(false);
       onSignedOut();
     };
+    const out = () => setAuthed(false);
+    const back = () => setAuthed(true);
     window.addEventListener("strawvine:unauthorized", onUnauthorized);
-    return () => window.removeEventListener("strawvine:unauthorized", onUnauthorized);
+    window.addEventListener(SIGNED_OUT_EVENT, out);
+    window.addEventListener(SIGNED_IN_EVENT, back);
+    return () => {
+      window.removeEventListener("strawvine:unauthorized", onUnauthorized);
+      window.removeEventListener(SIGNED_OUT_EVENT, out);
+      window.removeEventListener(SIGNED_IN_EVENT, back);
+    };
+  }, []);
+
+  // Not flagged as signed in at start-up, but the session cookie may still be good.
+  useEffect(() => {
+    if (authed) return;
+    let live = true;
+    void probeSession().then((ok) => {
+      if (!ok || !live) return;
+      resumeAfterLogin();
+      setAuthed(true);
+    });
+    return () => {
+      live = false;
+    };
+    // Once per load: after an explicit sign-out the cookie is gone anyway.
   }, []);
 
   if (!authed)
     return (
       <Login
         onSuccess={() => {
-          setAuthed(true);
           resumeAfterLogin();
+          setAuthed(true);
         }}
       />
     );

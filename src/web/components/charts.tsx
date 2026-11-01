@@ -90,39 +90,80 @@ export function LineChart({
   const tableId = useId();
   const width = 360;
   const pad = { t: 12, r: 8, b: 8, l: 8 };
+  const plotW = width - pad.l - pad.r;
 
-  const dates = useMemo(() => {
+  // Everything that depends only on the data is computed once per series change, not per
+  // hover frame: a long range (years of days) would otherwise rescan every point on each move.
+  const geo = useMemo(() => {
     const set = new Set<string>();
     for (const s of series) for (const p of s.points) set.add(p.x);
-    return [...set].sort();
-  }, [series]);
+    const dates = [...set].sort();
+    // Per series: date → value, for O(1) reads on hover and in the table.
+    const byDate = series.map((s) => {
+      const m = new Map<string, number>();
+      for (const p of s.points) if (p.y !== null) m.set(p.x, p.y);
+      return m;
+    });
+    let dataMin = Infinity;
+    let dataMax = -Infinity;
+    let count = 0;
+    for (const m of byDate)
+      for (const v of m.values()) {
+        count++;
+        if (v < dataMin) dataMin = v;
+        if (v > dataMax) dataMax = v;
+      }
+    if (count < 2 || dates.length < 2) return null;
 
-  const all = series.flatMap((s) => s.points.map((p) => p.y)).filter((v): v is number => v !== null);
-  if (all.length < 2 || dates.length < 2) return <div className="grid h-28 place-items-center text-sm text-mute">{emptyText}</div>;
+    // The y-domain hugs the data. A reference line close to the data joins the domain; one far
+    // outside it is pinned to the edge as a marker instead of squashing the lines flat.
+    let min = dataMin;
+    let max = dataMax;
+    const span = max - min || Math.abs(max) * 0.05 || 1;
+    let pinned: "above" | "below" | null = null;
+    if (refLine) {
+      const near = span * 0.75;
+      if (refLine.y >= min - near && refLine.y <= max + near) {
+        min = Math.min(min, refLine.y);
+        max = Math.max(max, refLine.y);
+      } else pinned = refLine.y < min ? "below" : "above";
+    }
+    const padY = (max - min || span) * 0.15;
+    min -= padY;
+    max += padY;
 
-  // The y-domain hugs the data. A reference line close to the data joins the domain; one far
-  // outside it is pinned to the edge as a marker instead of squashing the lines flat.
-  let min = Math.min(...all);
-  let max = Math.max(...all);
-  const dataMin = min;
-  const dataMax = max;
-  const span = max - min || Math.abs(max) * 0.05 || 1;
-  let pinned: "above" | "below" | null = null;
-  if (refLine) {
-    const near = span * 0.75;
-    if (refLine.y >= min - near && refLine.y <= max + near) {
-      min = Math.min(min, refLine.y);
-      max = Math.max(max, refLine.y);
-    } else pinned = refLine.y < min ? "below" : "above";
-  }
-  const padY = (max - min || span) * 0.15;
-  min -= padY;
-  max += padY;
+    const xOf = (i: number) => pad.l + (i / (dates.length - 1)) * plotW;
+    const yOf = (v: number) => pad.t + (1 - (v - min) / (max - min)) * (height - pad.t - pad.b);
+    const idx = new Map(dates.map((d, i) => [d, i]));
+    // One path per series. Dots are zero-length segments drawn with round caps, so a decade of
+    // daily weigh-ins is one element instead of thousands of <circle>s.
+    const paths = series.map((s) => {
+      let d = "";
+      for (const p of s.points) {
+        if (p.y === null) continue;
+        const x = xOf(idx.get(p.x)!).toFixed(1);
+        const y = yOf(p.y).toFixed(1);
+        d += s.kind === "dots" ? `M${x},${y}h0` : `${d ? "L" : "M"}${x},${y}`;
+      }
+      return d;
+    });
+    return { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pad / plotW are constants
+  }, [series, height, refLine?.y]);
 
-  const plotW = width - pad.l - pad.r;
-  const xOf = (i: number) => pad.l + (i / (dates.length - 1)) * plotW;
-  const yOf = (v: number) => pad.t + (1 - (v - min) / (max - min)) * (height - pad.t - pad.b);
-  const idx = new Map(dates.map((d, i) => [d, i]));
+  // The table: the most recent 14 days with any value, newest first — built only while open.
+  const rows = useMemo(() => {
+    if (!table || !geo) return [];
+    const out: string[] = [];
+    for (let i = geo.dates.length - 1; i >= 0 && out.length < 14; i--) {
+      const d = geo.dates[i]!;
+      if (geo.byDate.some((m) => m.has(d))) out.push(d);
+    }
+    return out;
+  }, [table, geo]);
+
+  if (!geo) return <div className="grid h-28 place-items-center text-sm text-mute">{emptyText}</div>;
+  const { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths } = geo;
 
   const onMove = (clientX: number) => {
     const el = ref.current;
@@ -130,7 +171,8 @@ export function LineChart({
     const r = el.getBoundingClientRect();
     const x = ((clientX - r.left) / r.width) * width;
     const i = Math.round(((x - pad.l) / plotW) * (dates.length - 1));
-    setHover(Math.max(0, Math.min(dates.length - 1, i)));
+    const next = Math.max(0, Math.min(dates.length - 1, i));
+    if (next !== hover) setHover(next);
   };
   const onKey = (e: ReactKeyboardEvent) => {
     const last = dates.length - 1;
@@ -149,7 +191,10 @@ export function LineChart({
 
   const hoverDate = hover !== null ? dates[hover]! : null;
   const fmtOf = (s: Series) => s.format ?? formatY;
-  const lastOf = (s: Series) => [...s.points].reverse().find((q) => q.y !== null);
+  const lastOf = (s: Series) => {
+    for (let i = s.points.length - 1; i >= 0; i--) if (s.points[i]!.y !== null) return s.points[i];
+    return undefined;
+  };
   const firstOf = (s: Series) => s.points.find((q) => q.y !== null);
   const summary = [
     `${title}, ${formatShortDate(dates[0]!)} to ${formatShortDate(dates[dates.length - 1]!)}.`,
@@ -167,22 +212,17 @@ export function LineChart({
   // Axis values read in the main line's own format (e.g. one decimal for bodyweight).
   const fmtAxis = (series.find((s) => s.kind === "line") ?? series[0])?.format ?? formatY;
   const gridAt = dataMax > dataMin ? [dataMax, (dataMax + dataMin) / 2, dataMin] : [dataMax];
-  // The table: the most recent 14 days with any value, newest first.
-  const rows = dates
-    .filter((d) => series.some((s) => s.points.some((p) => p.x === d && p.y !== null)))
-    .slice(-14)
-    .reverse();
 
   return (
     <div className="relative">
       <div className="mb-2 flex min-h-[34px] flex-wrap items-end gap-x-5 gap-y-1" aria-live="polite" aria-atomic="true">
-        {series.map((s) => {
-          const p = hoverDate ? s.points.find((q) => q.x === hoverDate) : lastOf(s);
+        {series.map((s, si) => {
+          const y = hoverDate ? byDate[si]!.get(hoverDate) : lastOf(s)?.y;
           return (
             <div key={s.key} className="flex items-center gap-2">
               <span aria-hidden className="h-1.5 w-1.5 rounded-full" style={{ background: s.color }} />
               <span className="text-xs text-mute">{s.label}</span>
-              <span className="num text-sm">{p?.y != null ? fmtOf(s)(p.y) : "—"}</span>
+              <span className="num text-sm">{y != null ? fmtOf(s)(y) : "—"}</span>
             </div>
           );
         })}
@@ -223,17 +263,20 @@ export function LineChart({
               opacity={0.6}
             />
           )}
-          {series.map((s) => {
-            const pts = s.points.filter((p) => p.y !== null).map((p) => [xOf(idx.get(p.x)!), yOf(p.y!)] as const);
+          {series.map((s, si) => {
+            const d = paths[si]!;
             if (s.kind === "dots")
               return (
-                <g key={s.key}>
-                  {pts.map(([x, y], i) => (
-                    <circle key={i} cx={x} cy={y} r={strong ? 2.4 : 1.8} fill={s.color} opacity={strong ? 0.9 : 0.55} />
-                  ))}
-                </g>
+                <path
+                  key={s.key}
+                  d={d}
+                  fill="none"
+                  stroke={s.color}
+                  strokeWidth={strong ? 4.8 : 3.6}
+                  strokeLinecap="round"
+                  opacity={strong ? 0.9 : 0.55}
+                />
               );
-            const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join("");
             return (
               <g key={s.key}>
                 <path d={d} fill="none" stroke={s.color} strokeWidth={6} opacity={0.08} strokeLinejoin="round" />
@@ -250,9 +293,9 @@ export function LineChart({
                 y2={height - pad.b}
                 stroke={strong ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.18)"}
               />
-              {series.map((s) => {
-                const p = s.points.find((q) => q.x === hoverDate);
-                return p?.y != null ? <circle key={s.key} cx={xOf(hover)} cy={yOf(p.y)} r={3} fill={s.color} /> : null;
+              {series.map((s, si) => {
+                const y = byDate[si]!.get(hoverDate!);
+                return y != null ? <circle key={s.key} cx={xOf(hover)} cy={yOf(y)} r={3} fill={s.color} /> : null;
               })}
             </g>
           )}
@@ -260,7 +303,7 @@ export function LineChart({
         {/* High and low of the plotted data, at their own levels on the left. */}
         <span
           aria-hidden
-          className="pointer-events-none absolute left-2 -translate-y-full pb-0.5 font-mono text-[0.625rem] text-mute"
+          className="pointer-events-none absolute left-2 -translate-y-full pb-0.5 font-mono text-2xs text-mute"
           style={{ top: pct(yOf(dataMax)) }}
         >
           {fmtAxis(dataMax)}
@@ -268,7 +311,7 @@ export function LineChart({
         {dataMax > dataMin && (
           <span
             aria-hidden
-            className="pointer-events-none absolute left-2 pt-0.5 font-mono text-[0.625rem] text-mute"
+            className="pointer-events-none absolute left-2 pt-0.5 font-mono text-2xs text-mute"
             style={{ top: pct(yOf(dataMin)) }}
           >
             {fmtAxis(dataMin)}
@@ -277,7 +320,7 @@ export function LineChart({
         {refLine && !pinned && (
           <span
             aria-hidden
-            className="pointer-events-none absolute right-0 -translate-y-full pb-1 font-mono text-[0.625rem] text-gold/90"
+            className="pointer-events-none absolute right-0 -translate-y-full pb-1 font-mono text-2xs text-gold/90"
             style={{ top: pct(yOf(refLine.y)) }}
           >
             {refLine.label}
@@ -287,7 +330,7 @@ export function LineChart({
           <span
             aria-hidden
             className={clsx(
-              "pointer-events-none absolute right-0 font-mono text-[0.625rem] text-gold/90",
+              "pointer-events-none absolute right-0 font-mono text-2xs text-gold/90",
               pinned === "below" ? "bottom-0" : "top-0",
             )}
           >
@@ -295,14 +338,15 @@ export function LineChart({
           </span>
         )}
       </div>
-      <div className="mt-1.5 flex items-center justify-between px-2 font-mono text-[0.625rem] text-mute">
+      <div className="mt-1.5 flex items-center justify-between px-2 font-mono text-2xs text-mute">
         <span aria-hidden>{formatShortDate(dates[0]!)}</span>
         <button
           type="button"
           aria-expanded={table}
           aria-controls={tableId}
           onClick={() => setTable((t) => !t)}
-          className="label hit inline-flex items-center gap-1 text-mute"
+          // 44px tall without growing the row.
+          className="label -my-3 inline-flex min-h-11 items-center gap-1 px-2 text-mute"
         >
           Table
           <ChevronDown size={11} aria-hidden className={clsx("transition-transform", table && "rotate-180")} />
@@ -339,8 +383,8 @@ export function LineChart({
                     <th scope="row" className="py-1.5 text-left font-normal text-fg-2">
                       {formatShortDate(d)}
                     </th>
-                    {series.map((s) => {
-                      const y = s.points.find((p) => p.x === d)?.y;
+                    {series.map((s, si) => {
+                      const y = byDate[si]!.get(d);
                       return (
                         <td key={s.key} className="num py-1.5 text-right text-fg">
                           {y != null ? fmtOf(s)(y) : <span className="text-mute">—</span>}

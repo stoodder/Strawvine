@@ -59,8 +59,14 @@ export type Op =
   | { kind: "seen"; keys: string[] };
 
 export interface Entry {
-  /** Unique, increasing; a coalesced edit gets a fresh seq (it moves to the end of the queue). */
+  /**
+   * Unique, increasing; a coalesced edit gets a fresh seq (it moves to the end of the queue).
+   * Seqs carry the allocating tab's number in their low bits (see `TAB_SPACE`), so two windows
+   * never hand out the same one.
+   */
   seq: number;
+  /** Bumped whenever the entry changes (state, remapped ids): the newer copy wins a cross-tab merge. */
+  rev?: number;
   op: Op;
   state: "pending" | "failed" | "acked";
   /** Readable reason for a `failed` entry. */
@@ -79,9 +85,36 @@ export interface OutboxState {
   nextTemp: number;
   /** Temporary id → the server's id, for ops (or stale UI state) still holding a temp id. */
   tempMap: Record<string, number>;
+  /** Seqs of entries removed recently (tombstones), so a merge with another tab's copy can't resurrect them. */
+  removed?: number[];
+  /** When this outbox was last reset (sign-out): a merge keeps only the newest generation. */
+  epoch?: number;
+  /** The entry some tab is sending right now (never coalesced into), and since when. */
+  inflight?: { seq: number; at: number } | null;
 }
 
 export const emptyOutbox = (): OutboxState => ({ entries: [], nextSeq: 1, nextAck: 1, nextTemp: -1, tempMap: {} });
+
+/**
+ * Seqs and temp ids are `counter * TAB_SPACE + tab`: the shared counter keeps them ordered, the
+ * tab number (1 … TAB_SPACE-1) keeps two windows that allocate at the same moment apart.
+ * `tab = 0` (tests, single window) gives plain 1, 2, 3 ….
+ */
+export const TAB_SPACE = 2 ** 20;
+const withTab = (counter: number, tab: number) => (tab ? counter * TAB_SPACE + tab : counter);
+
+/** A fresh temporary (negative) id, and the state that has used it up. */
+export function allocTempId(s: OutboxState, tab = 0): [number, OutboxState] {
+  const id = tab ? s.nextTemp * TAB_SPACE - tab : s.nextTemp;
+  return [id, { ...s, nextTemp: s.nextTemp - 1 }];
+}
+
+const MAX_TOMBSTONES = 500;
+function tombstone(s: OutboxState, seqs: Iterable<number>): number[] {
+  const out = [...(s.removed ?? []), ...seqs];
+  return out.length > MAX_TOMBSTONES ? out.slice(-MAX_TOMBSTONES) : out;
+}
+const bump = (e: Entry): number => (e.rev ?? 0) + 1;
 
 export type Coll = "days" | "sessions" | "settings" | "maxEntries" | "exercises" | "seenAchievements";
 export const COLLS: readonly Coll[] = ["days", "sessions", "settings", "maxEntries", "exercises", "seenAchievements"];
@@ -236,36 +269,50 @@ export function tempRefs(op: Op): number[] {
 
 /**
  * Appends an op, coalescing it with the latest unsent op on the same resource (which then
- * moves to the end, after anything it may depend on). An entry that is in flight is never touched.
+ * moves to the end, after anything it may depend on). An entry that is in flight is never
+ * touched, and nothing is merged into a rejected (failed) entry: a later day/exercise patch is
+ * queued separately (it doesn't depend on the rejected fields), while a whole-document op
+ * (session, settings) supersedes the rejected one — the caller validates it first.
  */
-export function addOp(s: OutboxState, input: Op, inflight: number | null): OutboxState {
+export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 0): OutboxState {
   let op = withIdempotencyKey(remapOp(input, s.tempMap));
   const entries = [...s.entries];
+  const dropped: number[] = [];
 
   // Deleting something that was never sent: drop both.
   if (op.kind === "deleteMax" && op.id < 0) {
     const tempId = op.id;
     const i = entries.findIndex((e) => e.state !== "acked" && e.op.kind === "addMax" && e.op.tempId === tempId);
     if (i >= 0 && entries[i]!.seq !== inflight) {
+      dropped.push(entries[i]!.seq);
       entries.splice(i, 1);
-      return { ...s, entries };
+      return { ...s, entries, removed: tombstone(s, dropped) };
     }
   }
 
   const key = opKey(op);
   if (key) {
+    const wholeDoc = op.kind === "session" || op.kind === "settings";
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i]!;
       if (e.state === "acked" || opKey(e.op) !== key) continue;
-      if (e.seq !== inflight) {
-        entries.splice(i, 1);
-        op = merge(e.op, op);
+      if (e.seq === inflight) break;
+      if (e.state === "failed") {
+        if (wholeDoc) {
+          dropped.push(e.seq);
+          entries.splice(i, 1);
+          continue; // an older pending copy may sit before it
+        }
+        break;
       }
+      dropped.push(e.seq);
+      entries.splice(i, 1);
+      op = merge(e.op, op);
       break;
     }
   }
-  entries.push({ seq: s.nextSeq, op, state: "pending" });
-  return { ...s, entries, nextSeq: s.nextSeq + 1 };
+  entries.push({ seq: withTab(s.nextSeq, tab), op, state: "pending" });
+  return { ...s, entries, nextSeq: s.nextSeq + 1, ...(dropped.length ? { removed: tombstone(s, dropped) } : {}) };
 }
 
 /** The next entry to send: pending, and not waiting on a row it references being created. */
@@ -285,35 +332,115 @@ export function ackEntry(s: OutboxState, seq: number, result: unknown): OutboxSt
     tempMap = Object.fromEntries(pairs.slice(-200));
   }
   const entries = s.entries.map((x) => {
-    if (x.seq === seq) return { ...x, state: "acked" as const, result, ackNo: s.nextAck, error: undefined };
+    if (x.seq === seq) return { ...x, state: "acked" as const, result, ackNo: s.nextAck, error: undefined, rev: bump(x) };
     if (x.state === "acked" || tempMap === s.tempMap) return x;
     const op = remapOp(x.op, tempMap);
-    return op === x.op ? x : { ...x, op };
+    return op === x.op ? x : { ...x, op, rev: bump(x) };
   });
   return { ...s, entries, tempMap, nextAck: s.nextAck + 1 };
 }
 
 export function failEntry(s: OutboxState, seq: number, error: string): OutboxState {
-  return { ...s, entries: s.entries.map((e) => (e.seq === seq ? { ...e, state: "failed" as const, error } : e)) };
+  return { ...s, entries: s.entries.map((e) => (e.seq === seq ? { ...e, state: "failed" as const, error, rev: bump(e) } : e)) };
 }
 
 export function retryFailed(s: OutboxState): OutboxState {
   if (!s.entries.some((e) => e.state === "failed")) return s;
-  return { ...s, entries: s.entries.map((e) => (e.state === "failed" ? { ...e, state: "pending" as const, error: undefined } : e)) };
+  return {
+    ...s,
+    entries: s.entries.map((e) => (e.state === "failed" ? { ...e, state: "pending" as const, error: undefined, rev: bump(e) } : e)),
+  };
 }
 
-/** Drops failed entries, and anything that depends on a row a dropped entry would have created. */
-export function discardFailed(s: OutboxState): OutboxState {
+/**
+ * Entries that can never be sent if the failed entries are discarded: unsynced entries that
+ * reference a row only a failed create would have made.
+ */
+export function dependentsOfFailed(s: OutboxState): Entry[] {
   const dropped = new Set<number>();
   for (const e of s.entries) if (e.state === "failed" && isCreator(e.op)) dropped.add(e.op.tempId);
-  const entries = s.entries.filter((e) => e.state !== "failed" && !(e.state !== "acked" && tempRefs(e.op).some((t) => dropped.has(t))));
-  return { ...s, entries };
+  if (!dropped.size) return [];
+  // Transitively: a pending create that references a dropped row drops its own row too.
+  const out: Entry[] = [];
+  for (const e of s.entries) {
+    if (e.state !== "pending" || !tempRefs(e.op).some((t) => dropped.has(t))) continue;
+    out.push(e);
+    if (isCreator(e.op)) dropped.add(e.op.tempId);
+  }
+  return out;
+}
+
+/** Drops the failed entries — only those, plus entries that depend on a row a dropped create would have made. */
+export function discardFailed(s: OutboxState): OutboxState {
+  const gone = new Set<number>([
+    ...s.entries.filter((e) => e.state === "failed").map((e) => e.seq),
+    ...dependentsOfFailed(s).map((e) => e.seq),
+  ]);
+  if (!gone.size) return s;
+  return { ...s, entries: s.entries.filter((e) => !gone.has(e.seq)), removed: tombstone(s, gone) };
 }
 
 /** Removes acked entries (their results are now part of a persisted base). */
 export function pruneAcked(s: OutboxState, seqs: ReadonlySet<number>): OutboxState {
-  if (!s.entries.some((e) => e.state === "acked" && seqs.has(e.seq))) return s;
-  return { ...s, entries: s.entries.filter((e) => !(e.state === "acked" && seqs.has(e.seq))) };
+  const gone = s.entries.filter((e) => e.state === "acked" && seqs.has(e.seq)).map((e) => e.seq);
+  if (!gone.length) return s;
+  const set = new Set(gone);
+  return { ...s, entries: s.entries.filter((e) => !set.has(e.seq)), removed: tombstone(s, gone) };
+}
+
+/** Removes entries outright (e.g. rejected bookkeeping), leaving tombstones. */
+export function removeEntries(s: OutboxState, seqs: readonly number[]): OutboxState {
+  const set = new Set(seqs);
+  if (!s.entries.some((e) => set.has(e.seq))) return s;
+  return { ...s, entries: s.entries.filter((e) => !set.has(e.seq)), removed: tombstone(s, seqs) };
+}
+
+/**
+ * Merges this tab's outbox with the copy another tab wrote (localStorage is the source of
+ * truth, but two windows can write it moments apart). Entries are united by seq minus
+ * tombstones; for an entry both have, an acked copy beats an unacked one, else the higher
+ * `rev` wins. A newer `epoch` (a sign-out reset) replaces the older generation wholesale.
+ * Returns `local` itself when the stored copy adds nothing.
+ */
+export function mergeOutbox(local: OutboxState, stored: OutboxState): OutboxState {
+  const le = local.epoch ?? 0;
+  const se = stored.epoch ?? 0;
+  if (le !== se) return se > le ? stored : local;
+  const removedSet = new Set([...(local.removed ?? []), ...(stored.removed ?? [])]);
+  const bySeq = new Map<number, Entry>();
+  for (const e of local.entries) if (!removedSet.has(e.seq)) bySeq.set(e.seq, e);
+  for (const r of stored.entries) {
+    if (removedSet.has(r.seq)) continue;
+    const l = bySeq.get(r.seq);
+    if (!l) bySeq.set(r.seq, r);
+    else if ((l.state === "acked") !== (r.state === "acked")) bySeq.set(r.seq, l.state === "acked" ? l : r);
+    else if ((r.rev ?? 0) > (l.rev ?? 0)) bySeq.set(r.seq, r);
+  }
+  const entries = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  const inflight =
+    !local.inflight || (stored.inflight && stored.inflight.at > local.inflight.at) ? (stored.inflight ?? null) : local.inflight;
+  const removed = [...removedSet];
+  const merged: OutboxState = {
+    entries,
+    nextSeq: Math.max(local.nextSeq, stored.nextSeq),
+    nextAck: Math.max(local.nextAck, stored.nextAck),
+    nextTemp: Math.min(local.nextTemp, stored.nextTemp),
+    tempMap: Object.fromEntries(Object.entries({ ...stored.tempMap, ...local.tempMap }).slice(-200)),
+    removed: removed.length > MAX_TOMBSTONES ? removed.slice(-MAX_TOMBSTONES) : removed,
+    epoch: le,
+    inflight,
+  };
+  const same =
+    entries.length === local.entries.length &&
+    entries.every((e, i) => e === local.entries[i]) &&
+    merged.nextSeq === local.nextSeq &&
+    merged.nextAck === local.nextAck &&
+    merged.nextTemp === local.nextTemp &&
+    Object.keys(merged.tempMap).length === Object.keys(local.tempMap).length &&
+    (merged.removed?.length ?? 0) === (local.removed?.length ?? 0) &&
+    (inflight?.seq ?? null) === (local.inflight?.seq ?? null) &&
+    (inflight?.at ?? null) === (local.inflight?.at ?? null);
+  return same ? local : merged;
 }
 
 export const unsynced = (s: OutboxState) => s.entries.filter((e) => e.state !== "acked");
@@ -331,9 +458,59 @@ export function pendingDates(entries: readonly Entry[]): Set<string> {
 
 const byDate = (a: { date: string }, b: { date: string }) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
 
+/**
+ * Deep equality for JSON-shaped data (keys whose value is `undefined` count as absent). Fast
+ * when most of the structure is shared: identical references short-circuit.
+ */
+export function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  const ao = a as Record<string, unknown>;
+  const bo = b as Record<string, unknown>;
+  let n = 0;
+  for (const k in ao) {
+    if (ao[k] === undefined) continue;
+    n++;
+    if (!deepEqual(ao[k], bo[k])) return false;
+  }
+  for (const k in bo) if (bo[k] !== undefined) n--;
+  return n === 0;
+}
+
+/**
+ * `next`, but reusing `prev` (and, for arrays, `prev`'s elements) wherever the contents are
+ * equal — so memoized consumers don't recompute years of history for an unchanged value.
+ */
+export function shareEqual<T>(prev: T | undefined, next: T): T {
+  if (prev === undefined || prev === next) return prev ?? next;
+  if (Array.isArray(prev) && Array.isArray(next)) {
+    let same = prev.length === next.length;
+    let out: unknown[] | null = null;
+    for (let i = 0; i < next.length; i++) {
+      const x = next[i];
+      const p = i < prev.length ? prev[i] : undefined;
+      if (p === x) continue;
+      if (p !== undefined && deepEqual(p, x)) {
+        (out ??= [...next])[i] = p;
+        continue;
+      }
+      same = false;
+    }
+    return same ? prev : ((out ?? next) as T);
+  }
+  return deepEqual(prev, next) ? prev : next;
+}
+
 function upsertByDate<T extends { date: string }>(xs: T[], x: T): T[] {
   const i = xs.findIndex((y) => y.date === x.date);
   if (i < 0) return [...xs, x].sort(byDate);
+  if (deepEqual(xs[i], x)) return xs; // the server confirmed what we have: keep identity
   const out = [...xs];
   out[i] = x;
   return out;
@@ -342,6 +519,7 @@ function upsertByDate<T extends { date: string }>(xs: T[], x: T): T[] {
 function upsertById<T extends { id: number }>(xs: T[], x: T): T[] {
   const i = xs.findIndex((y) => y.id === x.id);
   if (i < 0) return [...xs, x];
+  if (deepEqual(xs[i], x)) return xs;
   const out = [...xs];
   out[i] = x;
   return out;
@@ -360,11 +538,14 @@ export function applyOp(b: Bootstrap, op: Op): Bootstrap {
       const existing = b.days.find((d) => d.date === op.date);
       return { ...b, days: upsertByDate(b.days, { ...(existing ?? emptyDayLog(op.date)), ...op.patch }) };
     }
-    case "session":
-      return {
-        ...b,
-        sessions: op.doc ? upsertByDate(b.sessions, op.doc) : b.sessions.filter((s) => s.date !== op.date),
-      };
+    case "session": {
+      const sessions = op.doc
+        ? upsertByDate(b.sessions, op.doc)
+        : b.sessions.some((s) => s.date === op.date)
+          ? b.sessions.filter((s) => s.date !== op.date)
+          : b.sessions;
+      return sessions === b.sessions ? b : { ...b, sessions };
+    }
     case "settings":
       return { ...b, settings: op.settings };
     case "addMax": {
@@ -373,7 +554,7 @@ export function applyOp(b: Bootstrap, op: Op): Bootstrap {
       return { ...b, maxEntries: [...b.maxEntries, { id: tempId, ...rest }] };
     }
     case "deleteMax":
-      return { ...b, maxEntries: b.maxEntries.filter((e) => e.id !== op.id) };
+      return b.maxEntries.some((e) => e.id === op.id) ? { ...b, maxEntries: b.maxEntries.filter((e) => e.id !== op.id) } : b;
     case "createExercise": {
       if (b.exercises.some((e) => e.id === op.tempId)) return b;
       const { tempId, kind: _k, idemKey: _i, ...rest } = op;
@@ -381,42 +562,47 @@ export function applyOp(b: Bootstrap, op: Op): Bootstrap {
     }
     case "updateExercise":
       return { ...b, exercises: b.exercises.map((e) => (e.id === op.id ? { ...e, ...op.patch } : e)) };
-    case "seen":
-      return { ...b, seenAchievements: addKeys(b.seenAchievements, op.keys) };
+    case "seen": {
+      const seenAchievements = addKeys(b.seenAchievements, op.keys);
+      return seenAchievements === b.seenAchievements ? b : { ...b, seenAchievements };
+    }
   }
 }
 
 /** The server-confirmed effect of an acked op, given its response body. */
 export function applyResult(b: Bootstrap, op: Op, result: unknown): Bootstrap {
   switch (op.kind) {
-    case "day":
-      return result ? { ...b, days: upsertByDate(b.days, result as DayLog) } : applyOp(b, op);
-    case "session":
-      return op.doc && result ? { ...b, sessions: upsertByDate(b.sessions, result as Session) } : applyOp(b, op);
-    case "settings":
-      return { ...b, settings: (result as Settings | null) ?? op.settings };
-    case "addMax":
+    case "day": {
+      if (!result) return applyOp(b, op);
+      const days = upsertByDate(b.days, result as DayLog);
+      return days === b.days ? b : { ...b, days };
+    }
+    case "session": {
+      if (!op.doc || !result) return applyOp(b, op);
+      const sessions = upsertByDate(b.sessions, result as Session);
+      return sessions === b.sessions ? b : { ...b, sessions };
+    }
+    case "settings": {
+      const next = (result as Settings | null) ?? op.settings;
+      return deepEqual(b.settings, next) ? b : { ...b, settings: next };
+    }
+    case "addMax": {
       if (!result) return b;
-      return {
-        ...b,
-        maxEntries: upsertById(
-          b.maxEntries.filter((e) => e.id !== op.tempId),
-          result as MaxEntry,
-        ),
-      };
-    case "createExercise":
+      const without = b.maxEntries.some((e) => e.id === op.tempId) ? b.maxEntries.filter((e) => e.id !== op.tempId) : b.maxEntries;
+      const maxEntries = upsertById(without, result as MaxEntry);
+      return maxEntries === b.maxEntries ? b : { ...b, maxEntries };
+    }
+    case "createExercise": {
       if (!result) return b;
-      return {
-        ...b,
-        exercises: upsertById(
-          b.exercises.filter((e) => e.id !== op.tempId),
-          result as Exercise,
-        ),
-      };
-    case "updateExercise":
-      return result && typeof (result as Exercise).id === "number"
-        ? { ...b, exercises: upsertById(b.exercises, result as Exercise) }
-        : applyOp(b, op);
+      const without = b.exercises.some((e) => e.id === op.tempId) ? b.exercises.filter((e) => e.id !== op.tempId) : b.exercises;
+      const exercises = upsertById(without, result as Exercise);
+      return exercises === b.exercises ? b : { ...b, exercises };
+    }
+    case "updateExercise": {
+      if (!result || typeof (result as Exercise).id !== "number") return applyOp(b, op);
+      const exercises = upsertById(b.exercises, result as Exercise);
+      return exercises === b.exercises ? b : { ...b, exercises };
+    }
     case "deleteMax":
     case "seen":
       return applyOp(b, op);
@@ -435,29 +621,65 @@ export function applyAcked(b: Bootstrap, entries: readonly Entry[]): Bootstrap {
 // Overlay
 // ---------------------------------------------------------------------------
 
-export type OverlayCache = Partial<Record<Coll, { base: unknown; key: string; value: unknown }>>;
+export type OverlayCache = Partial<Record<Coll, { base: unknown; ops: readonly Op[]; value: unknown }>>;
+
+const sameOps = (a: readonly Op[], b: readonly Op[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 /**
  * base + every unsynced op, recomputing only collections whose inputs changed so untouched
- * collections keep their identity (memoized consumers don't recompute).
+ * collections keep their identity (memoized consumers don't recompute). The cache is keyed on
+ * the ops themselves (not seqs): an op rewritten in place — e.g. a temp id remapped after its
+ * create was acked — recomputes. A recomputed collection that equals what `prev` showed keeps
+ * `prev`'s identity (an ack that confirms the optimistic value changes nothing on screen).
  */
 export function overlay(base: Bootstrap, entries: readonly Entry[], cache: OverlayCache, prev?: Bootstrap): Bootstrap {
   const live = entries.filter((e) => e.state !== "acked");
   const out = { ...base } as Record<Coll, unknown>;
   for (const c of COLLS) {
-    const ops = live.filter((e) => collOf(e.op) === c);
-    const key = ops.map((e) => e.seq).join(",");
+    const ops = live.filter((e) => collOf(e.op) === c).map((e) => (e.state === "failed" ? maskFailed(e, entries) : e.op));
     const hit = cache[c];
-    if (hit && hit.base === base[c] && hit.key === key) {
+    if (hit && hit.base === base[c] && sameOps(hit.ops, ops)) {
       out[c] = hit.value;
       continue;
     }
-    const value = ops.length ? ops.reduce((acc, e) => applyOp(acc, e.op), base)[c] : base[c];
-    cache[c] = { base: base[c], key, value };
+    let value = ops.length ? ops.reduce((acc, op) => applyOp(acc, op), base)[c] : base[c];
+    if (prev) value = shareEqual(prev[c], value);
+    cache[c] = { base: base[c], ops, value };
     out[c] = value;
   }
   const next = out as unknown as Bootstrap;
   if (prev && COLLS.every((c) => prev[c] === next[c])) return prev;
+  return next;
+}
+
+const masked = new WeakMap<Op, { sig: string; op: Op }>();
+
+/**
+ * A rejected patch, minus the fields a later edit of the same day/exercise set (acked or not):
+ * the rejected value must not be shown over a newer one. Stable identity per (op, later fields).
+ */
+function maskFailed(e: Entry, entries: readonly Entry[]): Op {
+  const op = e.op;
+  if (op.kind !== "day" && op.kind !== "updateExercise") return op;
+  const key = opKey(op);
+  const later = new Set<string>();
+  let seen = false;
+  for (const x of entries) {
+    if (x === e) {
+      seen = true;
+      continue;
+    }
+    if (!seen || opKey(x.op) !== key) continue;
+    const p = (x.op as { patch: object }).patch;
+    for (const k of Object.keys(p)) later.add(k);
+  }
+  if (!later.size) return op;
+  const sig = [...later].sort().join(",");
+  const hit = masked.get(op);
+  if (hit && hit.sig === sig) return hit.op;
+  const patch = Object.fromEntries(Object.entries(op.patch).filter(([k]) => !later.has(k)));
+  const next = { ...op, patch } as Op;
+  masked.set(op, { sig, op: next });
   return next;
 }
 
@@ -526,7 +748,14 @@ export function request(op: Op): OpRequest {
       return {
         method: "POST",
         path: `/exercises/${op.exerciseId}/maxes`,
-        body: { date: op.date, valueLb: op.valueLb, source: op.source, note: op.note },
+        // createdAt: when it was recorded on the device (the server clamps it to a sane window).
+        body: {
+          date: op.date,
+          valueLb: op.valueLb,
+          source: op.source,
+          note: op.note,
+          ...(op.createdAt ? { createdAt: op.createdAt } : {}),
+        },
         headers: idemHeaders(op),
       };
     case "deleteMax":
@@ -542,5 +771,50 @@ export function request(op: Op): OpRequest {
       return { method: "PATCH", path: `/exercises/${op.id}`, body: op.patch };
     case "seen":
       return { method: "POST", path: "/achievements/seen", body: { keys: op.keys } };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cheap client-side validation (mirrors the server's limits that edits can actually hit)
+// ---------------------------------------------------------------------------
+
+const MAX_BLOCKS = 30;
+const MAX_SUPERSET = 6;
+const MAX_SETS = 30;
+
+/** Why the server would reject this op, for the limits a user can run into; null if it looks fine. */
+export function validateOp(op: Op): string | null {
+  switch (op.kind) {
+    case "session": {
+      const doc = op.doc;
+      if (!doc) return null;
+      if (doc.blocks.length > MAX_BLOCKS) return `A workout can have at most ${MAX_BLOCKS} blocks.`;
+      for (const b of doc.blocks) {
+        if (b.exercises.length < 1) return "Each block needs at least one exercise.";
+        if (b.exercises.length > MAX_SUPERSET) return `A superset can have at most ${MAX_SUPERSET} exercises.`;
+        for (const x of b.exercises) if (x.sets.length > MAX_SETS) return `An exercise can have at most ${MAX_SETS} sets.`;
+      }
+      if (doc.notes.length > 20_000) return "Workout notes are too long (20,000 characters max).";
+      if (doc.label.length > 60) return "The workout name is too long (60 characters max).";
+      return null;
+    }
+    case "day": {
+      const p = op.patch;
+      if (typeof p.journal === "string" && p.journal.length > 50_000) return "The journal entry is too long (50,000 characters max).";
+      if (typeof p.metconNotes === "string" && p.metconNotes.length > 5000)
+        return "The conditioning notes are too long (5,000 characters max).";
+      return null;
+    }
+    case "addMax":
+      if (!(op.valueLb >= 0 && op.valueLb <= 2000)) return "A max must be between 0 and 2,000 lb.";
+      if (op.note && op.note.length > 500) return "The note is too long (500 characters max).";
+      return null;
+    case "createExercise": {
+      const name = op.name.trim();
+      if (!name || name.length > 80) return "An exercise name needs 1–80 characters.";
+      return null;
+    }
+    default:
+      return null;
   }
 }
