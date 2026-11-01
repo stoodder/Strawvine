@@ -1,25 +1,41 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { asc, eq } from "drizzle-orm";
-import { Hono } from "hono";
+import { asc, eq, sql } from "drizzle-orm";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { compress } from "hono/compress";
+import { etag } from "hono/etag";
+import { HTTPException } from "hono/http-exception";
+import { routePath } from "hono/route";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import {
   dayLogPatchSchema,
-  emptyDayLog,
   exerciseCreateSchema,
   exercisePatchSchema,
   isoDate,
   maxEntryCreateSchema,
+  safeString,
   sessionSchema,
   settingsSchema,
   type Bootstrap,
-  type DayLog,
-  type Exercise,
-  type MaxEntry,
 } from "../shared/schemas";
-import { clearSessionCookie, loginLimiter, passwordMatches, requireAuth, setSessionCookie } from "./auth";
+import {
+  clearSessionCookie,
+  clientIp,
+  currentSession,
+  dbEpochStore,
+  deriveSessionKey,
+  loginLimiter,
+  passwordMatches,
+  requireAuth,
+  setSessionCookie,
+  type EpochStore,
+  type LoginLimiterOptions,
+  type SessionConfig,
+} from "./auth";
+import { buildExport, toDay, toExercise, toMax } from "./backup";
 import type { Db } from "./db/client";
 import { dayLogs, exercises, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
 
@@ -27,33 +43,25 @@ export interface AppOptions {
   db: Db;
   password: string;
   sessionSecret: string;
+  /** HTTPS deployment: Secure `__Host-` cookie. */
   secureCookies: boolean;
+  /** Behind a trusted TLS-terminating proxy (Heroku): honour X-Forwarded-For / -Proto. */
+  trustProxy?: boolean;
+  /** Redirect plain-HTTP requests (per X-Forwarded-Proto) to HTTPS. Needs `trustProxy`. */
+  forceHttps?: boolean;
   /** Directory with the built web app; omitted in dev/tests. */
   staticDir?: string;
+  /** Sent as `x-strawvine-build` on API responses so the client can spot a newer deploy. */
+  buildId?: string;
+  /** Overrides for tests. */
+  epochs?: EpochStore;
+  loginLimits?: LoginLimiterOptions;
+  log?: (message: string, details: Record<string, unknown>) => void;
 }
 
-type DayRow = typeof dayLogs.$inferSelect;
-type ExerciseRow = typeof exercises.$inferSelect;
-type MaxRow = typeof maxEntries.$inferSelect;
-
-const toDay = ({ updatedAt: _u, ...row }: DayRow): DayLog => ({ ...emptyDayLog(row.date), ...row });
-const toExercise = (r: ExerciseRow): Exercise => ({
-  id: r.id,
-  name: r.name,
-  category: r.category as Exercise["category"],
-  tracksMax: r.tracksMax,
-  measure: r.measure as Exercise["measure"],
-  archived: r.archived,
-});
-const toMax = (r: MaxRow): MaxEntry => ({
-  id: r.id,
-  exerciseId: r.exerciseId,
-  date: r.date,
-  valueLb: r.valueLb,
-  source: r.source as MaxEntry["source"],
-  note: r.note,
-  createdAt: r.createdAt.toISOString(),
-});
+export const BODY_LIMIT_BYTES = 1024 * 1024;
+export const LOGIN_BODY_LIMIT_BYTES = 4 * 1024;
+const HEALTH_TIMEOUT_MS = 2_000;
 
 function badRequest(error: z.ZodError) {
   return { error: "invalid", issues: error.issues.map((i) => ({ path: i.path.join("."), message: i.message })) };
@@ -62,10 +70,71 @@ function badRequest(error: z.ZodError) {
 /** Row ids in the path are Postgres `serial`s (positive int4); anything else must not reach the query. */
 const idParam = z.string().regex(/^\d+$/, "Expected a positive integer id").transform(Number).pipe(z.int().min(1).max(2_147_483_647));
 
+const tooLarge = (c: Context) => c.json({ error: "Request body too large" }, 413);
+
+const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * CSRF guard for the JSON API. Hono's `csrf()` only inspects "simple" form content types and
+ * compares Origin with the request URL, whose scheme is http behind Heroku's TLS-terminating
+ * router — so this checks Origin against the Host header instead, refuses cross-site fetch
+ * metadata, and refuses any body that isn't JSON (a cross-origin JSON request needs a CORS
+ * preflight, which this API never grants).
+ */
+const jsonApiGuard: MiddlewareHandler = async (c, next) => {
+  if (!MUTATING.has(c.req.method)) return next();
+  const site = c.req.header("sec-fetch-site");
+  if (site && site !== "same-origin" && site !== "none") return c.json({ error: "Cross-site request refused" }, 403);
+  const origin = c.req.header("origin");
+  if (origin !== undefined) {
+    let host: string | null = null;
+    try {
+      host = new URL(origin).host;
+    } catch {
+      /* "null" or garbage */
+    }
+    if (!host || host !== c.req.header("host")) return c.json({ error: "Cross-origin request refused" }, 403);
+  }
+  const type = c.req.header("content-type");
+  if (type !== undefined) {
+    if (type.split(";")[0]!.trim().toLowerCase() !== "application/json") return c.json({ error: "Expected application/json" }, 415);
+  } else if ((await c.req.arrayBuffer()).byteLength > 0) {
+    // No content type at all (e.g. a no-cors Blob body): only an empty body is acceptable.
+    return c.json({ error: "Expected application/json" }, 415);
+  }
+  return next();
+};
+
 export function createApp(opts: AppOptions) {
   const { db } = opts;
   const app = new Hono();
-  const allowLogin = loginLimiter();
+  const limiter = loginLimiter(opts.loginLimits);
+  const session: SessionConfig = {
+    key: deriveSessionKey(opts.sessionSecret, opts.password),
+    secure: opts.secureCookies,
+    epochs: opts.epochs ?? dbEpochStore(db),
+  };
+  const log = opts.log ?? ((message, details) => console.error(message, JSON.stringify(details)));
+
+  // Errors: log what failed and where — never request bodies, values or SQL parameters (health data).
+  app.onError((err, c) => {
+    if (err instanceof HTTPException) return err.getResponse();
+    const cause = (err as { cause?: { code?: unknown } }).cause;
+    log("Unhandled error", {
+      name: err.name,
+      code: (err as { code?: unknown }).code ?? cause?.code,
+      method: c.req.method,
+      route: routePath(c),
+    });
+    return c.json({ error: "Something went wrong" }, 500);
+  });
+
+  if (opts.forceHttps && opts.trustProxy)
+    app.use("*", async (c, next) => {
+      if (c.req.header("x-forwarded-proto") !== "http") return next();
+      const url = new URL(c.req.url);
+      return c.redirect(`https://${c.req.header("host") ?? url.host}${url.pathname}${url.search}`, 301);
+    });
 
   app.use(
     "*",
@@ -79,54 +148,100 @@ export function createApp(opts: AppOptions) {
         connectSrc: ["'self'"],
         manifestSrc: ["'self'"],
         workerSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
       },
+      strictTransportSecurity: "max-age=31536000; includeSubDomains",
+      xFrameOptions: "DENY",
+      permissionsPolicy: { camera: [], microphone: [], geolocation: [], payment: [], usb: [] },
     }),
   );
+  app.use("*", compress());
 
-  app.get("/api/health", (c) => c.json({ ok: true }));
+  // ---- API plumbing ---------------------------------------------------------
+  app.use("/api/*", async (c, next) => {
+    await next();
+    // Health data must not linger in shared or browser caches unless a route opts in.
+    if (!c.res.headers.has("Cache-Control")) c.res.headers.set("Cache-Control", "no-store");
+    if (opts.buildId) c.res.headers.set("x-strawvine-build", opts.buildId);
+  });
+  app.use("/api/auth/login", bodyLimit({ maxSize: LOGIN_BODY_LIMIT_BYTES, onError: tooLarge }));
+  app.use("/api/*", bodyLimit({ maxSize: BODY_LIMIT_BYTES, onError: tooLarge }));
+  app.use("/api/*", jsonApiGuard);
+
+  app.get("/api/health", async (c) => {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        db.execute(sql`select 1`),
+        new Promise((_, reject) => (timer = setTimeout(() => reject(new Error("timeout")), HEALTH_TIMEOUT_MS))),
+      ]);
+      return c.json({ ok: true, db: "ok" });
+    } catch {
+      return c.json({ ok: false, db: "unreachable" }, 503);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
 
   // ---- auth -------------------------------------------------------------
   app.post("/api/auth/login", async (c) => {
-    // Heroku's router appends the real client IP last; earlier entries are client-supplied.
-    const ip = c.req.header("x-forwarded-for")?.split(",").at(-1)?.trim() ?? "local";
-    if (!allowLogin(ip)) return c.json({ error: "Too many attempts. Try again in a few minutes." }, 429);
+    const ip = clientIp(c, !!opts.trustProxy);
+    if (limiter.blocked(ip)) return c.json({ error: "Too many attempts. Try again in a few minutes." }, 429);
     const body = z.object({ password: z.string().max(500) }).safeParse(await c.req.json().catch(() => null));
-    if (!body.success || !passwordMatches(body.data.password, opts.password)) return c.json({ error: "That's not it." }, 401);
-    setSessionCookie(c, opts.sessionSecret, opts.secureCookies);
+    if (!body.success || !passwordMatches(body.data.password, opts.password)) {
+      limiter.fail(ip);
+      return c.json({ error: "That's not it." }, 401);
+    }
+    limiter.succeed(ip);
+    await setSessionCookie(c, session);
     return c.json({ ok: true });
   });
 
-  app.post("/api/auth/logout", (c) => {
-    clearSessionCookie(c);
+  /** Signs this device out and revokes every other session too (the epoch moves on). */
+  app.post("/api/auth/logout", async (c) => {
+    if (await currentSession(c, session)) await session.epochs.bump();
+    clearSessionCookie(c, session);
     return c.json({ ok: true });
   });
 
   const api = new Hono();
-  api.use("*", requireAuth(opts.sessionSecret));
+  api.use("*", requireAuth(session));
 
   api.get("/auth/me", (c) => c.json({ ok: true }));
 
   // ---- bootstrap ----------------------------------------------------------
-  api.get("/bootstrap", async (c) => {
-    const [settingsRow, days, ex, maxes, sess, seen] = await Promise.all([
-      db.select().from(settings).where(eq(settings.id, 1)),
-      db.select().from(dayLogs).orderBy(asc(dayLogs.date)),
-      db.select().from(exercises).orderBy(asc(exercises.id)),
-      db.select().from(maxEntries).orderBy(asc(maxEntries.date), asc(maxEntries.id)),
-      db.select().from(sessions).orderBy(asc(sessions.date)),
-      db.select().from(seenAchievements),
-    ]);
-    if (!settingsRow[0]) return c.json({ error: "not seeded" }, 500);
-    const body: Bootstrap = {
-      settings: settingsRow[0].data,
-      days: days.map(toDay),
-      exercises: ex.map(toExercise),
-      maxEntries: maxes.map(toMax),
-      sessions: sess.map((s) => s.data),
-      seenAchievements: seen.map((s) => s.key),
-    };
-    return c.json(body);
-  });
+  // Revalidated on every load (ETag → 304 when nothing changed); `private` keeps it out of shared caches.
+  api.get(
+    "/bootstrap",
+    async (c, next) => {
+      await next();
+      if (c.res.ok || c.res.status === 304) c.res.headers.set("Cache-Control", "private, no-cache");
+    },
+    etag(),
+    async (c) => {
+      const [settingsRow, days, ex, maxes, sess, seen] = await Promise.all([
+        db.select().from(settings).where(eq(settings.id, 1)),
+        db.select().from(dayLogs).orderBy(asc(dayLogs.date)),
+        db.select().from(exercises).orderBy(asc(exercises.id)),
+        db.select().from(maxEntries).orderBy(asc(maxEntries.date), asc(maxEntries.id)),
+        db.select().from(sessions).orderBy(asc(sessions.date)),
+        db.select().from(seenAchievements).orderBy(asc(seenAchievements.key)),
+      ]);
+      if (!settingsRow[0]) return c.json({ error: "not seeded" }, 500);
+      const body: Bootstrap = {
+        settings: settingsRow[0].data,
+        days: days.map(toDay),
+        exercises: ex.map(toExercise),
+        maxEntries: maxes.map(toMax),
+        sessions: sess.map((s) => s.data),
+        seenAchievements: seen.map((s) => s.key),
+      };
+      return c.json(body);
+    },
+  );
 
   // ---- days ---------------------------------------------------------------
   api.put("/days/:date", async (c) => {
@@ -211,7 +326,7 @@ export function createApp(opts: AppOptions) {
 
   // ---- achievements -----------------------------------------------------------
   api.post("/achievements/seen", async (c) => {
-    const parsed = z.object({ keys: z.array(z.string().max(120)).max(500) }).safeParse(await c.req.json().catch(() => null));
+    const parsed = z.object({ keys: z.array(safeString().max(120)).max(500) }).safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
     if (parsed.data.keys.length)
       await db
@@ -223,22 +338,9 @@ export function createApp(opts: AppOptions) {
 
   // ---- export -----------------------------------------------------------------
   api.get("/export", async (c) => {
-    const [s, days, ex, maxes, sess] = await Promise.all([
-      db.select().from(settings),
-      db.select().from(dayLogs).orderBy(asc(dayLogs.date)),
-      db.select().from(exercises),
-      db.select().from(maxEntries),
-      db.select().from(sessions).orderBy(asc(sessions.date)),
-    ]);
-    c.header("Content-Disposition", `attachment; filename="strawvine-export-${new Date().toISOString().slice(0, 10)}.json"`);
-    return c.json({
-      exportedAt: new Date().toISOString(),
-      settings: s[0]?.data ?? null,
-      days: days.map(toDay),
-      exercises: ex.map(toExercise),
-      maxEntries: maxes.map(toMax),
-      sessions: sess.map((r) => r.data),
-    });
+    const body = await buildExport(db);
+    c.header("Content-Disposition", `attachment; filename="strawvine-export-${body.exportedAt.slice(0, 10)}.json"`);
+    return c.json(body);
   });
 
   app.route("/api", api);
@@ -247,19 +349,24 @@ export function createApp(opts: AppOptions) {
   // ---- web app ----------------------------------------------------------------
   if (opts.staticDir) {
     const root = path.relative(process.cwd(), opts.staticDir) || ".";
-    app.use(
-      "/assets/*",
-      async (c, next) => {
-        await next();
-        c.header("Cache-Control", "public, max-age=31536000, immutable");
-      },
-      serveStatic({ root }),
-    );
-    app.use("*", serveStatic({ root }));
+    // Hashed build assets never change. A missing one is a 404 — never the HTML shell, which
+    // would otherwise be cached as "immutable" JavaScript.
+    app.use("/assets/*", async (c, next) => {
+      await next();
+      if (c.res.ok) c.res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    });
+    app.use("/assets/*", serveStatic({ root, precompressed: true }));
+    app.all("/assets/*", (c) => c.text("Not found", 404, { "Cache-Control": "no-store" }));
+
+    // Everything else (index.html, sw.js, manifest, icons) is revalidated on every load.
+    app.use("*", async (c, next) => {
+      await next();
+      if (!c.res.headers.has("Cache-Control")) c.res.headers.set("Cache-Control", "no-cache");
+    });
+    app.use("*", serveStatic({ root, precompressed: true }));
     let indexHtml: string | null = null;
     app.get("*", async (c) => {
       indexHtml ??= await readFile(path.join(opts.staticDir!, "index.html"), "utf8");
-      c.header("Cache-Control", "no-cache");
       return c.html(indexHtml);
     });
   }

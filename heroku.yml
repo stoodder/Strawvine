@@ -1,3 +1,9 @@
 build:
   docker:
     web: Dockerfile
+# Runs once per deploy, before the new dynos start: apply migrations + first-boot seed.
+# A failing release phase aborts the deploy and keeps the old release running.
+release:
+  image: web
+  command:
+    - node dist/server/migrate.js

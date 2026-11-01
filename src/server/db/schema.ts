@@ -68,3 +68,13 @@ export const seenAchievements = pgTable("seen_achievements", {
   key: varchar("key", { length: 120 }).primaryKey(),
   seenAt: timestamp("seen_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Server-side auth state (single row, id = 1). Session cookies carry the epoch they were
+ * issued in; signing out bumps it, which revokes every cookie issued before.
+ */
+export const authState = pgTable("auth_state", {
+  id: integer("id").primaryKey(),
+  sessionEpoch: integer("session_epoch").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

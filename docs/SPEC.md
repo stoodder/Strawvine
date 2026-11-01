@@ -101,6 +101,10 @@ Smoothed TDEE, actual vs target rate, adherence, and next week's recommended cal
 - Goal weight with projected date range.
 - Strength targets per lift (e.g. Deadlift 600).
 - PR tracking (max increases, AMRAP rep PRs, benchmark metcon bests).
+- A **max PR** is a manual or AMRAP max at least **1 lb** above every earlier max of that lift (initial entries only
+  set the baseline). Re-entering a lift's max within **10 minutes** of the previous entry is a *correction*: it
+  replaces that entry (a typo never becomes a PR or a high-water mark), is compared against the history before it, and
+  keeps the corrected entry's achievement so a fix is never celebrated twice.
 
 ## 6. Lifting
 
@@ -165,5 +169,6 @@ optional note.
 - TypeScript; React + Vite (installable PWA) frontend; Hono API on Node; Drizzle ORM.
 - Postgres (Heroku Postgres in production).
 - One Docker image (API + static frontend), deployed to Heroku's container stack.
-- Single-user password auth with a long-lived signed session cookie.
+- Single-user password auth with a long-lived signed session cookie that renews while in use. Signing out signs
+  every device out; changing the password does too.
 - Pure, unit-tested domain modules for all calculations.

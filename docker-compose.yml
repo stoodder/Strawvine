@@ -14,6 +14,8 @@ services:
       retries: 20
   app:
     build: .
+    # Docker's tiny init forwards signals and reaps zombies; the server shuts down gracefully on SIGTERM.
+    init: true
     ports:
       - "3000:3000"
     environment:

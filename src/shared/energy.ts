@@ -4,7 +4,7 @@
  *
  * Everything is recomputed from raw day logs — nothing derived is ever stored.
  */
-import { addDays, type ISODate } from "./dates";
+import { addDays, fromDayNumber, toDayNumber, type ISODate } from "./dates";
 import type { DayLog } from "./schemas";
 
 /** Weights for T0 (today) … T6 (six days ago). They sum to 25. */
@@ -65,46 +65,69 @@ export function computeEnergySeries(
   for (const d of days) byDate.set(d.date, d);
 
   // Start far enough back that the first TDEE window in range is complete. Averages read
-  // their own 7-day windows directly from `byDate`, so only the TDEE history needs warming.
+  // their own 7-day windows, so only the TDEE history needs warming.
   const start = addDays(from, -7);
-  let loggedBefore = [...byDate.values()].filter((d) => isLogged(d) && d.date < start).length;
+  const fromN = toDayNumber(from);
+  const startN = fromN - 7;
+  // Slot 0 is `start − 7`: the oldest day any window in the loop reads.
+  const base = startN - 7;
+  const slots = Math.max(0, toDayNumber(to) - base + 1);
+  const weight: Array<number | null> = new Array(slots).fill(null);
+  const calories: Array<number | null> = new Array(slots).fill(null);
+  let loggedBefore = 0;
+  for (const d of byDate.values()) {
+    if (!isLogged(d)) continue;
+    if (d.date < start) loggedBefore++;
+    const i = toDayNumber(d.date) - base;
+    if (i >= 0 && i < slots) {
+      weight[i] = d.weightLb;
+      calories[i] = d.calories;
+    }
+  }
 
-  const logged = (date: ISODate) => {
-    const d = byDate.get(date);
-    return isLogged(d) ? d! : undefined;
+  /** `weightedAverage` of the 7 slots ending at `i` (same summation order, same result). */
+  const windowAvg = (values: ReadonlyArray<number | null>, i: number): number | null => {
+    let sum = 0;
+    let divisor = 0;
+    for (let k = 0; k < AVG_WEIGHTS.length; k++) {
+      const v = i - k >= 0 ? values[i - k] : null;
+      if (v === null || v === undefined || Number.isNaN(v)) continue;
+      sum += v * AVG_WEIGHTS[k]!;
+      divisor += AVG_WEIGHTS[k]!;
+    }
+    return divisor === 0 ? null : sum / divisor;
   };
-  const avgOf = (date: ISODate, key: "weightLb" | "calories") =>
-    weightedAverage(AVG_WEIGHTS.map((_, i) => logged(addDays(date, -i))?.[key] ?? null));
 
-  const tdeeByDate = new Map<ISODate, number | null>();
+  const tdees: Array<number | null> = new Array(slots).fill(null);
   const out: EnergyDay[] = [];
+  let prevAvgWeight = slots > 7 ? windowAvg(weight, 6) : null;
 
-  for (let date = start; date <= to; date = addDays(date, 1)) {
-    const today = logged(date);
-    if (today) loggedBefore++;
-    const avgWeight = avgOf(date, "weightLb");
-    const avgCalories = avgOf(date, "calories");
-    const prevAvgWeight = avgOf(addDays(date, -1), "weightLb");
+  for (let i = 7; i < slots; i++) {
+    const isToday = weight[i] !== null;
+    if (isToday) loggedBefore++;
+    const avgWeight = windowAvg(weight, i);
+    const avgCalories = windowAvg(calories, i);
 
     const tdee =
-      today && avgWeight !== null && prevAvgWeight !== null && avgCalories !== null
+      isToday && avgWeight !== null && prevAvgWeight !== null && avgCalories !== null
         ? avgCalories - (avgWeight - prevAvgWeight) * kcalPerLb
         : null;
-    tdeeByDate.set(date, tdee);
+    tdees[i] = tdee;
+    prevAvgWeight = avgWeight;
 
-    const avgTdee = weightedAverage(AVG_WEIGHTS.map((_, i) => tdeeByDate.get(addDays(date, -i)) ?? null));
-
-    if (date >= from) {
+    if (i >= fromN - base) {
+      const date = fromDayNumber(base + i);
       const raw = byDate.get(date);
       out.push({
         date,
-        logged: !!today,
+        logged: isToday,
         weightLb: raw?.weightLb ?? null,
         calories: raw?.calories ?? null,
         avgWeight,
         avgCalories,
         tdee,
-        avgTdee,
+        // TDEEs before `start` count as missing, as they always have.
+        avgTdee: windowAvg(tdees, i),
         loggedCount: loggedBefore,
       });
     }

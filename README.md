@@ -30,9 +30,9 @@ one Docker image. Domain logic lives in `src/shared` as pure, unit-tested functi
 
 ```
 src/shared   domain logic (energy engine, program maths, sessions, goals, gamification) + zod schemas
-src/server   Hono API, auth, Drizzle schema & migrations runner
+src/server   Hono API, auth, Drizzle schema, migrate / restore entry points
 src/web      React app (screens, components, data layer)
-drizzle/     SQL migrations (applied automatically on boot)
+drizzle/     SQL migrations (applied by Heroku's release phase, and on boot under an advisory lock)
 ```
 
 ## Local development
@@ -60,31 +60,87 @@ npm run build
 ```
 
 Schema changes: edit `src/server/db/schema.ts`, then `npm run db:generate` and commit the new file in `drizzle/`.
+`npm run db:migrate` applies migrations without starting the server.
+
+### Builds
+
+`npm run build` builds the web app (Vite), bundles the server entry points (`dist/server/index.js`, `migrate.js`,
+`restore.js`), writes Brotli/gzip copies of the web assets, and stamps the build:
+
+- `BUILD_ID` (default: the Unix time of the build; override with `BUILD_ID=<sha> npm run build` or
+  `docker build --build-arg BUILD_ID=<sha>`) is exported for both steps. Vite compiles it into the client as
+  `__BUILD_ID__`; the server reads it back from `dist/build-id.txt` at boot and sends it as the `x-strawvine-build`
+  header on every `/api/*` response, so an open client can tell a newer deploy is live. No header is sent in dev
+  (no `dist/build-id.txt`).
 
 ## Deploying to Heroku
 
-The app ships as a container (`heroku.yml` → `Dockerfile`). Migrations run on boot.
+The app ships as a container (`heroku.yml` → `Dockerfile`, Node pinned to an exact `22.x.y-alpine` image). Each deploy
+runs a **release phase** (`node dist/server/migrate.js`: migrations + first-boot seed, under a Postgres advisory lock)
+before the new dynos start; if it fails the deploy is aborted and the previous release keeps running.
 
 ```sh
 heroku create <app-name>
 heroku stack:set container
 heroku addons:create heroku-postgresql:essential-0
-heroku config:set APP_PASSWORD='<your password>' SESSION_SECRET="$(openssl rand -hex 32)"
+heroku config:set APP_PASSWORD='<a password of 12+ characters>' SESSION_SECRET="$(openssl rand -hex 32)"
 git push heroku <branch>:main
 heroku open
 ```
 
 `DATABASE_URL` and `PORT` are provided by Heroku. On your phone, open the app and use **Add to Home Screen** to install it.
 
+In production the server **refuses to boot** when `SESSION_SECRET` is a placeholder (the values in `.env.example` /
+`docker-compose.yml`) or weaker than `openssl rand -hex 32` (64+ hex or 43+ base64 characters), or when `APP_PASSWORD`
+is shorter than 12 characters or a known default. The log says exactly what to fix.
+
 ### Environment
 
-| Variable | |
-|---|---|
-| `DATABASE_URL` | Postgres connection string (TLS is used automatically for non-local hosts) |
-| `APP_PASSWORD` | the single sign-in password |
-| `SESSION_SECRET` | ≥ 32 random characters; signs the session cookie (rotate to sign out everywhere) |
-| `PORT` | default 3000 |
+| Variable         |                                                                                                                                                                                         |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`   | Postgres connection string (TLS is used automatically for non-local hosts)                                                                                                              |
+| `APP_PASSWORD`   | the single sign-in password (production: 12+ characters)                                                                                                                                |
+| `SESSION_SECRET` | signs session cookies; production requires `openssl rand -hex 32` strength                                                                                                              |
+| `NODE_ENV`       | `production` in the image: secure `__Host-` cookie, HTTPS redirect, strict secret checks                                                                                                |
+| `TRUST_PROXY`    | `1` to trust `X-Forwarded-For`/`-Proto` from a TLS-terminating proxy (login rate limiting by client IP, HTTP→HTTPS redirect). Defaults to on when `DYNO` is set (Heroku), off elsewhere |
+| `BUILD_ID`       | optional override for the build id (see _Builds_)                                                                                                                                       |
+| `PORT`           | default 3000                                                                                                                                                                            |
+
+### Sessions
+
+Signing in sets a 180-day cookie that renews itself while the app is in use. **Sign out signs out every device**
+(the session epoch stored in `auth_state` moves on). Changing `APP_PASSWORD` or `SESSION_SECRET` also signs every
+device out.
+
+### Backups
+
+Heroku Postgres keeps no backups by default on the smallest plans. Schedule daily ones and take a manual one before
+each deploy that touches the schema:
+
+```sh
+heroku pg:backups:schedule DATABASE_URL --at '04:00 America/New_York'
+heroku pg:backups:capture             # before a deploy
+heroku pg:backups                     # list
+heroku pg:backups:download            # latest.dump, restorable with pg_restore
+heroku pg:backups:restore <backup-id> DATABASE_URL   # roll the whole database back
+```
+
+The app-level export (below) is a second, database-independent copy.
 
 ## Data
 
-Settings → **Export JSON** downloads everything. Nothing derived is stored; the export is the complete source of truth.
+Settings → **Export JSON** (`GET /api/export`) downloads everything: settings, every day log, exercise, max entry,
+session and seen achievement, with their ids (format `strawvine-export`, version 2). Nothing derived is stored; the
+export is the complete source of truth.
+
+To restore an export into a database:
+
+```sh
+DATABASE_URL=postgres://… npm run restore -- strawvine-export-2026-11-01.json            # local / any reachable DB
+DATABASE_URL="$(heroku config:get DATABASE_URL)" npm run restore -- export.json          # Heroku, from your machine
+heroku run --no-tty "node dist/server/restore.js -" < export.json                        # Heroku, inside a dyno
+```
+
+The restore applies migrations, then replaces everything in a single transaction (rows keep their ids; id sequences
+are moved past them). It refuses to run on a database that already has data — anything beyond the untouched first-boot
+seed — unless you add `--force`. Older, unversioned exports are accepted too.

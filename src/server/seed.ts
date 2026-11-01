@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { localToday } from "../shared/dates";
 import { defaultSettings, SEED_ACCESSORIES, SEED_EXERCISES, type SeedIds } from "../shared/defaults";
-import type { Db } from "./db/client";
+import { runMigrations, withMigrationLock, type Db, type Sql } from "./db/client";
 import { exercises, settings } from "./db/schema";
 
 /** First boot: create the tracked lifts and the default program. Idempotent. */
@@ -23,5 +23,13 @@ export async function ensureSeeded(db: Db, today: string = localToday()) {
       .insert(settings)
       .values({ id: 1, data: defaultSettings(ids, today) })
       .onConflictDoNothing();
+  });
+}
+
+/** Apply pending migrations and seed a fresh database, under the migration advisory lock. */
+export async function prepareDatabase(db: Db, sql: Sql) {
+  await withMigrationLock(sql, async () => {
+    await runMigrations(db);
+    await ensureSeeded(db);
   });
 }

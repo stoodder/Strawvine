@@ -69,6 +69,63 @@ describe("max PR achievements", () => {
   });
 });
 
+describe("which max changes are celebrated as PRs", () => {
+  let nextId = 100;
+  const entry = (valueLb: number, source: MaxEntry["source"], createdAt: string, date = createdAt.slice(0, 10)): MaxEntry => ({
+    id: nextId++,
+    exerciseId: 1,
+    date,
+    valueLb,
+    source,
+    note: null,
+    createdAt,
+  });
+  const prs = (maxEntries: MaxEntry[]) =>
+    achievements(appData({ maxEntries }), today)
+      .filter((a) => a.tier === "pr")
+      .map((a) => a.title);
+  const base = () => entry(300, "initial", "2026-11-01T08:00:00.000Z");
+
+  it("celebrates AMRAP and manual increases of at least 1 lb", () => {
+    expect(prs([base(), entry(303, "amrap", "2026-11-02T18:00:00.000Z")])).toEqual(["Bench press 303"]);
+    expect(prs([base(), entry(310, "manual", "2026-11-05T18:00:00.000Z")])).toEqual(["Bench press 310"]);
+    expect(prs([base(), entry(300.5, "manual", "2026-11-05T18:00:00.000Z")])).toEqual([]);
+    expect(prs([base(), entry(320, "initial", "2026-11-05T18:00:00.000Z")])).toEqual([]);
+  });
+
+  it("treats a quick re-entry as a correction of the previous entry", () => {
+    // Typo 3150, fixed to 315 two minutes later: one PR (+15), keyed like the typo so it isn't re-celebrated.
+    const typo = entry(3150, "manual", "2026-11-05T18:00:00.000Z");
+    const fix = entry(315, "manual", "2026-11-05T18:02:00.000Z");
+    const list = achievements(appData({ maxEntries: [base(), typo, fix] }), today).filter((a) => a.tier === "pr");
+    expect(list.map((a) => [a.key, a.title, a.detail])).toEqual([[`max-${typo.id}`, "Bench press 315", "New max, +15 lb."]]);
+    // ...and the typo doesn't become a high-water mark that later PRs must beat.
+    expect(prs([base(), typo, fix, entry(320, "amrap", "2026-11-09T18:00:00.000Z")])).toContain("Bench press 320");
+  });
+
+  it("doesn't celebrate correcting a just-entered max upwards", () => {
+    // Onboarding entered 135 instead of 315, fixed a minute later: no PR.
+    expect(prs([entry(135, "initial", "2026-11-01T08:00:00.000Z"), entry(315, "manual", "2026-11-01T08:01:00.000Z")])).toEqual([]);
+    // Same for a fat-fingered low manual entry (31) corrected to an unchanged max.
+    expect(prs([base(), entry(31, "manual", "2026-11-05T18:00:00.000Z"), entry(300, "manual", "2026-11-05T18:01:00.000Z")])).toEqual([]);
+  });
+
+  it("only treats manual entries within the window as corrections", () => {
+    const amrap = entry(303, "amrap", "2026-11-02T18:00:00.000Z");
+    // A second AMRAP application minutes later is still its own PR.
+    expect(prs([base(), amrap, entry(306, "amrap", "2026-11-02T18:05:00.000Z")]).sort()).toEqual(["Bench press 303", "Bench press 306"]);
+    expect(prs([base(), entry(310, "manual", "2026-11-05T18:00:00.000Z"), entry(320, "manual", "2026-11-05T18:11:00.000Z")])).toHaveLength(
+      2,
+    );
+  });
+
+  it("keeps strength targets off corrected typos", () => {
+    const withTarget = { ...settings, strengthTargets: [{ id: "t9", exerciseId: 1, targetLb: 400, setOn: "2026-11-01" }] };
+    const maxEntries = [base(), entry(4000, "manual", "2026-11-05T18:00:00.000Z"), entry(305, "manual", "2026-11-05T18:03:00.000Z")];
+    expect(achievements(appData({ settings: withTarget, maxEntries }), today).map((a) => a.key)).not.toContain("target-t9");
+  });
+});
+
 describe("calibration milestones", () => {
   it("awards the first TDEE reading on the first logged day that has a TDEE", () => {
     // 8 days apart: the day before's 7-day weight window is empty, so Nov 10 has no TDEE.

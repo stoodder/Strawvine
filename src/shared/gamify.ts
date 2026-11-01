@@ -52,7 +52,23 @@ function indexData(data: AppData) {
   return { days, sessions };
 }
 
+/**
+ * One-entry memo: the client derives streaks and achievements from the same (immutable) data
+ * on every write, and both start from the closed days.
+ */
+let closedMemo: { days: AppData["days"]; sessions: AppData["sessions"]; settings: Settings; upTo: ISODate; result: Set<ISODate> } | null =
+  null;
+
 export function closedDates(data: AppData, upTo: ISODate): Set<ISODate> {
+  const m = closedMemo;
+  if (m && m.days === data.days && m.sessions === data.sessions && m.settings === data.settings && m.upTo === upTo)
+    return new Set(m.result);
+  const result = computeClosedDates(data, upTo);
+  closedMemo = { days: data.days, sessions: data.sessions, settings: data.settings, upTo, result };
+  return new Set(result);
+}
+
+function computeClosedDates(data: AppData, upTo: ISODate): Set<ISODate> {
   const { days, sessions } = indexData(data);
   const out = new Set<ISODate>();
   for (const [date, day] of days) {
@@ -111,6 +127,79 @@ function compact(n: number): string {
   return String(n);
 }
 
+/** A manual entry this soon after the previous entry for the same lift edits it (a typo fix). */
+export const MAX_CORRECTION_WINDOW_MS = 10 * 60_000;
+/** Smallest increase over the previous best that counts as a PR. */
+export const MIN_PR_GAIN_LB = 1;
+
+export interface EffectiveMaxEntry extends MaxEntry {
+  /** Id of the first entry in a chain of quick corrections (the entry itself when none). */
+  rootId: number;
+  /** This entry re-states the previous one (entered within MAX_CORRECTION_WINDOW_MS). */
+  correction: boolean;
+}
+
+/**
+ * Each lift's max history as the athlete meant it, sorted by date: a manual entry made within
+ * MAX_CORRECTION_WINDOW_MS of the previous entry for the same lift *replaces* it, so a typo
+ * (315 → 3150 → 315) is neither a PR nor a high-water mark later maxes have to beat.
+ * Negative ids are the client's optimistic placeholders and are skipped: a PR is keyed (and
+ * celebrated) once, by the saved row that replaces the placeholder.
+ */
+export function effectiveMaxHistory(entries: ReadonlyArray<MaxEntry>): Map<number, EffectiveMaxEntry[]> {
+  const byExercise = new Map<number, MaxEntry[]>();
+  for (const e of entries) {
+    if (e.id < 0) continue;
+    const list = byExercise.get(e.exerciseId) ?? [];
+    list.push(e);
+    byExercise.set(e.exerciseId, list);
+  }
+  const out = new Map<number, EffectiveMaxEntry[]>();
+  for (const [exerciseId, list] of byExercise) {
+    const created = (e: MaxEntry) => Date.parse(e.createdAt);
+    const byCreation = [...list].sort((a, b) => created(a) - created(b) || a.id - b.id);
+    const kept: EffectiveMaxEntry[] = [];
+    for (const e of byCreation) {
+      const prev = kept.at(-1);
+      const gap = prev ? created(e) - created(prev) : NaN;
+      if (prev && e.source === "manual" && gap >= 0 && gap <= MAX_CORRECTION_WINDOW_MS) {
+        kept[kept.length - 1] = { ...e, rootId: prev.rootId, correction: true };
+      } else kept.push({ ...e, rootId: e.id, correction: false });
+    }
+    kept.sort((a, b) => (a.date === b.date ? (a.createdAt < b.createdAt ? -1 : 1) : a.date < b.date ? -1 : 1));
+    out.set(exerciseId, kept);
+  }
+  return out;
+}
+
+export interface MaxPr {
+  entry: EffectiveMaxEntry;
+  gainLb: number;
+  /** Stable id for the achievement key: corrections keep the key of the entry they fix. */
+  keyId: number;
+}
+
+/**
+ * PRs: a manual or AMRAP max at least MIN_PR_GAIN_LB above every earlier max of the lift.
+ * Initial entries only set the baseline. A quick correction counts against the history before
+ * the entry it fixes and keeps that entry's key, so fixing an already-celebrated PR doesn't
+ * celebrate again — and fixing a typo'd *low* entry doesn't celebrate the "gain" from the typo.
+ */
+export function maxPrs(history: Map<number, ReadonlyArray<EffectiveMaxEntry>>): MaxPr[] {
+  const out: MaxPr[] = [];
+  for (const list of history.values()) {
+    let best: number | null = null;
+    for (const e of list) {
+      if (best !== null && e.source !== "initial") {
+        const gainLb = Math.round((e.valueLb - best) * 10) / 10;
+        if (gainLb >= MIN_PR_GAIN_LB) out.push({ entry: e, gainLb, keyId: e.rootId });
+      }
+      best = best === null ? e.valueLb : Math.max(best, e.valueLb);
+    }
+  }
+  return out;
+}
+
 export function achievements(data: AppData, today: ISODate): Achievement[] {
   const out: Achievement[] = [];
   const exName = (id: number) => data.exercises.find((e) => e.id === id)?.name ?? "Lift";
@@ -146,32 +235,17 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
       }
   }
 
-  // Max PRs (any increase over the previous recorded max, excluding initial entries).
-  // Negative ids are the client's optimistic placeholders: skipping them means a PR is keyed
-  // (and celebrated) once, by the saved row that replaces the placeholder.
-  const byExercise = new Map<number, MaxEntry[]>();
-  for (const e of data.maxEntries) {
-    if (e.id < 0) continue;
-    const list = byExercise.get(e.exerciseId) ?? [];
-    list.push(e);
-    byExercise.set(e.exerciseId, list);
-  }
-  for (const [exerciseId, list] of byExercise) {
-    list.sort((a, b) => (a.date === b.date ? (a.createdAt < b.createdAt ? -1 : 1) : a.date < b.date ? -1 : 1));
-    let best: number | null = null;
-    for (const e of list) {
-      if (best !== null && e.valueLb > best && e.source !== "initial") {
-        const gain = Math.round((e.valueLb - best) * 10) / 10;
-        out.push({
-          key: `max-${e.id}`,
-          title: `${exName(exerciseId)} ${e.valueLb}`,
-          detail: `New max, +${gain} lb${e.source === "amrap" ? " from an AMRAP set" : ""}.`,
-          date: e.date,
-          tier: "pr",
-        });
-      }
-      best = best === null ? e.valueLb : Math.max(best, e.valueLb);
-    }
+  // Max PRs (see `maxPrs`).
+  const byExercise = effectiveMaxHistory(data.maxEntries);
+  for (const pr of maxPrs(byExercise)) {
+    const { entry: e, gainLb } = pr;
+    out.push({
+      key: `max-${pr.keyId}`,
+      title: `${exName(e.exerciseId)} ${e.valueLb}`,
+      detail: `New max, +${gainLb} lb${e.source === "amrap" ? " from an AMRAP set" : ""}.`,
+      date: e.date,
+      tier: "pr",
+    });
   }
 
   // Strength targets.
