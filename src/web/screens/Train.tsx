@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams } from "react-router";
 import { ChevronLeft, ChevronRight, Link2, MoreHorizontal, Plus, RefreshCw, Timer } from "lucide-react";
 import { addDays, formatShortDate, isISODate, weekdayName } from "../../shared/dates";
 import { currentMax, cyclePosition, mainLiftSets, programDayFor, progressionGain } from "../../shared/program";
@@ -20,9 +20,14 @@ type SetRef = { blockId: string; exIdx: number; setId: string };
 
 export function TrainScreen() {
   const params = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const { data, today } = useData();
-  const date = params.date && isISODate(params.date) ? params.date : today;
+  // Without a :date, show the day the screen was opened on (re-pinned on each navigation),
+  // not a live "today": a session that runs past midnight keeps logging into its own day.
+  const [opened, setOpened] = useState({ key: location.key, today });
+  if (opened.key !== location.key) setOpened({ key: location.key, today });
+  const date = params.date && isISODate(params.date) ? params.date : opened.key === location.key ? opened.today : today;
   const saveSession = useSaveSession();
   const deleteSession = useDeleteSession();
   const addMax = useAddMax();
@@ -50,6 +55,13 @@ export function TrainScreen() {
 
   const exById = (id: number) => data.exercises.find((e) => e.id === id);
   const update = (s: Session) => saveSession(s);
+  /**
+   * An unsaved draft is rebuilt with fresh ids whenever its inputs change. Save it before a
+   * sheet or action captures set/block ids, so they keep pointing at this session.
+   */
+  const keepDraft = () => {
+    if (draft) saveSession(draft);
+  };
   const mapBlock = (s: Session, blockId: string, fn: (b: Block) => Block | null): Session => ({
     ...s,
     blocks: s.blocks.map((b) => (b.id === blockId ? fn(b) : b)).filter((b): b is Block => b !== null),
@@ -72,7 +84,10 @@ export function TrainScreen() {
   const toggleDone = (ref: SetRef) => {
     const found = findSet(ref);
     if (!found) return;
-    if (found.set.amrap && !found.set.done) return setAmrap(ref);
+    if (found.set.amrap && !found.set.done) {
+      keepDraft();
+      return setAmrap(ref);
+    }
     const next = mapSet(session, ref, (x) =>
       x.done ? { ...x, done: false } : { ...x, done: true, reps: x.reps ?? x.targetReps, weight: x.weight ?? x.targetWeight },
     );
@@ -223,7 +238,11 @@ export function TrainScreen() {
                       <button
                         type="button"
                         className="tap flex min-w-0 flex-1 items-baseline gap-2 text-left"
-                        onClick={() => (s.amrap ? setAmrap(ref) : setEditing(ref))}
+                        onClick={() => {
+                          keepDraft();
+                          if (s.amrap) setAmrap(ref);
+                          else setEditing(ref);
+                        }}
                       >
                         <span className={clsx("num text-3xl font-light tracking-tight", s.done ? "text-fg" : "text-fg-2")}>
                           {s.done ? s.weight : s.targetWeight}
@@ -290,7 +309,10 @@ export function TrainScreen() {
                                 type="button"
                                 aria-label="Exercise options"
                                 className="tap -mr-2 p-2 text-mute"
-                                onClick={() => setActions({ blockId: b.id, exIdx })}
+                                onClick={() => {
+                                  keepDraft();
+                                  setActions({ blockId: b.id, exIdx });
+                                }}
                               >
                                 <MoreHorizontal size={16} />
                               </button>
@@ -305,7 +327,10 @@ export function TrainScreen() {
                                     set={s}
                                     measure={e.measure}
                                     onTap={() => toggleDone(ref)}
-                                    onLongPress={() => setEditing(ref)}
+                                    onLongPress={() => {
+                                      keepDraft();
+                                      setEditing(ref);
+                                    }}
                                   />
                                 );
                               })}
@@ -400,6 +425,8 @@ export function TrainScreen() {
         </>
       )}
 
+      {/* Room for the floating rest timer above the nav. */}
+      <div className="h-14" aria-hidden />
       <RestTimer from={restFrom} onDismiss={() => setRestFrom(null)} />
 
       <SetEditSheet
@@ -601,10 +628,10 @@ function RestTimer({ from, onDismiss }: { from: number | null; onDismiss: () => 
           type="button"
           onClick={onDismiss}
           aria-label="Rest timer, tap to dismiss"
-          className="fixed top-[max(env(safe-area-inset-top),0.75rem)] left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink-700/90 px-4 py-2 text-sm shadow-lg ring-1 ring-white/[0.06] backdrop-blur-xl"
-          initial={{ y: -20, opacity: 0 }}
+          className="fixed bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink-700/90 px-4 py-2 text-sm shadow-lg ring-1 ring-white/[0.06] backdrop-blur-xl"
+          initial={{ y: 20, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
-          exit={{ y: -20, opacity: 0 }}
+          exit={{ y: 20, opacity: 0 }}
         >
           <Timer size={14} className={secs >= 90 ? "text-accent" : "text-mute"} />
           <span className="label">Rest</span>

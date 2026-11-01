@@ -145,6 +145,8 @@ export function AmrapSheet({
   const [reps, setReps] = useState(0);
   const [phase, setPhase] = useState<"count" | "result">("count");
   const [busy, setBusy] = useState(false);
+  // The max before the bump, frozen for the result: Apply updates currentMaxLb while pending.
+  const [maxBefore, setMaxBefore] = useState<number | null>(null);
   // Reset only when the sheet opens for a set — logging reps updates `set` and must not
   // bounce the sheet back to the counter before the result phase shows.
   const setId = set?.id;
@@ -153,6 +155,7 @@ export function AmrapSheet({
       setReps(set.reps ?? set.targetReps ?? 0);
       setPhase("count");
       setBusy(false);
+      setMaxBefore(currentMaxLb);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, setId]);
@@ -196,6 +199,7 @@ export function AmrapSheet({
                 onLog(reps);
                 if (gain > 0 && !alreadyApplied) {
                   celebrate();
+                  setMaxBefore(currentMaxLb);
                   setPhase("result");
                 } else {
                   success();
@@ -222,10 +226,9 @@ export function AmrapSheet({
             >
               +{gain} lb
             </motion.div>
-            {currentMaxLb !== null && (
+            {maxBefore !== null && (
               <div className="mt-4 text-sm text-fg-2">
-                {exerciseName} max <span className="num">{currentMaxLb}</span> →{" "}
-                <span className="num text-gold">{currentMaxLb + gain}</span>
+                {exerciseName} max <span className="num">{maxBefore}</span> → <span className="num text-gold">{maxBefore + gain}</span>
               </div>
             )}
             <div className="mt-10 flex w-full gap-3">

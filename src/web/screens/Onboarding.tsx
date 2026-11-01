@@ -4,6 +4,7 @@ import { ArrowRight } from "lucide-react";
 import { addDays, formatShortDate, nextMonday, startOfWeek, weekdayName } from "../../shared/dates";
 import { goalDirection } from "../../shared/nutrition";
 import { mainLiftSets } from "../../shared/program";
+import { dayLogFields } from "../../shared/schemas";
 import { useAddMax, useData, useSaveDay, useSaveSettings } from "../lib/store";
 import { BoxNumber, Field } from "../components/ui";
 import { PaceSlider } from "../components/PaceSlider";
@@ -42,11 +43,13 @@ export function Onboarding() {
         if (v) await addMax({ exerciseId: ex.id, valueLb: v, date: today, source: "initial" });
       }
       if (weight !== null) saveDay(today, { weightLb: weight });
+      // Today's weigh-in fixes the goal's direction; one the schema rejects must not block onboarding.
+      const startLb = weight !== null && dayLogFields.weightLb.safeParse(weight).success ? weight : null;
       await saveSettings({
         ...data.settings,
         onboarded: true,
         nutrition: { ...data.settings.nutrition, initialTdee: tdee },
-        weightGoal: goal ? { targetLb: goal, pacePctPerWeek: effectivePace, setOn: today } : null,
+        weightGoal: goal ? { targetLb: goal, pacePctPerWeek: effectivePace, setOn: today, startLb } : null,
         program: { ...data.settings.program, cycleStartDate: start },
       });
       success();

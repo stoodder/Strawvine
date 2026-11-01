@@ -21,7 +21,7 @@ export function GoalsScreen() {
   const trend = model.todayEnergy?.avgWeight ?? null;
   const weekAgo = model.series.find((d) => d.date === addDays(today, -7))?.avgWeight ?? null;
   const projection = goal && trend !== null ? project(settings, today, trend, weekAgo) : null;
-  const direction = goal && trend !== null ? goalDirection(trend, goal.targetLb) : "maintain";
+  const direction = goal && trend !== null ? goalDirection(trend, goal.targetLb, goal.startLb) : "maintain";
   const streak = useMemo(() => streaks(data, today), [data, today]);
   const earned = useMemo(() => achievements(data, today), [data, today]);
   const [goalInput, setGoalInput] = useState<number | null>(null);
@@ -29,10 +29,11 @@ export function GoalsScreen() {
 
   const save = (patch: Partial<Settings>) => void saveSettings({ ...settings, ...patch });
 
+  const latestWeighIn = (onOrBefore: string) =>
+    [...data.days].filter((d) => d.weightLb !== null && d.date <= onOrBefore).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.weightLb ??
+    null;
   const startWeight = goal
-    ? ([...data.days].filter((d) => d.weightLb !== null && d.date <= goal.setOn).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.weightLb ??
-      data.days.find((d) => d.weightLb !== null)?.weightLb ??
-      null)
+    ? (goal.startLb ?? latestWeighIn(goal.setOn) ?? data.days.find((d) => d.weightLb !== null)?.weightLb ?? null)
     : null;
   const progress =
     goal && startWeight !== null && trend !== null && startWeight !== goal.targetLb
@@ -113,12 +114,15 @@ export function GoalsScreen() {
               className="btn-primary disabled:opacity-30"
               onClick={() => {
                 if (!goalInput) return;
-                const dir = trend !== null ? goalDirection(trend, goalInput) : "lose";
+                // Bodyweight now fixes the goal's direction (cut vs build).
+                const startLb = trend ?? latestWeighIn(today);
+                const dir = startLb !== null ? goalDirection(startLb, goalInput) : "lose";
                 save({
                   weightGoal: {
                     targetLb: goalInput,
                     pacePctPerWeek: dir === "gain" ? settings.limits.maxGainPctPerWeek : settings.limits.maxLossPctPerWeek,
                     setOn: today,
+                    startLb,
                   },
                 });
               }}
