@@ -7,10 +7,10 @@ import { fmt, parseNum } from "../lib/format";
 import { useAddMax, useData, useDeleteMax, useMarkSeen } from "../lib/store";
 import { Sparkline } from "./charts";
 import { useToast } from "./Toast";
-import { Sheet } from "./ui";
+import { Sheet, Toggle } from "./ui";
 
 const fmtLb = (v: number) => fmt(v, v % 1 ? 1 : 0);
-const SOURCE: Record<string, string> = { initial: "Starting max", manual: "Manual", amrap: "AMRAP" };
+const SOURCE: Record<string, string> = { initial: "Starting max", manual: "Manual", amrap: "AMRAP", correction: "Correction" };
 
 /** A typed max: 1 decimal, within the schema's range. */
 function parseMax(text: string): number | null {
@@ -28,6 +28,8 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
   // Raw text, so "Set new max" enables as soon as a number is typed (not on blur).
   const [text, setText] = useState("");
   const [note, setNote] = useState("");
+  // A correction fixes a wrong number (e.g. an old typo): recorded as such and never celebrated.
+  const [correction, setCorrection] = useState(false);
   // The last deleted entry, offered back inline: a toast can't be reached while this sheet is open.
   const [removed, setRemoved] = useState<MaxEntry | null>(null);
   const restoredIds = useRef(new Set<number>());
@@ -38,17 +40,21 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
   const current = currentMax(data.maxEntries, exercise.id);
   const value = parseMax(text);
 
+  const isCorrection = !!current && correction;
   const submit = async () => {
     if (!value) return;
-    await addMax({
+    const saved = await addMax({
       exerciseId: exercise.id,
       valueLb: value,
       date: today,
-      source: current ? "manual" : "initial",
+      source: current ? (isCorrection ? "correction" : "manual") : "initial",
       note: note.trim() || null,
     });
+    // Belt and braces: a correction is never a PR moment, whatever the celebration rules say.
+    if (isCorrection) markSeen([`max-${saved.id}`]);
     setText("");
     setNote("");
+    setCorrection(false);
   };
 
   const restore = (e: MaxEntry) => {
@@ -123,9 +129,20 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
             className={`field ${inputBox} min-w-0 flex-1`}
           />
         </div>
-        <button type="submit" disabled={!value} className="btn-primary mt-3 w-full">
-          Set new max
-        </button>
+        <div className="mt-3 flex items-center gap-3">
+          {current && (
+            <label className="flex min-h-11 shrink-0 cursor-pointer items-center gap-2.5 text-xs text-fg-2">
+              <Toggle on={correction} onChange={setCorrection} label="Correction, not a PR" />
+              <span className="leading-tight" aria-hidden>
+                Correction
+                <span className="block text-mute">not a PR</span>
+              </span>
+            </label>
+          )}
+          <button type="submit" disabled={!value} className="btn-primary min-w-0 flex-1 whitespace-nowrap">
+            {isCorrection ? "Save correction" : "Set new max"}
+          </button>
+        </div>
       </form>
 
       <div className="label mt-10 mb-2">History</div>

@@ -33,6 +33,40 @@
   --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/*
+ * Edge and focus tokens (not colours, so they live outside @theme). High-contrast mode raises them.
+ */
+:root {
+  --hairline: rgb(255 255 255 / 0.09); /* section rules */
+  --edge-soft: rgb(255 255 255 / 0.08); /* box-less field underline */
+  --edge: rgb(255 255 255 / 0.12); /* boxed field ring */
+  --edge-focus: rgb(183 243 106 / 0.75);
+  --focus-width: 2px;
+  --control-edge: transparent; /* outline on ghost buttons / chips / switches; visible in high contrast */
+  --label-size: 0.65625rem; /* 10.5px at default size; scales with the user's font size */
+}
+
+/*
+ * High-contrast "outdoor" mode (Settings → Display; App sets data-contrast="high" on <html>).
+ * Same graphite + lime, louder: every text token is ≥ 7:1 on ink-950 (fg 18.4, fg-2 13.6,
+ * mute 9.4, faint 7.1; mute stays ≥ 7:1 up to ink-700 surfaces), hairlines and control edges
+ * are visible, the focus ring is thicker and labels are a touch larger.
+ */
+:root[data-contrast="high"] {
+  --color-fg: #f6f7f9;
+  --color-fg-2: #d3d7de;
+  --color-mute: #aeb4be;
+  --color-faint: #959ba6;
+  --color-warn: #ff9d82;
+  --hairline: rgb(255 255 255 / 0.22);
+  --edge-soft: rgb(255 255 255 / 0.3);
+  --edge: rgb(255 255 255 / 0.36);
+  --edge-focus: var(--color-accent);
+  --focus-width: 3px;
+  --control-edge: rgb(255 255 255 / 0.28);
+  --label-size: 0.71875rem; /* 11.5px */
+}
+
 @layer base {
   html {
     -webkit-text-size-adjust: 100%;
@@ -77,7 +111,7 @@
     -moz-appearance: textfield;
   }
   :focus-visible {
-    outline: 2px solid rgb(183 243 106 / 0.75);
+    outline: var(--focus-width) solid var(--edge-focus);
     outline-offset: 2px;
     border-radius: 6px;
   }
@@ -93,7 +127,7 @@
 /* Custom utilities (Tailwind v4 @utility so they can be composed with @apply). */
 @utility label {
   font-family: var(--font-mono);
-  font-size: 0.65625rem; /* 10.5px at default size; scales with the user's font size */
+  font-size: var(--label-size);
   text-transform: uppercase;
   letter-spacing: 0.16em;
   color: var(--color-mute);
@@ -105,7 +139,7 @@
 /* A hairline that fades out — used instead of boxes. */
 @utility rule {
   height: 1px;
-  background: linear-gradient(90deg, rgb(255 255 255 / 0.09), rgb(255 255 255 / 0.02) 70%, transparent);
+  background: linear-gradient(90deg, var(--hairline), rgb(255 255 255 / 0.02) 70%, transparent);
 }
 @utility glow {
   filter: drop-shadow(0 0 14px rgb(183 243 106 / 0.28));
@@ -121,7 +155,7 @@
 @utility field {
   width: 100%;
   background: transparent;
-  box-shadow: inset 0 -1px 0 rgb(255 255 255 / 0.08);
+  box-shadow: inset 0 -1px 0 var(--edge-soft);
   transition: box-shadow 150ms var(--ease-out-soft);
   &::placeholder {
     color: var(--color-faint);
@@ -129,14 +163,14 @@
   &:focus,
   &:focus-visible {
     outline: none;
-    box-shadow: inset 0 -2px 0 rgb(183 243 106 / 0.75);
+    box-shadow: inset 0 calc(var(--focus-width) * -1) 0 var(--edge-focus);
   }
   &[class*="rounded"] {
-    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
+    box-shadow: inset 0 0 0 1px var(--edge);
   }
   &[class*="rounded"]:focus,
   &[class*="rounded"]:focus-visible {
-    box-shadow: inset 0 0 0 1px rgb(183 243 106 / 0.6);
+    box-shadow: inset 0 0 0 calc(var(--focus-width) - 1px) var(--edge-focus);
   }
   /* The caller draws the line/box (and its focus state) on a wrapper. */
   &.field-plain,
@@ -147,15 +181,45 @@
 }
 /* A boxed wrapper around a bare field (BoxNumber). */
 @utility box-field {
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
+  box-shadow: inset 0 0 0 1px var(--edge);
   transition: box-shadow 150ms var(--ease-out-soft);
   &:focus-within {
-    box-shadow: inset 0 0 0 1px rgb(183 243 106 / 0.6);
+    box-shadow: inset 0 0 0 calc(var(--focus-width) - 1px) var(--edge-focus);
   }
   & .field,
   & .field:focus,
   & .field:focus-visible {
     box-shadow: none;
+  }
+}
+/*
+ * Text that edits in place (InlineText): reads as text; a hairline appears on hover and turns
+ * lime on focus.
+ */
+@utility inline-text {
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  border-radius: 0;
+  padding-block: 0.25rem;
+  box-shadow: inset 0 -1px 0 transparent;
+  transition: box-shadow 150ms var(--ease-out-soft);
+  text-overflow: ellipsis;
+  &::placeholder {
+    color: var(--color-faint);
+  }
+  @media (hover: hover) {
+    &:hover {
+      box-shadow: inset 0 -1px 0 var(--edge-soft);
+    }
+  }
+  &:focus,
+  &:focus-visible {
+    outline: none;
+    box-shadow: inset 0 calc(var(--focus-width) * -1) 0 var(--edge-focus);
+  }
+  &[aria-invalid="true"] {
+    box-shadow: inset 0 -1px 0 var(--color-warn);
   }
 }
 /* Number inputs that size to their content (falls back to an inline ch width). */
@@ -257,12 +321,12 @@
   &:focus-visible::-webkit-slider-thumb {
     box-shadow:
       0 0 0 3px var(--color-ink-950),
-      0 0 0 5px rgb(183 243 106 / 0.75);
+      0 0 0 calc(3px + var(--focus-width)) var(--edge-focus);
   }
   &:focus-visible::-moz-range-thumb {
     box-shadow:
       0 0 0 3px var(--color-ink-950),
-      0 0 0 5px rgb(183 243 106 / 0.75);
+      0 0 0 calc(3px + var(--focus-width)) var(--edge-focus);
   }
 }
 @utility scrollbar-none {
@@ -270,6 +334,23 @@
   &::-webkit-scrollbar {
     display: none;
   }
+}
+
+/*
+ * High contrast: controls get a visible edge (an outline, so it never fights a component's own
+ * shadow), list dividers get stronger. Unlayered, so these win over the utilities above.
+ * `hc-edge` opts any surface in (the nav pill, dock pills, switches, stepper buttons).
+ */
+:root[data-contrast="high"] :is(.btn-ghost, .chip, .hc-edge) {
+  outline: 1px solid var(--control-edge);
+  outline-offset: -1px;
+}
+:root[data-contrast="high"] :is(.divide-y, .divide-x) > :not(:last-child) {
+  border-color: rgb(255 255 255 / 0.16);
+}
+:root[data-contrast="high"] :is(.btn-ghost, .chip, .hc-edge):focus-visible {
+  outline: var(--focus-width) solid var(--edge-focus);
+  outline-offset: 2px;
 }
 
 .pb-nav {

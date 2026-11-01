@@ -116,3 +116,22 @@ export function MainSetButton({
     </button>
   );
 }
+
+/** A planned accessory set in a read-only preview: the chip's shape, outlined, not interactive. */
+export function PlannedChip({ index, set, measure }: { index: number; set: SetEntry; measure: Measure }) {
+  const unit = measureUnit(measure);
+  return (
+    <li className="flex h-[52px] min-w-[64px] flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.12] px-3 text-fg-2">
+      <span className="sr-only">{`Set ${index + 1}: ${describeSet(set, measure)}`}</span>
+      <span aria-hidden className="num text-[15px] leading-none">
+        {set.targetReps ?? "—"}
+        {unit && <span className="text-[10px] text-mute">{unit}</span>}
+      </span>
+      {set.targetWeight ? (
+        <span aria-hidden className="num mt-1 text-[10px] leading-none text-mute">
+          {set.targetWeight}
+        </span>
+      ) : null}
+    </li>
+  );
+}

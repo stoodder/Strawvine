@@ -1,0 +1,3 @@
+# Playwright output (see playwright.config.ts)
+.results/
+.report/

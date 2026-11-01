@@ -1,10 +1,11 @@
 /**
- * A small pill above the nav that appears only when edits are waiting to reach the server or
+ * A small pill in the dock (above the nav) that appears only when edits are waiting to reach the server or
  * the device is offline. Tapping it in the failed state offers Retry / Discard.
  */
 import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { DOCK_PRIORITY, DockItem } from "./Dock";
 import { discardFailed, getSyncState, retryFailed, subscribeSync, type SyncState } from "../lib/sync";
 
 export function useSyncState(): SyncState {
@@ -42,11 +43,12 @@ export function SyncStatus() {
 
   const v = view(s, slow);
   return (
-    <div
-      className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+4.9rem)] z-40 mx-auto flex max-w-lg justify-center px-5"
-      role="status"
-      aria-live="polite"
-    >
+    <DockItem id="sync" priority={DOCK_PRIORITY.sync}>
+      {/* sr-only (absolute): the live region takes no room in the dock while idle. */}
+      <div role="status" aria-live="polite" className="sr-only">
+        {v?.label}
+        {open && s.failedMessage ? ` ${s.failedMessage}` : ""}
+      </div>
       <AnimatePresence>
         {v && (
           <motion.div
@@ -56,7 +58,7 @@ export function SyncStatus() {
             exit={{ opacity: 0, y: 6 }}
             transition={{ duration: 0.2 }}
             className={clsx(
-              "flex max-w-full items-center gap-2 rounded-full bg-ink-800/90 px-3 py-1 shadow-[0_6px_24px_-8px_rgba(0,0,0,0.9)] backdrop-blur-xl",
+              "hc-edge flex max-w-full items-center gap-2 rounded-full bg-ink-800/90 px-3 py-1 shadow-[0_6px_24px_-8px_rgba(0,0,0,0.9)] backdrop-blur-xl",
               v.tone === "warn" && "pointer-events-auto",
             )}
           >
@@ -65,7 +67,7 @@ export function SyncStatus() {
               disabled={v.tone !== "warn" || !s.failed}
               onClick={() => setOpen((o) => !o)}
               aria-expanded={s.failed ? open : undefined}
-              className="flex min-h-6 items-center gap-2 font-mono text-[10.5px] tracking-[0.12em] uppercase disabled:cursor-default"
+              className="label flex min-h-6 items-center gap-2 tracking-[0.12em] disabled:cursor-default"
             >
               <span
                 aria-hidden
@@ -95,7 +97,6 @@ export function SyncStatus() {
           </motion.div>
         )}
       </AnimatePresence>
-      {open && s.failedMessage && <span className="sr-only">{s.failedMessage}</span>}
-    </div>
+    </DockItem>
   );
 }

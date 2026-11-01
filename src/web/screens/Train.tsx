@@ -1,17 +1,18 @@
 import clsx from "clsx";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router";
-import { Check, ChevronLeft, ChevronRight, Link2, MoreHorizontal, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Link2, ListChecks, MoreHorizontal, Plus, RefreshCw, SkipForward, Trash2 } from "lucide-react";
 import { addDays, formatShortDate, isISODate, weekdayName } from "../../shared/dates";
+import { trainingPrefs } from "../../shared/defaults";
 import { currentMax, cyclePosition, programDayFor, progressionGain } from "../../shared/program";
-import type { Block, Exercise, Session, SetEntry } from "../../shared/schemas";
-import { blankSet, buildSession, isSessionStarted, newId, sessionVolume } from "../../shared/session";
+import type { Block, BlockExercise, Exercise, Session, SetEntry } from "../../shared/schemas";
+import { accessoryHint, blankSet, buildSession, isSessionStarted, newId, planMatches, sessionVolume } from "../../shared/session";
 import { CheckDot, Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
 import { AddExerciseSheet } from "../components/train/AddExerciseSheet";
 import { FinishPanel } from "../components/train/FinishPanel";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
-import { MainSetButton, SetChip } from "../components/train/SetControls";
+import { MainSetButton, PlannedChip, SetChip } from "../components/train/SetControls";
 import { AmrapSheet, measureUnit, Plates, SetEditSheet } from "../components/train/SetSheets";
 import {
   describeSet,
@@ -33,12 +34,24 @@ import { cachedSession, useAddMax, useCreateExercise, useData, useDeleteSession,
 import { useTitle } from "../components/useTitle";
 
 const MAX_SETS = 30;
+/** How far ahead the planned sessions can be previewed (read-only). */
+const PREVIEW_DAYS = 14;
 
-/** What the plan prescribes for the main lift, for "has the plan changed?" (ids and loads aside). */
-function primaryShape(s: Session, count?: number): string {
-  const e = s.blocks.find((b) => b.kind === "primary")?.exercises[0];
-  if (!e) return "none";
-  return JSON.stringify([e.exerciseId, s.deload, e.sets.slice(0, count ?? e.sets.length).map((x) => [x.targetReps, x.amrap])]);
+/** A set still to do that "log as planned" may fill in (an AMRAP needs its real rep count). */
+const loggable = (s: SetEntry) => !s.done && !s.amrap;
+/** Mark a set done at its targets. */
+const logAsPlanned = (s: SetEntry): SetEntry =>
+  loggable(s) ? { ...s, done: true, reps: s.reps ?? s.targetReps, weight: s.weight ?? s.targetWeight } : s;
+const lb = (v: number) => fmt(v, v % 1 ? 1 : 0);
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+type Hint = NonNullable<ReturnType<typeof accessoryHint>>;
+/** Whether a progression hint would still change something: a pending set isn't at the suggestion yet. */
+function hintApplies(hint: Hint, sets: ReadonlyArray<SetEntry>): boolean {
+  const up = hint.suggestedWeight >= hint.lastWeight;
+  return sets.some(
+    (s) => loggable(s) && (s.targetWeight === null || (up ? s.targetWeight < hint.suggestedWeight : s.targetWeight > hint.suggestedWeight)),
+  );
 }
 
 export function TrainScreen() {
@@ -52,9 +65,11 @@ export function TrainScreen() {
   const [opened, setOpened] = useState({ key: location.key, today });
   if (opened.key !== location.key) setOpened({ key: location.key, today });
   const requested = params.date && isISODate(params.date) ? params.date : opened.key === location.key ? opened.today : today;
-  // No logging into the future (matches Today).
-  const date = requested > today ? today : requested;
+  // Future days are a read-only preview of the plan (capped a couple of weeks out); no logging into them.
+  const lastPreview = addDays(today, PREVIEW_DAYS);
+  const date = requested > lastPreview ? lastPreview : requested;
   const isToday = date === today;
+  const isPreview = date > today;
   const saveSession = useSaveSession();
   const deleteSession = useDeleteSession();
   const addMax = useAddMax();
@@ -66,6 +81,9 @@ export function TrainScreen() {
 
   const saved = data.sessions.find((s) => s.date === date) ?? null;
   const program = data.settings.program;
+  const prefs = trainingPrefs(data.settings);
+  /** Default rest after a set: longer after the main lift than after accessories (Settings). */
+  const restFor = (kind: Block["kind"]) => (kind === "primary" ? prefs.restSecondsMain : prefs.restSecondsAccessory);
   const programDay = programDayFor(program, date);
   const pos = cyclePosition(program, date);
 
@@ -102,16 +120,9 @@ export function TrainScreen() {
 
   // --- Undo toasts --------------------------------------------------------------------------
   const lastToast = useRef<number | null>(null);
-  const [toastUp, setToastUp] = useState(false);
-  const toastUpTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(toastUpTimer.current), []);
   const offerUndo = (message: string, onUndo: () => void, duration = 7000) => {
     if (lastToast.current !== null) toast.dismiss(lastToast.current);
     lastToast.current = toast.show({ message, duration, action: { label: "Undo", onAction: onUndo } });
-    // Lift the rest timer clear of the toast while it shows.
-    setToastUp(true);
-    window.clearTimeout(toastUpTimer.current);
-    toastUpTimer.current = window.setTimeout(() => setToastUp(false), duration);
   };
 
   // A sheet makes the app (and its toasts) inert and the toast would sit over the sheet's
@@ -121,16 +132,17 @@ export function TrainScreen() {
     if (sheetOpen && lastToast.current !== null) {
       toast.dismiss(lastToast.current);
       lastToast.current = null;
-      setToastUp(false);
     }
   }, [sheetOpen, toast]);
 
   /**
    * Save a change (the first one persists a draft). With `undo`, offer to revert it: just the
-   * touched exercise's sets when `scope` is given (later edits elsewhere survive), else the
+   * touched exercise (or block) when `scope` is given (later edits elsewhere survive), else the
    * whole session. Undoing the only change to a draft drops it back to the live plan.
+   * A preview never saves.
    */
-  const commit = (next: Session, undo?: { message: string; scope?: ExRef; duration?: number }) => {
+  const commit = (next: Session, undo?: { message: string; scope?: ExRef | { blockId: string }; duration?: number }) => {
+    if (isPreview) return;
     const before = session;
     const wasDraft = !saved;
     saveSession(next);
@@ -142,9 +154,17 @@ export function TrainScreen() {
         let restored = before;
         const scope = undo.scope;
         if (scope) {
-          const prevEx = before.blocks.find((b) => b.id === scope.blockId)?.exercises[scope.exIdx];
-          const curEx = cur.blocks.find((b) => b.id === scope.blockId)?.exercises[scope.exIdx];
-          if (prevEx && curEx && curEx.exerciseId === prevEx.exerciseId) restored = mapExercise(cur, scope, () => prevEx);
+          const prevBlock = before.blocks.find((b) => b.id === scope.blockId);
+          const curBlock = cur.blocks.find((b) => b.id === scope.blockId);
+          const same = (i: number) => {
+            const p = prevBlock?.exercises[i];
+            return p && curBlock?.exercises[i]?.exerciseId === p.exerciseId ? p : null;
+          };
+          if ("exIdx" in scope) {
+            const prevEx = same(scope.exIdx);
+            if (prevEx) restored = mapExercise(cur, scope, () => prevEx);
+          } else if (prevBlock && curBlock)
+            restored = mapBlock(cur, scope.blockId, (b) => ({ ...b, exercises: b.exercises.map((e, i) => same(i) ?? e) }));
         }
         if (wasDraft && JSON.stringify(restored) === JSON.stringify(before)) deleteSession(date);
         else saveSession(restored);
@@ -168,7 +188,7 @@ export function TrainScreen() {
     );
     tick();
     commit(next, { message: `${setLabel(ref)} ${logging ? "logged" : "unlogged"}`, scope: ref, duration: 4000 });
-    if (logging) rest.start();
+    if (logging) rest.start(restFor(found.block.kind));
   };
 
   const deleteSet = (ref: SetRef) => {
@@ -190,13 +210,14 @@ export function TrainScreen() {
   const plannedCount =
     session.week !== null ? (program.weeks[session.week - 1]?.reps.length ?? primaryEx?.sets.length ?? 0) : (primaryEx?.sets.length ?? 0);
   const freshPrimary = fresh.blocks.find((b) => b.kind === "primary");
-  const freshCount = freshPrimary?.exercises[0]?.sets.length;
 
   const maxChanged = !!saved && !!primaryBlock && !!primaryMax && session.primaryMaxLb !== primaryMax.valueLb && !primaryStarted;
-  // A saved session nothing has been logged in yet, whose main lift no longer matches the program.
-  const shapeDiffers = primaryShape(session, freshCount) !== primaryShape(fresh);
+  // A saved session nothing has been logged in yet, whose main lift no longer matches the program
+  // (the same test Today uses).
+  const shapeDiffers = !!saved && !planMatches(session, data);
   const planChanged = !!saved && !session.completedAt && !isSessionStarted(session) && shapeDiffers;
   const missingPrimary = !!saved && !primaryBlock && !!freshPrimary && !session.completedAt;
+  const offerRecalc = !isPreview && (planChanged || maxChanged || missingPrimary);
 
   const recalcPrimary = () => {
     commit(
@@ -253,6 +274,61 @@ export function TrainScreen() {
     setAdding(null);
   };
 
+  /** Log every still-open set of one exercise, or of a whole superset block, at its targets. */
+  const logRemaining = (scope: ExRef | { blockId: string }, what: string) => {
+    let n = 0;
+    const logEx = (e: BlockExercise): BlockExercise => {
+      if (e.skipped) return e;
+      n += e.sets.filter(loggable).length;
+      return { ...e, sets: e.sets.map(logAsPlanned) };
+    };
+    const next =
+      "exIdx" in scope
+        ? mapExercise(session, scope, logEx)
+        : mapBlock(session, scope.blockId, (b) => ({ ...b, exercises: b.exercises.map(logEx) }));
+    if (!n) return;
+    tick();
+    commit(next, { message: `${what} · ${plural(n, "set")} logged`, scope });
+    rest.start(restFor("accessory"));
+  };
+
+  /** Log the next open set of each exercise in a superset: one round (A1, A2, …). */
+  const logRound = (blockId: string, what: string) => {
+    let n = 0;
+    const next = mapBlock(session, blockId, (b) => ({
+      ...b,
+      exercises: b.exercises.map((e) => {
+        const i = e.skipped ? -1 : e.sets.findIndex(loggable);
+        if (i === -1) return e;
+        n++;
+        return { ...e, sets: e.sets.map((x, j) => (j === i ? logAsPlanned(x) : x)) };
+      }),
+    }));
+    if (!n) return;
+    tick();
+    commit(next, { message: `${what} · round logged`, scope: { blockId } });
+    rest.start(restFor("accessory"));
+  };
+
+  /** Skip an accessory for today only: the next session of this day type still carries it. */
+  const setSkipped = (ref: ExRef, skipped: boolean) =>
+    commit(
+      mapExercise(session, ref, (e) => {
+        if (skipped) return { ...e, skipped: true };
+        const { skipped: _unskip, ...kept } = e;
+        return kept;
+      }),
+    );
+
+  /** Move the open sets of an accessory to the suggested load (never automatic). */
+  const applyHint = (ref: ExRef, weight: number, name: string) => {
+    tick();
+    commit(
+      mapExercise(session, ref, (e) => ({ ...e, sets: e.sets.map((x) => (loggable(x) ? { ...x, targetWeight: weight } : x)) })),
+      { message: `${name} → ${lb(weight)} lb`, scope: ref },
+    );
+  };
+
   const addAccessorySet = (ref: ExRef) =>
     commit(
       mapExercise(session, ref, (x) => {
@@ -273,8 +349,10 @@ export function TrainScreen() {
   const actionsBlock = actions ? session.blocks.find((b) => b.id === actions.blockId) : undefined;
   const actionsEx = actions ? actionsBlock?.exercises[actions.exIdx] : undefined;
   const volume = sessionVolume(session);
-  const totalSets = session.blocks.reduce((n, b) => n + b.exercises.reduce((m, e) => m + e.sets.length, 0), 0);
-  const doneSets = session.blocks.reduce((n, b) => n + b.exercises.reduce((m, e) => m + e.sets.filter((s) => s.done).length, 0), 0);
+  // Exercises skipped today count toward nothing.
+  const counted = session.blocks.flatMap((b) => b.exercises.filter((e) => !e.skipped));
+  const totalSets = counted.reduce((n, e) => n + e.sets.length, 0);
+  const doneSets = counted.reduce((n, e) => n + e.sets.filter((s) => s.done).length, 0);
 
   /** Edited set can be deleted: any accessory set, or a main-lift set added beyond the plan. */
   const canDelete = (f: NonNullable<ReturnType<typeof findSet>>) =>
@@ -298,7 +376,7 @@ export function TrainScreen() {
           <button
             type="button"
             aria-label="Next day"
-            disabled={date >= today}
+            disabled={date >= lastPreview}
             onClick={() => go(addDays(date, 1))}
             className="tap p-2 text-mute disabled:opacity-20"
           >
@@ -320,7 +398,20 @@ export function TrainScreen() {
       <div className="mt-6">
         <h1 className="text-[44px] leading-none font-light tracking-tight">{session.label}</h1>
         <p className="mt-3 text-sm text-mute">
-          {totalSets ? (
+          {isPreview ? (
+            <>
+              <span className="label mr-2 rounded-full bg-white/[0.05] px-2 py-1 text-fg-2">Preview</span>
+              {totalSets ? (
+                <>
+                  <span className="num text-fg-2">{totalSets}</span> sets planned
+                </>
+              ) : isPlannedDay ? (
+                "Nothing planned yet"
+              ) : (
+                "Rest day"
+              )}
+            </>
+          ) : totalSets ? (
             <>
               <span className="num text-fg-2">{doneSets}</span>/{totalSets} sets
               {volume > 0 && (
@@ -340,19 +431,18 @@ export function TrainScreen() {
             "Rest day."
           )}
         </p>
-        {(!isToday || planChanged || maxChanged || missingPrimary) && (
+        {(!isToday || offerRecalc) && (
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
             {!isToday && (
               <Link to="/train" className="label inline-flex min-h-11 items-center text-accent">
                 ← Today
               </Link>
             )}
-            {(planChanged || maxChanged || missingPrimary) && (
+            {offerRecalc && (
               <button type="button" onClick={recalcPrimary} className="chip min-h-9 bg-accent/10 text-accent">
                 <RefreshCw size={12} className="mr-1.5" />
-                {planChanged || missingPrimary || shapeDiffers
-                  ? "Plan changed — recalculate"
-                  : `Recalculate from new max (${fmt(primaryMax!.valueLb)})`}
+                {/* planMatches also compares loads, so a new max reads as its own reason. */}
+                {maxChanged && !missingPrimary ? `Recalculate from new max (${fmt(primaryMax!.valueLb)})` : "Plan changed — recalculate"}
               </button>
             )}
           </div>
@@ -364,18 +454,22 @@ export function TrainScreen() {
           <Empty>
             {isToday
               ? "Rest from the barbell today. Metcon, zone 2 and steps still count toward closing the day."
-              : `No lifting was scheduled for ${weekday}.`}
+              : isPreview
+                ? `No lifting scheduled for ${weekday}.`
+                : `No lifting was scheduled for ${weekday}.`}
           </Empty>
-          <div className="flex flex-wrap gap-3">
-            <button type="button" className="btn-ghost whitespace-nowrap" onClick={() => commit({ ...session, label: "Extra session" })}>
-              <Plus size={16} /> {isToday ? "Start a session anyway" : "Log a session anyway"}
-            </button>
-            {isToday && (
-              <Link to="/" className="btn-ghost whitespace-nowrap">
-                Back to today
-              </Link>
-            )}
-          </div>
+          {!isPreview && (
+            <div className="flex flex-wrap gap-3">
+              <button type="button" className="btn-ghost whitespace-nowrap" onClick={() => commit({ ...session, label: "Extra session" })}>
+                <Plus size={16} /> {isToday ? "Start a session anyway" : "Log a session anyway"}
+              </button>
+              {isToday && (
+                <Link to="/" className="btn-ghost whitespace-nowrap">
+                  Back to today
+                </Link>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <>
@@ -384,14 +478,20 @@ export function TrainScreen() {
             <Section
               label="Main lift"
               right={
-                <button
-                  type="button"
-                  aria-haspopup="dialog"
-                  className="label -mx-2 -my-3.5 px-2 py-3.5 text-mute"
-                  onClick={() => setMaxFor(exById(primaryExId) ?? null)}
-                >
-                  max <span className="num text-fg-2">{fmt(primaryMax?.valueLb ?? session.primaryMaxLb, 0)}</span>
-                </button>
+                isPreview ? (
+                  <span className="label text-mute">
+                    max <span className="num text-fg-2">{fmt(primaryMax?.valueLb ?? session.primaryMaxLb, 0)}</span>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    aria-haspopup="dialog"
+                    className="label -mx-2 -my-3.5 px-2 py-3.5 text-mute"
+                    onClick={() => setMaxFor(exById(primaryExId) ?? null)}
+                  >
+                    max <span className="num text-fg-2">{fmt(primaryMax?.valueLb ?? session.primaryMaxLb, 0)}</span>
+                  </button>
+                )
               }
             >
               <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-3">
@@ -415,6 +515,23 @@ export function TrainScreen() {
                     : extra
                       ? "back-off"
                       : null;
+                  if (isPreview)
+                    return (
+                      <div key={s.id} className="flex min-h-11 items-center gap-4 py-2">
+                        <span className="label w-5" aria-hidden>
+                          {i + 1}
+                        </span>
+                        <span className="sr-only">{`Set ${i + 1}: ${describeSet(s, "reps")}${s.amrap ? ", AMRAP" : ""}`}</span>
+                        <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-1" aria-hidden>
+                          <span className="num text-3xl font-light tracking-tight text-fg-2">{s.targetWeight}</span>
+                          <span className="text-sm whitespace-nowrap text-mute">
+                            × {s.targetReps}
+                            {s.amrap && "+"}
+                          </span>
+                          {tag && <span className={clsx("label whitespace-nowrap", s.amrap ? "text-accent" : "text-faint")}>{tag}</span>}
+                        </span>
+                      </div>
+                    );
                   return (
                     <div key={s.id} className="flex items-center gap-4 py-2">
                       <span className="label w-5" aria-hidden>
@@ -454,7 +571,7 @@ export function TrainScreen() {
                 <div className="min-h-6">
                   <Plates weight={primaryEx.sets.find((s) => !s.done)?.targetWeight ?? null} />
                 </div>
-                {primaryEx.sets.length < MAX_SETS && (
+                {!isPreview && primaryEx.sets.length < MAX_SETS && (
                   <button
                     type="button"
                     onClick={addMainSet}
@@ -472,9 +589,11 @@ export function TrainScreen() {
             <Section label="Main lift">
               <Empty>
                 Set a max for {exById(programDay.primaryExerciseId)?.name ?? "this lift"} and the working sets calculate themselves.{" "}
-                <button type="button" className="text-accent" onClick={() => setMaxFor(exById(programDay.primaryExerciseId!) ?? null)}>
-                  Set max →
-                </button>
+                {!isPreview && (
+                  <button type="button" className="text-accent" onClick={() => setMaxFor(exById(programDay.primaryExerciseId!) ?? null)}>
+                    Set max →
+                  </button>
+                )}
               </Empty>
             </Section>
           )}
@@ -497,50 +616,110 @@ export function TrainScreen() {
                     <div className={clsx(superset && "border-l border-glow/25 pl-4")}>
                       {b.exercises.map((e, exIdx) => {
                         const name = exName(e.exerciseId);
-                        return (
-                          <div key={exIdx} className={clsx(exIdx > 0 && "mt-5")}>
-                            <div className="flex items-center justify-between">
-                              <div className="text-[15px]">
-                                {superset && <span className="label mr-2 text-glow">{`${letter}${exIdx + 1}`}</span>}
+                        const ref = { blockId: b.id, exIdx };
+                        const tagLabel = superset && <span className="label mr-2 text-glow">{`${letter}${exIdx + 1}`}</span>;
+                        if (e.skipped)
+                          return (
+                            <div key={exIdx} className={clsx("flex min-h-11 items-center justify-between gap-3", exIdx > 0 && "mt-3")}>
+                              <div className="min-w-0 truncate text-[15px] text-mute">
+                                {tagLabel}
                                 {name}
                               </div>
-                              <button
-                                type="button"
-                                aria-label={`${name} options`}
-                                aria-haspopup="dialog"
-                                className="tap -mr-3 grid h-11 w-11 place-items-center text-mute"
-                                onClick={() => setActions({ blockId: b.id, exIdx })}
-                              >
-                                <MoreHorizontal size={16} />
-                              </button>
+                              <div className="flex shrink-0 items-center">
+                                <span className="label">Skipped</span>
+                                {!isPreview && (
+                                  <>
+                                    <span className="label px-1.5" aria-hidden>
+                                      ·
+                                    </span>
+                                    <button
+                                      type="button"
+                                      aria-label={`Undo skipping ${name}`}
+                                      className="tap label -mr-2 min-h-11 px-2 text-accent"
+                                      onClick={() => setSkipped(ref, false)}
+                                    >
+                                      Undo
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </div>
-                            <div className="mt-1 flex flex-wrap gap-2">
-                              {e.sets.map((s, si) => {
-                                const ref = { blockId: b.id, exIdx, setId: s.id };
-                                return (
-                                  <SetChip
-                                    key={s.id}
-                                    exerciseName={name}
-                                    index={si}
-                                    set={s}
-                                    measure={e.measure}
-                                    describedBy={hintId}
-                                    onTap={() => toggleDone(ref)}
-                                    onHold={() => setEditing(ref)}
-                                  />
-                                );
-                              })}
-                              {e.sets.length < MAX_SETS && (
+                          );
+                        const hint =
+                          isPreview || session.deload || session.completedAt || e.measure !== "reps"
+                            ? null
+                            : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb);
+                        const showHint = !!hint && hintApplies(hint, e.sets);
+                        return (
+                          <div key={exIdx} className={clsx(exIdx > 0 && "mt-5")}>
+                            <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
+                              <div className="text-[15px]">
+                                {tagLabel}
+                                {name}
+                              </div>
+                              {!isPreview && (
                                 <button
                                   type="button"
-                                  aria-label={`Add ${name} set`}
-                                  className="tap grid h-[52px] w-11 place-items-center rounded-2xl text-faint ring-1 ring-white/[0.06] ring-inset"
-                                  onClick={() => addAccessorySet({ blockId: b.id, exIdx })}
+                                  aria-label={`${name} options`}
+                                  aria-haspopup="dialog"
+                                  className="tap -mr-3 grid h-11 w-11 place-items-center text-mute"
+                                  onClick={() => setActions(ref)}
                                 >
-                                  <Plus size={14} />
+                                  <MoreHorizontal size={16} />
                                 </button>
                               )}
                             </div>
+                            {showHint && hint && (
+                              <div className="-mt-1 mb-1 flex flex-wrap items-center gap-x-2 text-xs text-mute">
+                                <span title={hint.reason}>
+                                  Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb · all reps → try{" "}
+                                  <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
+                                </span>
+                                <button
+                                  type="button"
+                                  aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
+                                  className="tap label -my-2 min-h-9 px-1 text-accent"
+                                  onClick={() => applyHint(ref, hint.suggestedWeight, name)}
+                                >
+                                  Apply
+                                </button>
+                              </div>
+                            )}
+                            {isPreview ? (
+                              <ul className="mt-1 flex flex-wrap gap-2" aria-label={`${name} sets`}>
+                                {e.sets.map((s, si) => (
+                                  <PlannedChip key={s.id} index={si} set={s} measure={e.measure} />
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="mt-1 flex flex-wrap gap-2">
+                                {e.sets.map((s, si) => {
+                                  const setRef = { ...ref, setId: s.id };
+                                  return (
+                                    <SetChip
+                                      key={s.id}
+                                      exerciseName={name}
+                                      index={si}
+                                      set={s}
+                                      measure={e.measure}
+                                      describedBy={hintId}
+                                      onTap={() => toggleDone(setRef)}
+                                      onHold={() => setEditing(setRef)}
+                                    />
+                                  );
+                                })}
+                                {e.sets.length < MAX_SETS && (
+                                  <button
+                                    type="button"
+                                    aria-label={`Add ${name} set`}
+                                    className="tap grid h-[52px] w-11 place-items-center rounded-2xl text-faint ring-1 ring-white/[0.06] ring-inset"
+                                    onClick={() => addAccessorySet(ref)}
+                                  >
+                                    <Plus size={14} />
+                                  </button>
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -550,64 +729,79 @@ export function TrainScreen() {
               })}
             {!session.blocks.some((b) => b.kind === "accessory") && (
               <p className="mb-6 text-sm text-mute">
-                Add the accessories and core work for {isToday ? "today" : weekday} — next {weekday} they'll be here waiting.
+                {isPreview
+                  ? `Nothing to carry over yet — the accessories you log on a ${weekday} show up here.`
+                  : `Add the accessories and core work for ${isToday ? "today" : weekday} — next ${weekday} they'll be here waiting.`}
               </p>
             )}
-            <div className="flex gap-3">
-              <button type="button" className="btn-ghost" onClick={() => setAdding({ mode: "new" })}>
-                <Plus size={16} /> Exercise
-              </button>
-            </div>
-            <p id={hintId} className="mt-4 text-xs text-mute">
-              Tap a set to log it · hold to edit
-            </p>
-          </Section>
-
-          <Section label="Notes">
-            <JournalText
-              key={date}
-              ariaLabel="Session notes"
-              value={session.notes || null}
-              onSave={(v) => commit({ ...(cachedSession(date) ?? session), notes: v ?? "" })}
-              placeholder="Cues, feel, what to change next time…"
-              minRows={2}
-            />
-          </Section>
-
-          <div className="mt-10 flex flex-col items-center gap-4">
-            <FinishPanel
-              session={session}
-              doneSets={doneSets}
-              totalSets={totalSets}
-              volume={volume}
-              exName={exName}
-              onFinish={() => {
-                success();
-                commit({ ...session, completedAt: new Date().toISOString() });
-                rest.stop();
-              }}
-              onReopen={() => commit({ ...session, completedAt: null })}
-            />
-            {saved && !isSessionStarted(session) && !session.completedAt && (
-              <button
-                type="button"
-                className="label min-h-11 px-3 text-faint"
-                onClick={() => {
-                  const before = session;
-                  deleteSession(date);
-                  offerUndo("Reset to plan", () => saveSession(before));
-                }}
-              >
-                Reset to plan
-              </button>
+            {isPreview ? (
+              <p className="text-xs leading-relaxed text-mute">
+                Carried over from your last {weekday}
+                {primaryBlock ? `; main-lift loads use today's max and move with any AMRAP before then` : ""}. Log it on the day.
+              </p>
+            ) : (
+              <>
+                <div className="flex gap-3">
+                  <button type="button" className="btn-ghost" onClick={() => setAdding({ mode: "new" })}>
+                    <Plus size={16} /> Exercise
+                  </button>
+                </div>
+                <p id={hintId} className="mt-4 text-xs text-mute">
+                  Tap a set to log it · hold to edit
+                </p>
+              </>
             )}
-          </div>
+          </Section>
+
+          {!isPreview && (
+            <>
+              <Section label="Notes">
+                <JournalText
+                  key={date}
+                  ariaLabel="Session notes"
+                  value={session.notes || null}
+                  onSave={(v) => commit({ ...(cachedSession(date) ?? session), notes: v ?? "" })}
+                  placeholder="Cues, feel, what to change next time…"
+                  minRows={2}
+                />
+              </Section>
+
+              <div className="mt-10 flex flex-col items-center gap-4">
+                <FinishPanel
+                  session={session}
+                  doneSets={doneSets}
+                  totalSets={totalSets}
+                  volume={volume}
+                  exName={exName}
+                  onFinish={() => {
+                    success();
+                    commit({ ...session, completedAt: new Date().toISOString() });
+                    rest.stop();
+                  }}
+                  onReopen={() => commit({ ...session, completedAt: null })}
+                />
+                {saved && !isSessionStarted(session) && !session.completedAt && (
+                  <button
+                    type="button"
+                    className="label min-h-11 px-3 text-faint"
+                    onClick={() => {
+                      const before = session;
+                      deleteSession(date);
+                      offerUndo("Reset to plan", () => saveSession(before));
+                    }}
+                  >
+                    Reset to plan
+                  </button>
+                )}
+              </div>
+            </>
+          )}
         </>
       )}
 
-      {/* Room for the floating rest timer above the nav, so it never covers the last controls. */}
-      <div className="h-14" aria-hidden />
-      <RestTimer from={rest.from} onDismiss={rest.stop} raised={toastUp} />
+      {/* Room for the rest pill in the bottom dock, so it never covers the last controls. */}
+      {rest.from !== null && <div className="h-14" aria-hidden />}
+      <RestTimer from={rest.from} target={rest.target} onTarget={rest.setTarget} onDismiss={rest.stop} />
 
       <SetEditSheet
         open={!!editingFound}
@@ -628,7 +822,7 @@ export function TrainScreen() {
             mapExercise(session, editing, (e) => replaceSetAndPropagate(e, prev, s)),
             { message: `${setLabel(editing)} ${logged ? "logged" : "updated"}`, scope: editing, duration: 4000 },
           );
-          if (logged) rest.start();
+          if (logged) rest.start(restFor(editingFound.block.kind));
           setEditing(null);
         }}
         onDelete={
@@ -654,7 +848,7 @@ export function TrainScreen() {
           if (!amrap) return;
           // No undo toast here: it would sit over the sheet's Apply step. Tap the set to unlog.
           commit(mapSet(session, amrap, (x) => ({ ...x, done: true, reps, weight: weight ?? x.targetWeight })));
-          rest.start();
+          rest.start(restFor("primary"));
         }}
         onApply={async (gain, reps) => {
           if (!amrap || !amrapFound || !primaryMax) return;
@@ -687,6 +881,76 @@ export function TrainScreen() {
       <Sheet open={!!actionsEx} onClose={() => setActions(null)} title={actionsEx ? exName(actionsEx.exerciseId) : ""}>
         {actions && actionsBlock && actionsEx && (
           <div className="pb-2">
+            {(() => {
+              // "Log as planned": this exercise's open sets, and for a superset the next round / the whole block.
+              const exOpen = actionsEx.sets.filter(loggable).length;
+              const isSuperset = actionsBlock.exercises.length > 1;
+              const live = actionsBlock.exercises.filter((e) => !e.skipped);
+              const blockOpen = live.reduce((n, e) => n + e.sets.filter(loggable).length, 0);
+              const roundSize = live.filter((e) => e.sets.some(loggable)).length;
+              const letter = isSuperset
+                ? String.fromCharCode(
+                    65 +
+                      session.blocks
+                        .filter((x) => x.kind === "accessory" && x.exercises.length > 1)
+                        .findIndex((x) => x.id === actionsBlock.id),
+                  )
+                : "";
+              const name = exName(actionsEx.exerciseId);
+              const row =
+                "tap flex min-h-12 w-full items-center gap-3 rounded-2xl bg-accent/[0.07] px-4 py-3 text-left text-fg disabled:opacity-40";
+              if (!exOpen && !(isSuperset && blockOpen)) return null;
+              return (
+                <div className="mb-6">
+                  <h4 className="label mb-2">Log as planned</h4>
+                  <div className="space-y-2">
+                    {exOpen > 0 && (
+                      <button
+                        type="button"
+                        className={row}
+                        onClick={() => {
+                          setActions(null);
+                          logRemaining(actions, name);
+                        }}
+                      >
+                        <ListChecks size={16} className="shrink-0 text-accent" />
+                        <span className="flex-1">Log remaining sets</span>
+                        <span className="num text-sm text-mute">{exOpen}</span>
+                      </button>
+                    )}
+                    {isSuperset && roundSize > 1 && (
+                      <button
+                        type="button"
+                        className={row}
+                        onClick={() => {
+                          setActions(null);
+                          logRound(actionsBlock.id, `Superset ${letter}`);
+                        }}
+                      >
+                        <Link2 size={16} className="shrink-0 text-glow" />
+                        <span className="flex-1">Log next round of Superset {letter}</span>
+                        <span className="num text-sm text-mute">{roundSize}</span>
+                      </button>
+                    )}
+                    {isSuperset && blockOpen > exOpen && (
+                      <button
+                        type="button"
+                        className={row}
+                        onClick={() => {
+                          setActions(null);
+                          logRemaining({ blockId: actionsBlock.id }, `Superset ${letter}`);
+                        }}
+                      >
+                        <Link2 size={16} className="shrink-0 text-glow" />
+                        <span className="flex-1">Log all of Superset {letter}</span>
+                        <span className="num text-sm text-mute">{blockOpen}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             <h4 className="label mb-2">Edit sets</h4>
             {actionsEx.sets.length ? (
               <ul className="space-y-2">
@@ -768,6 +1032,20 @@ export function TrainScreen() {
               )}
               <button
                 type="button"
+                className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
+                onClick={() => {
+                  setSkipped(actions, true);
+                  setActions(null);
+                }}
+              >
+                <SkipForward size={16} className="shrink-0 text-mute" />
+                <span>
+                  Skip today
+                  <span className="block text-xs text-mute">Stays in next {weekday}'s plan</span>
+                </span>
+              </button>
+              <button
+                type="button"
                 className="tap flex w-full items-center gap-3 rounded-2xl bg-warn/[0.06] px-4 py-3.5 text-left text-warn"
                 onClick={() => {
                   commit(
@@ -782,9 +1060,6 @@ export function TrainScreen() {
               >
                 <Trash2 size={16} /> Remove — also from future {weekday}s
               </button>
-              <p className="px-1 pt-1 text-xs leading-relaxed text-mute">
-                Skipping it just today? Leave its sets unlogged — it stays in next {weekday}'s plan.
-              </p>
             </div>
           </div>
         )}

@@ -11,11 +11,12 @@ export interface RecapLine {
   gold: boolean;
 }
 
-/** AMRAP results and applied max bumps, for the recap. */
+/** AMRAP results and applied max bumps, for the recap (exercises skipped today don't count). */
 export function recapLines(session: Session, exName: (id: number) => string): RecapLine[] {
   const out: RecapLine[] = [];
   for (const b of session.blocks)
-    for (const e of b.exercises)
+    for (const e of b.exercises) {
+      if (e.skipped) continue;
       for (const s of e.sets) {
         if (!s.amrap || !s.done || s.reps === null) continue;
         const over = s.targetReps !== null ? s.reps - s.targetReps : 0;
@@ -26,6 +27,7 @@ export function recapLines(session: Session, exName: (id: number) => string): Re
         });
         if (s.appliedProgressionLb) out.push({ text: `New max · +${s.appliedProgressionLb} lb`, gold: true });
       }
+    }
   return out;
 }
 

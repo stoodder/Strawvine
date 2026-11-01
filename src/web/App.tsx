@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { createBrowserRouter, Outlet, RouterProvider, ScrollRestoration } from "react-router";
 import { DataProvider, useBootstrapQuery, useData } from "./lib/store";
 import { onSignedOut, resumeAfterLogin } from "./lib/sync";
@@ -6,21 +6,86 @@ import { SyncStatus } from "./components/SyncStatus";
 import { BottomNav } from "./components/BottomNav";
 import { Celebrations } from "./components/Celebrations";
 import { Logo } from "./components/Logo";
+import { displayPrefs } from "../shared/defaults";
 import { Login } from "./screens/Login";
-import { Onboarding } from "./screens/Onboarding";
 import { TodayScreen } from "./screens/Today";
 import { TrainScreen } from "./screens/Train";
-import { ProgressScreen } from "./screens/Progress";
-import { GoalsScreen } from "./screens/Goals";
-import { SettingsScreen } from "./screens/Settings";
+
+// Today and Train are the daily screens and ship in the main bundle; the rest load on demand
+// (the service worker precaches every chunk, so they open offline too).
+const loadOnboarding = () => import("./screens/Onboarding");
+const loadProgress = () => import("./screens/Progress");
+const loadGoals = () => import("./screens/Goals");
+const loadSettings = () => import("./screens/Settings");
+const Onboarding = lazy(() => loadOnboarding().then((m) => ({ default: m.Onboarding })));
+const ProgressScreen = lazy(() => loadProgress().then((m) => ({ default: m.ProgressScreen })));
+const GoalsScreen = lazy(() => loadGoals().then((m) => ({ default: m.GoalsScreen })));
+const SettingsScreen = lazy(() => loadSettings().then((m) => ({ default: m.SettingsScreen })));
+
+/** Warm the lazy screens once the app is idle, so the first tap on a tab doesn't wait. */
+function usePrefetchScreens() {
+  useEffect(() => {
+    const run = () => void Promise.all([loadProgress(), loadGoals(), loadSettings()]).catch(() => {});
+    if ("requestIdleCallback" in window) {
+      const id = window.requestIdleCallback(run, { timeout: 4000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const t = setTimeout(run, 1500);
+    return () => clearTimeout(t);
+  }, []);
+}
+
+/** A calm placeholder while a screen's chunk loads: nothing at first, then a softly pulsing mark. */
+function ScreenFallback({ fullscreen }: { fullscreen?: boolean }) {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setShow(true), 400);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <div className={fullscreen ? "grid min-h-dvh place-items-center" : "grid min-h-[60dvh] place-items-center"} aria-busy="true">
+      {show && <Logo size={28} className="animate-pulse opacity-60" />}
+    </div>
+  );
+}
+
+/** Mirrors Settings → Display onto <html> (data-contrast="high"), and remembers it for the sign-in screen. */
+export const CONTRAST_KEY = "strawvine:contrast";
+function useContrastMode(high: boolean) {
+  useEffect(() => {
+    applyContrast(high);
+    try {
+      window.localStorage.setItem(CONTRAST_KEY, high ? "high" : "normal");
+    } catch {
+      /* storage unavailable: the sign-in screen just uses normal contrast */
+    }
+  }, [high]);
+}
+export function applyContrast(high: boolean) {
+  if (high) document.documentElement.dataset.contrast = "high";
+  else delete document.documentElement.dataset.contrast;
+}
+
+function Lazy({ children, fullscreen }: { children: ReactNode; fullscreen?: boolean }) {
+  return <Suspense fallback={<ScreenFallback fullscreen={fullscreen} />}>{children}</Suspense>;
+}
 
 function Shell() {
   const { data } = useData();
-  if (!data.settings.onboarded) return <Onboarding />;
+  useContrastMode(displayPrefs(data.settings).highContrast);
+  usePrefetchScreens();
+  if (!data.settings.onboarded)
+    return (
+      <Lazy fullscreen>
+        <Onboarding />
+      </Lazy>
+    );
   return (
     <>
       <main className="pt-safe pb-nav mx-auto w-full max-w-lg px-5">
-        <Outlet />
+        <Lazy>
+          <Outlet />
+        </Lazy>
       </main>
       <SyncStatus />
       <BottomNav />

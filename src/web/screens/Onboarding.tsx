@@ -4,7 +4,6 @@ import { ArrowRight } from "lucide-react";
 import { addDays, formatShortDate, nextMonday, startOfWeek, weekdayName } from "../../shared/dates";
 import { goalDirection } from "../../shared/nutrition";
 import { mainLiftSets } from "../../shared/program";
-import { dayLogFields } from "../../shared/schemas";
 import { useAddMax, useData, useSaveDay, useSaveSettings } from "../lib/store";
 import { BoxNumber, Field } from "../components/ui";
 import { PaceSlider } from "../components/PaceSlider";
@@ -12,6 +11,13 @@ import { Logo } from "../components/Logo";
 import { fmt } from "../lib/format";
 import { useTitle } from "../components/useTitle";
 import { success } from "../lib/haptics";
+
+/**
+ * The bodyweight range the server accepts (dayLogFields.weightLb / weightGoal.startLb in
+ * shared/schemas). Kept as plain numbers so onboarding doesn't ship zod to the client.
+ */
+const WEIGHT_RANGE = { min: 50, max: 1000 } as const;
+const inWeightRange = (v: number) => Number.isFinite(v) && v >= WEIGHT_RANGE.min && v <= WEIGHT_RANGE.max;
 
 export function Onboarding() {
   const { data, today } = useData();
@@ -59,7 +65,7 @@ export function Onboarding() {
       }
       if (weight !== null) saveDay(today, { weightLb: weight });
       // Today's weigh-in fixes the goal's direction; one the schema rejects must not block onboarding.
-      const startLb = weight !== null && dayLogFields.weightLb.safeParse(weight).success ? weight : null;
+      const startLb = weight !== null && inWeightRange(weight) ? weight : null;
       await saveSettings({
         ...data.settings,
         onboarded: true,

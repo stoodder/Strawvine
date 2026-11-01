@@ -408,7 +408,7 @@ export function Stepper({
 
   const clamp = (n: number) => Math.min(max, Math.max(min, n));
   const btn = clsx(
-    "tap relative grid shrink-0 place-items-center rounded-full bg-white/[0.05] text-fg-2 active:bg-white/[0.1]",
+    "tap hc-edge relative grid shrink-0 place-items-center rounded-full bg-white/[0.05] text-fg-2 active:bg-white/[0.1]",
     // md looks 36px but takes a 44px tap; xl is 56px already.
     xl ? "h-14 w-14" : "h-9 w-9 after:absolute after:-inset-1 after:content-['']",
   );
@@ -547,7 +547,7 @@ export function DotScale({
           {label}
         </div>
         {value !== null && (
-          <button type="button" className="label hit text-faint hover:text-mute" onClick={() => set(null)} aria-label={`Clear ${label}`}>
+          <button type="button" className="label hit text-mute hover:text-fg-2" onClick={() => set(null)} aria-label={`Clear ${label}`}>
             · clear
           </button>
         )}
@@ -611,7 +611,7 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boo
       onClick={() => (tick(), onChange(!on))}
       className={clsx(
         "tap relative h-7 w-12 shrink-0 rounded-full transition-colors after:absolute after:-inset-x-1 after:-inset-y-2 after:content-['']",
-        on ? "bg-accent" : "bg-white/20",
+        on ? "bg-accent" : "hc-edge bg-white/20",
       )}
     >
       <motion.span
@@ -638,6 +638,18 @@ function focusables(root: HTMLElement): HTMLElement[] {
 /** Sheets open at once; #root stays inert while any is open. */
 let openSheets = 0;
 let rootWasInert = false;
+const sheetListeners = new Set<() => void>();
+function setOpenSheets(n: number) {
+  const was = openSheets > 0;
+  openSheets = n;
+  if (was !== openSheets > 0) sheetListeners.forEach((l) => l());
+}
+/** Whether any Sheet is open (for useSyncExternalStore; e.g. the dock hides behind sheets). */
+export const anySheetOpen = () => openSheets > 0;
+export function subscribeSheets(l: () => void) {
+  sheetListeners.add(l);
+  return () => void sheetListeners.delete(l);
+}
 
 export function Sheet({
   open,
@@ -679,7 +691,7 @@ export function Sheet({
       if (openSheets === 0) rootWasInert = root.inert;
       root.inert = true;
     }
-    openSheets++;
+    setOpenSheets(openSheets + 1);
 
     // Move focus in: keep an autofocused control; keyboard users land on the first control;
     // touch users get the panel itself (no surprise keyboard).
@@ -692,7 +704,7 @@ export function Sheet({
     return () => {
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = prevOverflow;
-      openSheets = Math.max(0, openSheets - 1);
+      setOpenSheets(Math.max(0, openSheets - 1));
       if (root && openSheets === 0) root.inert = rootWasInert;
       try {
         if (trigger && trigger.isConnected) trigger.focus({ preventScroll: true });

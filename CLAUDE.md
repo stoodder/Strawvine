@@ -8,5 +8,14 @@
 - Units are lb; 3500 kcal/lb default.
 - Design language: dark only, graphite + one lime accent (`--color-accent`), gold reserved for PRs/goals,
   hierarchy through type and spacing rather than borders. Mobile-first, ≥16px side gutters.
-- Checks before committing: `npm run typecheck && npm test && npm run build`.
+- Checks before committing: `npm run typecheck && npm run check:style && npm test && npm run build`.
+  `npm test` runs two vitest projects: `node` (`*.test.ts`) and `web` (jsdom + Testing Library, `src/web/**/*.test.tsx`).
+  `npm run e2e` (Playwright, `e2e/`) builds, starts the server on a fresh `E2E_DATABASE_URL` (default
+  `postgres://postgres@localhost:5432/strawvine_e2e`, dropped/recreated) and runs the suite; CI runs all of this
+  (`.github/workflows/ci.yml`).
+- `check:style` fails on `text-faint` for information (mark decoration with a `// decor` comment) and on px font sizes
+  (`text-[11px]` → rem); existing violations are ratcheted in `scripts/check-style-baseline.json`
+  (`node scripts/check-style.mjs --update-baseline` after fixing some).
+- Transient bottom UI (toasts, sync pill, rest timer) renders into the dock: `<DockItem id priority>` from
+  `components/Dock.tsx`, never its own `fixed bottom-…` layer. Inline renames use `components/InlineText.tsx`.
 - Schema change: edit `src/server/db/schema.ts`, run `npm run db:generate`, commit the migration.

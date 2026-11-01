@@ -1,16 +1,18 @@
 import clsx from "clsx";
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
-import { ChevronLeft, Download, LogOut, Plus, Trash2 } from "lucide-react";
+import { ChevronLeft, Download, LogOut, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { isISODate, startOfWeek, WEEKDAY_SHORT } from "../../shared/dates";
+import { displayPrefs, trainingPrefs } from "../../shared/defaults";
 import { repMaxPct } from "../../shared/program";
 import { settingsSchema, type Program, type ProgramWeek, type Settings } from "../../shared/schemas";
+import { InlineText } from "../components/InlineText";
 import { useToast } from "../components/Toast";
 import { BoxNumber, Field, Section, Toggle } from "../components/ui";
 import { useTitle } from "../components/useTitle";
 import { fmt } from "../lib/format";
 import { api } from "../lib/api";
-import { clearCache, useCreateExercise, useData, useSaveSettings, useUpdateExercise } from "../lib/store";
+import { clearCache, useCreateExercise, useData, useSaveSettings, useSyncInfo, useUpdateExercise } from "../lib/store";
 
 // Weekday order shown Monday-first; values are JS weekday indices.
 const ORDER = [1, 2, 3, 4, 5, 6, 0];
@@ -35,6 +37,9 @@ const PATH_NAMES: Array<[RegExp, string]> = [
   [/^program\.weeks/, "Cycle weeks"],
   [/^program\.days/, "Weekly layout"],
   [/^program\.cycleStartDate/, "Cycle start date"],
+  [/^training\.restSecondsMain/, "Main lift rest"],
+  [/^training\.restSecondsAccessory/, "Accessory rest"],
+  [/^training\.accessoryIncrementLb/, "Accessory increment"],
 ];
 
 /** A readable sentence for a schema issue. */
@@ -141,6 +146,9 @@ export function SettingsScreen() {
     saveSettings(next).catch((e: unknown) => setError(e instanceof Error ? e.message : "Couldn't save."));
   };
   const setProgram = (p: Partial<Program>) => save({ ...s, program: { ...s.program, ...p } });
+  const training = trainingPrefs(s);
+  const setTraining = (t: Partial<typeof training>) => save({ ...s, training: { ...training, ...t } });
+  const display = displayPrefs(s);
 
   return (
     <div>
@@ -261,7 +269,57 @@ export function SettingsScreen() {
 
       <ProgramEditor program={s.program} setProgram={setProgram} />
 
+      <Section label="Training">
+        <div className="divide-y divide-white/[0.04]">
+          <NumSetting
+            label="Main lift rest"
+            hint="Rest timer target after a main-lift set"
+            value={training.restSecondsMain}
+            unit="s"
+            min={10}
+            max={900}
+            integer
+            unitInMessage=" s"
+            onSave={(v) => v !== null && setTraining({ restSecondsMain: v })}
+          />
+          <NumSetting
+            label="Accessory rest"
+            hint="After accessory and superset sets"
+            value={training.restSecondsAccessory}
+            unit="s"
+            min={10}
+            max={900}
+            integer
+            unitInMessage=" s"
+            onSave={(v) => v !== null && setTraining({ restSecondsAccessory: v })}
+          />
+          <NumSetting
+            label="Accessory increment"
+            hint="Suggested jump after hitting every rep. 0 turns hints off."
+            value={training.accessoryIncrementLb}
+            decimals={1}
+            unit="lb"
+            min={0}
+            max={50}
+            unitInMessage=" lb"
+            onSave={(v) => v !== null && setTraining({ accessoryIncrementLb: v })}
+          />
+        </div>
+      </Section>
+
       <LiftsEditor />
+
+      <Section label="Display">
+        <Field label="High contrast" hint="Brighter text and stronger edges for gym glare and sunlight">
+          <Toggle
+            label="High contrast"
+            on={display.highContrast}
+            onChange={(v) => save({ ...s, display: { ...display, highContrast: v } })}
+          />
+        </Field>
+      </Section>
+
+      <SyncSection />
 
       <Section label="Data">
         <div className="flex flex-wrap gap-3">
@@ -281,6 +339,7 @@ export function SettingsScreen() {
           </button>
         </div>
       </Section>
+      {/* decor: a sign-off, not information */}
       <p className="mt-12 text-center text-[0.6875rem] text-faint">Strawvine · built for pushing boundaries</p>
     </div>
   );
@@ -370,39 +429,24 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
   // Undo runs from a toast, later: restore into the program as it is then.
   const latest = useRef(program);
   latest.current = program;
-  const [nameError, setNameError] = useState<string | null>(null);
 
   return (
     <>
       <Section label="Program">
         <div className="divide-y divide-white/[0.04]">
-          {/* Long names need the full width: label above, input below. */}
+          {/* Long names need the full width: label above, the name below. */}
           <div className="py-3">
-            <label htmlFor="program-name" className="text-sm text-fg-2">
-              Program name
-            </label>
-            <input
-              id="program-name"
-              defaultValue={program.name}
+            <div className="text-sm text-fg-2">Program name</div>
+            <InlineText
+              ariaLabel="Program name"
+              value={program.name}
               maxLength={60}
-              aria-invalid={!!nameError || undefined}
-              aria-describedby={nameError ? "program-name-error" : undefined}
-              onBlur={(e) => {
-                const v = e.target.value.trim();
-                if (!v) {
-                  setNameError("Give the program a name.");
-                  return;
-                }
-                setNameError(null);
-                if (v !== program.name) setProgram({ name: v });
-              }}
-              className="field mt-2 rounded-xl bg-white/[0.05] px-3 py-2 text-base"
+              required
+              requiredMessage="Give the program a name."
+              onCommit={(name) => setProgram({ name })}
+              className="mt-1"
+              inputClassName="text-base"
             />
-            {nameError && (
-              <div id="program-name-error" role="alert" className="mt-1.5 text-xs text-warn">
-                {nameError}
-              </div>
-            )}
           </div>
           <Field label="Cycle start date" hint="Snaps to that week's Monday">
             <input
@@ -477,12 +521,15 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
                   <span className="label w-5 shrink-0 text-accent" aria-hidden>
                     {String(i + 1).padStart(2, "0")}
                   </span>
-                  <input
-                    aria-label={`Week ${i + 1} name`}
-                    defaultValue={w.label}
+                  <InlineText
+                    ariaLabel={`Week ${i + 1} name`}
+                    value={w.label}
                     maxLength={40}
-                    onBlur={(e) => e.target.value !== w.label && setWeek(i, { label: e.target.value })}
-                    className="field w-32 min-w-0 py-1 text-sm"
+                    required
+                    requiredMessage="Name the week."
+                    onCommit={(label) => setWeek(i, { label })}
+                    className="w-40"
+                    inputClassName="text-sm"
                   />
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
@@ -575,12 +622,15 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
                 <div className="flex items-center justify-between gap-3">
                   <span className={clsx("w-10 shrink-0 text-sm", day ? "text-fg" : "text-mute")}>{name}</span>
                   {day ? (
-                    <input
-                      aria-label={`${name} session name`}
-                      defaultValue={day.label}
+                    <InlineText
+                      ariaLabel={`${name} session name`}
+                      value={day.label}
                       maxLength={40}
-                      onBlur={(e) => e.target.value !== day.label && setDay({ label: e.target.value || "Training" })}
-                      className="field min-w-0 flex-1 py-1 text-sm text-fg-2"
+                      required
+                      requiredMessage="Name the session."
+                      onCommit={(label) => setDay({ label })}
+                      className="flex-1"
+                      inputClassName="text-sm text-fg-2"
                     />
                   ) : (
                     <span className="flex-1 text-sm text-mute">No lifting</span>
@@ -671,14 +721,15 @@ function LiftsEditor() {
       <div className="divide-y divide-white/[0.04]">
         {list.map((e) => (
           <div key={e.id} className={clsx("flex items-center gap-3 py-2", e.archived && "opacity-50")}>
-            <input
-              aria-label={`Rename ${e.name}`}
-              defaultValue={e.name}
+            <InlineText
+              ariaLabel={`Rename ${e.name}`}
+              value={e.name}
               maxLength={80}
-              onBlur={(ev) =>
-                ev.target.value.trim() && ev.target.value !== e.name && void updateExercise(e.id, { name: ev.target.value.trim() })
-              }
-              className="field min-w-0 flex-1 py-1 text-sm"
+              required
+              requiredMessage="A lift needs a name."
+              onCommit={(name) => void updateExercise(e.id, { name })}
+              className="flex-1"
+              inputClassName="text-sm"
             />
             <button
               type="button"
@@ -729,6 +780,101 @@ function LiftsEditor() {
           <Plus size={16} /> Tracked lift
         </button>
       </div>
+    </Section>
+  );
+}
+
+/** "just now" / "2 min ago" / "3 h ago" / a date — for "synced …". */
+function ago(ts: number, now: number): string {
+  const s = Math.max(0, Math.round((now - ts) / 1000));
+  if (s < 45) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/** Sync status, what's waiting to reach the server, and what the server rejected. */
+function SyncSection() {
+  const info = useSyncInfo();
+  const [now, setNow] = useState(() => Date.now());
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
+  useEffect(() => setNow(Date.now()), [info.lastSyncedAt]);
+
+  const synced = info.lastSyncedAt !== null ? `synced ${ago(info.lastSyncedAt, now)}` : "not synced yet";
+  const parts: string[] = [];
+  if (info.pending) parts.push(`${info.pending} pending`);
+  if (info.failed) parts.push(`${info.failed} not saved`);
+  if (!info.online) parts.push("offline");
+  const status = parts.length ? parts.join(" · ") : `All changes saved · ${synced}`;
+  const tone = info.failed ? "text-warn" : "text-fg-2";
+
+  return (
+    <Section label="Sync">
+      <p className={clsx("flex items-center gap-2 text-sm", tone)} role="status" aria-live="polite">
+        <span
+          aria-hidden
+          className={clsx(
+            "h-1.5 w-1.5 shrink-0 rounded-full",
+            info.failed ? "bg-warn" : !info.online ? "bg-faint" : info.pending ? "animate-pulse bg-accent" : "bg-accent",
+          )}
+        />
+        {status}
+      </p>
+      {parts.length > 0 && <p className="mt-1 pl-3.5 text-xs text-mute">Last {synced}.</p>}
+      {info.items.length > 0 && (
+        <ul className="mt-4 divide-y divide-white/[0.04]" aria-label="Unsynced changes">
+          {info.items.map((it) => (
+            <li key={it.id} className="flex items-baseline justify-between gap-3 py-2.5">
+              <span className="min-w-0 text-sm text-fg-2">
+                {it.label}
+                {it.failed && it.error && <span className="mt-0.5 block text-xs text-mute">{it.error}</span>}
+              </span>
+              <span className={clsx("label shrink-0", it.failed && "text-warn")}>{it.failed ? "not saved" : "pending"}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-4 flex flex-wrap gap-3">
+        <button
+          type="button"
+          className="btn-ghost"
+          disabled={!info.online || busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await info.syncNow();
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <RefreshCw size={16} className={clsx(busy && "animate-spin")} aria-hidden /> {busy ? "Syncing…" : "Sync now"}
+        </button>
+        {info.failed > 0 && (
+          <>
+            <button type="button" className="btn-ghost text-accent" onClick={info.retryFailed}>
+              Retry failed
+            </button>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => {
+                if (window.confirm(`Discard ${info.failed} change${info.failed === 1 ? "" : "s"} the server rejected?`))
+                  info.discardFailed();
+              }}
+            >
+              Discard failed
+            </button>
+          </>
+        )}
+      </div>
+      {!info.online && <p className="mt-2 text-xs text-mute">Changes are kept on this device and sync when you're back online.</p>}
     </Section>
   );
 }
