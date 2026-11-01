@@ -76,6 +76,27 @@ describe("buildSession", () => {
     expect(deload.blocks[0]!.exercises[0]!.sets.map((x) => x.targetReps)).toEqual([10, 10, 10, 10]);
   });
 
+  it("makes light accessories lighter on a deload instead of rounding back up", () => {
+    const set = (weight: number) => ({
+      id: `w${weight}`,
+      targetReps: 12,
+      targetWeight: weight,
+      reps: 12,
+      weight,
+      done: true,
+      amrap: false,
+      appliedProgressionLb: null,
+    });
+    const prior: Session = {
+      ...buildSession("2026-11-23", { settings, exercises, maxEntries, sessions: [] }),
+      blocks: [{ id: "b", kind: "accessory", exercises: [{ exerciseId: 10, measure: "reps", sets: [50, 10, 5, 4, 3, 2.5, 0].map(set) }] }],
+    };
+    const deload = buildSession("2026-11-30", { settings, exercises, maxEntries, sessions: [prior] });
+    const weights = deload.blocks.find((b) => b.kind === "accessory")!.exercises[0]!.sets.map((s) => s.targetWeight);
+    // 80% rounded to 5 lb where that is lighter; otherwise a 2.5 lb increment, then one 2.5 lb step, never below 0.
+    expect(weights).toEqual([40, 7.5, 2.5, 2.5, 2.5, 0, 0]);
+  });
+
   it("has no main lift on the carry day", () => {
     const s = buildSession("2026-11-06", { settings, exercises, maxEntries, sessions: [] });
     expect(s.label).toBe("Carries & pull");

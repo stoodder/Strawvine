@@ -112,6 +112,21 @@ export function computeEnergySeries(
   return out;
 }
 
+/**
+ * The first logged date with a daily TDEE. TDEE(d) needs yesterday's weight average (§4.2),
+ * whose 7-day window is d−7…d−1, so it exists from the first logged day with another logged
+ * day at most 7 days before it. Equivalent to the first non-null `tdee` of
+ * `computeEnergySeries`, without computing the whole series. `loggedDates` must be sorted.
+ */
+export function firstTdeeDate(loggedDates: ReadonlyArray<ISODate>): ISODate | null {
+  for (let i = 1; i < loggedDates.length; i++) {
+    const prev = loggedDates[i - 1]!;
+    const date = loggedDates[i]!;
+    if (prev < date && prev >= addDays(date, -AVG_WEIGHTS.length)) return date;
+  }
+  return null;
+}
+
 export interface EffectiveTdee {
   /** The maintenance value recommendations are built on. */
   value: number;

@@ -6,7 +6,7 @@ import { addDays, dateRange, weekdayOf, type ISODate } from "./dates";
 import { computeEnergySeries, effectiveTdee, type EffectiveTdee, type EnergyDay } from "./energy";
 import { type AppData } from "./gamify";
 import { project, recommend, type Projection, type Recommendation } from "./nutrition";
-import { programDayFor } from "./program";
+import { scheduledProgramDay } from "./program";
 import type { DayLog } from "./schemas";
 
 export interface DayTargets {
@@ -122,7 +122,7 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
       (d) => !!byDate.get(d)?.metconDone,
     ),
     lifts: count(
-      (d) => !!programDayFor(settings.program, d),
+      (d) => !!scheduledProgramDay(settings.program, d),
       (d) => !!sessions.get(d)?.completedAt,
     ),
     avgSleepMinutes: mean(days.filter((d) => d.sleepMinutes !== null).map((d) => d.sleepMinutes!)),

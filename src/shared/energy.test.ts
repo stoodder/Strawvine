@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { addDays } from "./dates";
-import { computeEnergySeries, effectiveTdee, weightedAverage } from "./energy";
+import { computeEnergySeries, effectiveTdee, firstTdeeDate, weightedAverage } from "./energy";
 
 const day = (date: string, weightLb: number | null, calories: number | null) => ({ date, weightLb, calories });
 
@@ -85,6 +85,20 @@ describe("computeEnergySeries", () => {
     expect(s).toHaveLength(10);
     expect(s[0]!.avgTdee).toBeCloseTo(3000);
     expect(s[0]!.loggedCount).toBe(31);
+  });
+});
+
+describe("firstTdeeDate", () => {
+  it("agrees with the first daily TDEE of the full series", () => {
+    const start = "2026-11-02";
+    // Offsets of logged days: lone day, gap of 8 (too far), gap of 7 (just inside), mixed.
+    for (const offsets of [[], [0], [0, 8], [0, 7], [0, 1], [0, 8, 16, 23, 24], [0, 3, 30, 31]]) {
+      const days = offsets.map((o) => day(addDays(start, o), 200, 3000));
+      const firstInSeries = computeEnergySeries(days, start, addDays(start, 40)).find((d) => d.tdee !== null)?.date ?? null;
+      expect(firstTdeeDate(days.map((d) => d.date)), `logged offsets ${offsets.join(",")}`).toBe(firstInSeries);
+    }
+    expect(firstTdeeDate(["2026-11-02", "2026-11-09"])).toBe("2026-11-09");
+    expect(firstTdeeDate(["2026-11-02", "2026-11-10"])).toBeNull();
   });
 });
 

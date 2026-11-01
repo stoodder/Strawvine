@@ -19,25 +19,40 @@ export interface Recommendation {
   direction: Direction;
   /** Signed lb/week the target calories are built for. */
   rateLbPerWeek: number;
-  /** Signed % bodyweight/week actually used (after capping). */
+  /** Signed % bodyweight/week actually used (after capping and the approach taper). */
   pacePctPerWeek: number;
+  /** The chosen pace exceeds the safety limit for this direction (never set while maintaining). */
   paceCapped: boolean;
   tdee: number;
   calories: number;
   macros: Macros;
 }
 
-export function goalDirection(trendWeight: number, targetLb: number | null | undefined): Direction {
-  if (targetLb === null || targetLb === undefined) return "maintain";
-  const diff = targetLb - trendWeight;
+/** Which way `weightLb` has to move to reach `targetLb` ("maintain" within the tolerance). */
+function towardTarget(weightLb: number, targetLb: number): Direction {
+  const diff = targetLb - weightLb;
   if (Math.abs(diff) < GOAL_TOLERANCE_LB) return "maintain";
   return diff < 0 ? "lose" : "gain";
+}
+
+/**
+ * The phase to plan for at `trendWeight`. A goal set away from its target (`startLb`) is a cut
+ * or a build for its whole life: once the trend reaches or passes the target it settles into
+ * maintenance instead of flipping into the opposite phase. Without `startLb` (goals created
+ * before it was recorded), or for a goal set at its target, the direction follows the trend.
+ */
+export function goalDirection(trendWeight: number, targetLb: number | null | undefined, startLb?: number | null): Direction {
+  if (targetLb === null || targetLb === undefined) return "maintain";
+  const toward = towardTarget(trendWeight, targetLb);
+  const intended = startLb === null || startLb === undefined ? "maintain" : towardTarget(startLb, targetLb);
+  return intended === "maintain" || toward === intended ? toward : "maintain";
 }
 
 /** Pace (absolute % bodyweight/week) after applying the safety limits. */
 export function cappedPace(settings: Pick<Settings, "limits">, direction: Direction, pacePct: number) {
   const limit = direction === "lose" ? settings.limits.maxLossPctPerWeek : direction === "gain" ? settings.limits.maxGainPctPerWeek : 0;
-  return { pace: Math.min(Math.abs(pacePct), limit), capped: Math.abs(pacePct) > limit, limit };
+  const chosen = Math.abs(pacePct);
+  return { pace: Math.min(chosen, limit), capped: direction !== "maintain" && chosen > limit, limit };
 }
 
 export function macrosFor(calories: number, bodyweightLb: number, nutrition: Settings["nutrition"]): Macros {
@@ -53,11 +68,14 @@ export function recommend(
   trendWeight: number,
 ): Recommendation {
   const goal = settings.weightGoal;
-  const direction = goalDirection(trendWeight, goal?.targetLb);
+  const direction = goalDirection(trendWeight, goal?.targetLb, goal?.startLb);
   const { pace, capped } = cappedPace(settings, direction, goal?.pacePctPerWeek ?? 0);
   const sign = direction === "lose" ? -1 : direction === "gain" ? 1 : 0;
-  const pacePctPerWeek = sign * pace;
-  const rateLbPerWeek = (pacePctPerWeek / 100) * trendWeight;
+  // Taper: never plan a week's change larger than what is left to go, so the target eases into
+  // maintenance near the goal instead of jumping from full pace to zero.
+  const remainingLb = goal ? Math.abs(goal.targetLb - trendWeight) : 0;
+  const rateLbPerWeek = sign * Math.min((pace / 100) * trendWeight, remainingLb);
+  const pacePctPerWeek = trendWeight > 0 ? (rateLbPerWeek / trendWeight) * 100 : 0;
   const calories = Math.round((tdee + (rateLbPerWeek * settings.nutrition.kcalPerLb) / 7) / 10) * 10;
   return {
     direction,
@@ -111,7 +129,7 @@ export function project(
 ): Projection | null {
   const goal = settings.weightGoal;
   if (!goal) return null;
-  const direction = goalDirection(trendWeight, goal.targetLb);
+  const direction = goalDirection(trendWeight, goal.targetLb, goal.startLb);
   const remainingLb = goal.targetLb - trendWeight;
   if (direction === "maintain") {
     return { direction, remainingLb, atPace: null, atLimit: null, observed: null, observedRateLbPerWeek: null, range: null };

@@ -2,8 +2,8 @@
  * Closing the day, streaks and achievements — all derived from raw data.
  */
 import { addDays, dateRange, formatShortDate, weekdayOf, type ISODate } from "./dates";
-import { CALIBRATION_DAYS, isLogged } from "./energy";
-import { cyclePosition, programDayFor } from "./program";
+import { CALIBRATION_DAYS, firstTdeeDate, isLogged } from "./energy";
+import { cyclePosition, scheduledProgramDay } from "./program";
 import type { DayLog, Exercise, MaxEntry, Session, Settings } from "./schemas";
 import { sessionVolume } from "./session";
 
@@ -36,7 +36,7 @@ export function checklist(date: ISODate, day: DayLog | undefined, session: Sessi
   const steps = day?.steps ?? 0;
   const stepTarget = settings.targets.steps;
   add("steps", "Steps", stepTarget > 0 ? steps >= stepTarget : day?.steps != null, stepTarget > 0 ? steps / stepTarget : 0);
-  if (programDayFor(settings.program, date)) add("lift", "Lift", !!session?.completedAt);
+  if (scheduledProgramDay(settings.program, date)) add("lift", "Lift", !!session?.completedAt);
   if (settings.schedule.metcon[wd]) add("metcon", "Metcon", !!day?.metconDone);
   if (settings.schedule.zone2[wd]) add("zone2", "Zone 2", !!day?.zone2Done);
   return items;
@@ -120,16 +120,14 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
     .filter((d) => isLogged(d) && d.date <= today)
     .map((d) => d.date)
     .sort();
-  const calib: Array<[number, string, string, string]> = [
-    [1, "calib-1", "First entry", "Weight and calories logged. The engine is warming up."],
-    [2, "calib-2", "First TDEE reading", "Two logged days — a first (rough) burn estimate."],
-    [7, "calib-7", "Averages online", "A full week of weighted averages."],
-    [CALIBRATION_DAYS, "calib-14", "Calibrated", "Your TDEE is now fully measured, not estimated."],
+  const calib: Array<[ISODate | null | undefined, string, string, string]> = [
+    [logged[0], "calib-1", "First entry", "Weight and calories logged. The engine is warming up."],
+    // Not simply the 2nd logged day: a TDEE needs another logged day within the week before.
+    [firstTdeeDate(logged), "calib-2", "First TDEE reading", "Two logged days — a first (rough) burn estimate."],
+    [logged[6], "calib-7", "Averages online", "A full week of weighted averages."],
+    [logged[CALIBRATION_DAYS - 1], "calib-14", "Calibrated", "Your TDEE is now fully measured, not estimated."],
   ];
-  for (const [n, key, title, detail] of calib) {
-    const d = logged[n - 1];
-    if (d) out.push({ key, title, detail, date: d, tier: "milestone" });
-  }
+  for (const [d, key, title, detail] of calib) if (d) out.push({ key, title, detail, date: d, tier: "milestone" });
 
   // Closed days & streaks.
   const closed = [...closedDates(data, today)].sort();
@@ -149,8 +147,11 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   }
 
   // Max PRs (any increase over the previous recorded max, excluding initial entries).
+  // Negative ids are the client's optimistic placeholders: skipping them means a PR is keyed
+  // (and celebrated) once, by the saved row that replaces the placeholder.
   const byExercise = new Map<number, MaxEntry[]>();
   for (const e of data.maxEntries) {
+    if (e.id < 0) continue;
     const list = byExercise.get(e.exerciseId) ?? [];
     list.push(e);
     byExercise.set(e.exerciseId, list);
@@ -238,23 +239,28 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
     }
   }
 
-  // Goal weight (raw weight reaching the target after the goal was set).
+  // Goal weight (raw weight reaching the target after the goal was set). The goal's direction
+  // comes from the bodyweight it was set at: recorded with the goal, else the latest weigh-in
+  // on/before it was set, else the first one after. Without any weigh-in there is no direction.
   const goal = data.settings.weightGoal;
   if (goal) {
-    const startDay = data.days.filter((d) => d.weightLb !== null && d.date <= goal.setOn).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
-    const losing = startDay ? startDay.weightLb! > goal.targetLb : true;
-    const hit = [...data.days]
-      .filter((d) => d.weightLb !== null && d.date >= goal.setOn && d.date <= today)
-      .sort((a, b) => (a.date < b.date ? -1 : 1))
-      .find((d) => (losing ? d.weightLb! <= goal.targetLb : d.weightLb! >= goal.targetLb));
-    if (hit)
-      out.push({
-        key: `goal-${goal.setOn}-${goal.targetLb}`,
-        title: `Goal weight ${goal.targetLb}`,
-        detail: `Reached on ${formatShortDate(hit.date)}.`,
-        date: hit.date,
-        tier: "goal",
-      });
+    const weighIns = data.days
+      .filter((d): d is DayLog & { weightLb: number } => d.weightLb !== null && d.date <= today)
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    const startLb =
+      goal.startLb ?? weighIns.findLast((d) => d.date <= goal.setOn)?.weightLb ?? weighIns.find((d) => d.date > goal.setOn)?.weightLb;
+    if (startLb != null) {
+      const losing = startLb > goal.targetLb;
+      const hit = weighIns.find((d) => d.date >= goal.setOn && (losing ? d.weightLb <= goal.targetLb : d.weightLb >= goal.targetLb));
+      if (hit)
+        out.push({
+          key: `goal-${goal.setOn}-${goal.targetLb}`,
+          title: `Goal weight ${goal.targetLb}`,
+          detail: `Reached on ${formatShortDate(hit.date)}.`,
+          date: hit.date,
+          tier: "goal",
+        });
+    }
   }
 
   return out.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));

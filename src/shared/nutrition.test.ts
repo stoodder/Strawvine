@@ -1,11 +1,38 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
-import { macrosFor, project, recommend, weeksAtPct } from "./nutrition";
+import { goalDirection, macrosFor, project, recommend, weeksAtPct } from "./nutrition";
 
 const base = defaultSettings({ bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 }, "2026-11-01");
-const withGoal = (targetLb: number, pacePctPerWeek: number) => ({
+const withGoal = (targetLb: number, pacePctPerWeek: number, startLb?: number) => ({
   ...base,
-  weightGoal: { targetLb, pacePctPerWeek, setOn: "2026-11-01" },
+  weightGoal: { targetLb, pacePctPerWeek, setOn: "2026-11-01", startLb },
+});
+
+describe("goalDirection", () => {
+  it("follows the trend for goals without a start weight", () => {
+    expect(goalDirection(200, 190)).toBe("lose");
+    expect(goalDirection(189, 190)).toBe("gain");
+    expect(goalDirection(190.3, 190)).toBe("maintain");
+    expect(goalDirection(200, null)).toBe("maintain");
+  });
+
+  it("keeps a cut a cut: reaching or passing the target settles into maintenance", () => {
+    expect(goalDirection(195, 190, 200)).toBe("lose");
+    expect(goalDirection(205, 190, 200)).toBe("lose"); // drifted away from the goal: still cutting
+    expect(goalDirection(190.4, 190, 200)).toBe("maintain");
+    expect(goalDirection(189, 190, 200)).toBe("maintain");
+    expect(goalDirection(180, 190, 200)).toBe("maintain");
+  });
+
+  it("keeps a build a build", () => {
+    expect(goalDirection(185, 190, 180)).toBe("gain");
+    expect(goalDirection(191, 190, 180)).toBe("maintain");
+  });
+
+  it("holds a goal set at its target from either side", () => {
+    expect(goalDirection(193, 190, 190.2)).toBe("lose");
+    expect(goalDirection(187, 190, 190)).toBe("gain");
+  });
 });
 
 describe("recommend", () => {
@@ -13,12 +40,14 @@ describe("recommend", () => {
     const r = recommend(base, 3200, 200);
     expect(r.direction).toBe("maintain");
     expect(r.calories).toBe(3200);
+    expect(r.paceCapped).toBe(false);
   });
 
   it("builds a deficit from the pace (1%/week at 200 lb = 2 lb/week = 1000 kcal/day)", () => {
     const r = recommend(withGoal(185, 1), 3200, 200);
     expect(r.direction).toBe("lose");
     expect(r.rateLbPerWeek).toBeCloseTo(-2);
+    expect(r.pacePctPerWeek).toBeCloseTo(-1);
     expect(r.calories).toBe(2200);
   });
 
@@ -34,6 +63,55 @@ describe("recommend", () => {
 
   it("maintains within half a pound of the goal", () => {
     expect(recommend(withGoal(200.3, 1), 3000, 200).direction).toBe("maintain");
+  });
+
+  it("tapers near the goal: never plans more in a week than is left to go", () => {
+    const r = recommend(withGoal(199, 1, 210), 3200, 200); // 1 lb to go at a 2 lb/week pace
+    expect(r.direction).toBe("lose");
+    expect(r.rateLbPerWeek).toBeCloseTo(-1);
+    expect(r.pacePctPerWeek).toBeCloseTo(-0.5);
+    expect(r.calories).toBe(2700);
+    expect(r.paceCapped).toBe(false);
+    expect(recommend(withGoal(199, 1, 210), 3200, 199.4).calories).toBe(3200); // within tolerance
+  });
+
+  it("eases in: the deficit shrinks steadily on the approach", () => {
+    const deficits = [204, 202, 201, 200.6, 200.2].map((w) => 3200 - recommend(withGoal(200, 1, 210), 3200, w).calories);
+    expect(deficits).toEqual([...deficits].sort((a, b) => b - a));
+    expect(deficits.at(-1)).toBe(0);
+    expect(deficits.at(-2)).toBe(300);
+  });
+
+  it("settles a cut into maintenance after an overshoot instead of flipping into a build", () => {
+    const cut = withGoal(200, 1, 210);
+    expect(recommend(cut, 3200, 200.6).calories).toBe(2900);
+    // A 1.2 lb wobble across the goal used to swing ~1,500 kcal (full cut → capped build).
+    for (const w of [199.4, 195]) {
+      const r = recommend(cut, 3200, w);
+      expect(r).toMatchObject({ direction: "maintain", rateLbPerWeek: 0, calories: 3200, paceCapped: false });
+    }
+  });
+
+  it("supports a gain goal with a start weight", () => {
+    const build = withGoal(210, 0.5, 200);
+    expect(recommend(build, 3200, 200)).toMatchObject({ direction: "gain", calories: 3700, paceCapped: false });
+    expect(recommend(build, 3200, 209.5).rateLbPerWeek).toBeCloseTo(0.5); // tapered
+    expect(recommend(build, 3200, 198).rateLbPerWeek).toBeCloseTo(0.99); // lost weight: keep building
+    expect(recommend(build, 3200, 212)).toMatchObject({ direction: "maintain", calories: 3200 }); // never a cut
+  });
+
+  it("keeps the legacy trend-following direction for goals without a start weight, tapered", () => {
+    const r = recommend(withGoal(200, 1), 3200, 199.4);
+    expect(r.direction).toBe("gain");
+    expect(r.rateLbPerWeek).toBeCloseTo(0.6);
+    expect(r.calories).toBe(3500);
+  });
+
+  it("flags paceCapped only when the chosen pace exceeds the limit", () => {
+    expect(recommend(withGoal(190, 0.8, 200), 3200, 190.8).paceCapped).toBe(false); // tapered, but within the limit
+    expect(recommend(withGoal(190, 2, 200), 3200, 200).paceCapped).toBe(true);
+    expect(recommend(withGoal(190, 2, 200), 3200, 190.8)).toMatchObject({ paceCapped: true, rateLbPerWeek: expect.closeTo(-0.8) });
+    expect(recommend(withGoal(190, 2, 200), 3200, 189).paceCapped).toBe(false); // maintaining
   });
 });
 
@@ -67,5 +145,19 @@ describe("project", () => {
     const p = project(withGoal(190, 1), "2026-11-01", 200, 199)!;
     expect(p.observed).toBeNull();
     expect(p.range).toEqual([p.atPace!.date, p.atPace!.date]);
+  });
+
+  it("follows the goal's direction: nothing to project once a cut has passed its target", () => {
+    const p = project(withGoal(190, 1, 200), "2026-11-01", 189, 190)!;
+    expect(p).toMatchObject({ direction: "maintain", atPace: null, atLimit: null, observed: null, range: null });
+    expect(project(withGoal(190, 1), "2026-11-01", 189, 188)!.direction).toBe("gain"); // legacy goal
+  });
+
+  it("projects a gain goal at the gain pace", () => {
+    const p = project(withGoal(210, 0.5, 200), "2026-11-01", 200, 199.5)!; // observed +0.5 lb/week
+    expect(p.direction).toBe("gain");
+    expect(p.atPace!.weeks).toBeCloseTo(weeksAtPct(200, 210, 0.5)!);
+    expect(p.observed!.weeks).toBeCloseTo(20);
+    expect(p.range).toEqual([p.atPace!.date, p.observed!.date]);
   });
 });

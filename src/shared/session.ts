@@ -43,13 +43,32 @@ function templateSource(date: ISODate, sessions: ReadonlyArray<Session>): Sessio
   return prior.find((s) => !s.deload) ?? prior[0] ?? null;
 }
 
+/** Finest plate step used when the program's rounding can't make a light accessory lighter. */
+const FINE_STEP_LB = 2.5;
+
+/**
+ * `weightLb` scaled by `factor` and rounded to the program increment. A deloaded load must come
+ * out lighter without vanishing, but at 5 lb rounding small loads round straight back (10 → 10)
+ * or away to nothing (3 → 0). Those use a 2.5 lb increment instead (never coarser than the
+ * program's), and failing that drop one such step, never below 0.
+ */
+function scaleLoad(weightLb: number, factor: number, roundToLb: number): number {
+  const target = weightLb * factor;
+  const rounded = roundTo(target, roundToLb);
+  if (factor >= 1 || (rounded > 0 && rounded < weightLb)) return rounded;
+  const step = Math.min(roundToLb, FINE_STEP_LB);
+  const fine = roundTo(target, step);
+  if (fine > 0 && fine < weightLb) return fine;
+  return Math.max(0, weightLb - step);
+}
+
 function carryOverExercise(ex: BlockExercise, loadFactor: number, roundToLb: number): BlockExercise {
   return {
     exerciseId: ex.exerciseId,
     measure: ex.measure,
     sets: ex.sets.map((s) => {
       const weight = s.weight ?? s.targetWeight;
-      const scaled = weight !== null && weight > 0 && loadFactor !== 1 ? roundTo(weight * loadFactor, roundToLb) : weight;
+      const scaled = weight !== null && weight > 0 && loadFactor !== 1 ? scaleLoad(weight, loadFactor, roundToLb) : weight;
       return blankSet({ targetReps: s.reps ?? s.targetReps, targetWeight: scaled });
     }),
   };

@@ -59,6 +59,9 @@ function badRequest(error: z.ZodError) {
   return { error: "invalid", issues: error.issues.map((i) => ({ path: i.path.join("."), message: i.message })) };
 }
 
+/** Row ids in the path are Postgres `serial`s (positive int4); anything else must not reach the query. */
+const idParam = z.string().regex(/^\d+$/, "Expected a positive integer id").transform(Number).pipe(z.int().min(1).max(2_147_483_647));
+
 export function createApp(opts: AppOptions) {
   const { db } = opts;
   const app = new Hono();
@@ -157,15 +160,18 @@ export function createApp(opts: AppOptions) {
   });
 
   api.patch("/exercises/:id", async (c) => {
-    const id = Number(c.req.param("id"));
+    const id = idParam.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(badRequest(id.error), 400);
     const parsed = exercisePatchSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
-    const [row] = await db.update(exercises).set(parsed.data).where(eq(exercises.id, id)).returning();
+    const [row] = await db.update(exercises).set(parsed.data).where(eq(exercises.id, id.data)).returning();
     return row ? c.json(toExercise(row)) : c.json({ error: "not found" }, 404);
   });
 
   api.post("/exercises/:id/maxes", async (c) => {
-    const exerciseId = Number(c.req.param("id"));
+    const id = idParam.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(badRequest(id.error), 400);
+    const exerciseId = id.data;
     const parsed = maxEntryCreateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
     const [ex] = await db.select().from(exercises).where(eq(exercises.id, exerciseId));
@@ -178,8 +184,9 @@ export function createApp(opts: AppOptions) {
   });
 
   api.delete("/maxes/:id", async (c) => {
-    const id = Number(c.req.param("id"));
-    const rows = await db.delete(maxEntries).where(eq(maxEntries.id, id)).returning({ id: maxEntries.id });
+    const id = idParam.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(badRequest(id.error), 400);
+    const rows = await db.delete(maxEntries).where(eq(maxEntries.id, id.data)).returning({ id: maxEntries.id });
     return rows.length ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
   });
 
@@ -196,7 +203,9 @@ export function createApp(opts: AppOptions) {
   });
 
   api.delete("/sessions/:date", async (c) => {
-    await db.delete(sessions).where(eq(sessions.date, c.req.param("date")));
+    const date = isoDate.safeParse(c.req.param("date"));
+    if (!date.success) return c.json(badRequest(date.error), 400);
+    await db.delete(sessions).where(eq(sessions.date, date.data));
     return c.json({ ok: true });
   });
 

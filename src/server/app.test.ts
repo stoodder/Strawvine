@@ -106,3 +106,43 @@ describe("api", () => {
     expect(b.exercises.at(-1)).toMatchObject({ name: "Hollow hold", measure: "seconds" });
   });
 });
+
+describe("path parameters", () => {
+  const patch = (id: string) => req(`/api/exercises/${id}`, json("PATCH", { archived: true }));
+  const addMax = (id: string) => req(`/api/exercises/${id}/maxes`, json("POST", { date: "2026-11-01", valueLb: 300 }));
+  const deleteMax = (id: string) => req(`/api/maxes/${id}`, { method: "DELETE" });
+
+  it("rejects ids that aren't positive integers with 400", async () => {
+    for (const id of ["abc", "0", "-1", "1.5", "1e3", "0x1", "99999999999"]) {
+      expect((await patch(id)).status, `PATCH /exercises/${id}`).toBe(400);
+      expect((await addMax(id)).status, `POST /exercises/${id}/maxes`).toBe(400);
+      expect((await deleteMax(id)).status, `DELETE /maxes/${id}`).toBe(400);
+    }
+  });
+
+  it("still answers 404 for well-formed ids that don't exist, and works for real ones", async () => {
+    expect((await patch("999999")).status).toBe(404);
+    expect((await addMax("999999")).status).toBe(404);
+    expect((await deleteMax("999999")).status).toBe(404);
+
+    const created = await (await req("/api/exercises", json("POST", { name: "Band pull-apart" }))).json();
+    const res = await patch(String(created.id));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: created.id, archived: true });
+    const max = await addMax(String(created.id));
+    expect(max.status).toBe(201);
+    expect((await deleteMax(String((await max.json()).id))).status).toBe(200);
+  });
+
+  it("validates the date when deleting a session", async () => {
+    expect((await req("/api/sessions/not-a-date", { method: "DELETE" })).status).toBe(400);
+    expect((await req("/api/sessions/2026-02-30", { method: "DELETE" })).status).toBe(400);
+
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const session = buildSession("2026-11-09", b);
+    expect((await req("/api/sessions/2026-11-09", json("PUT", session))).status).toBe(200);
+    expect((await req("/api/sessions/2026-11-09", { method: "DELETE" })).status).toBe(200);
+    const after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.sessions.map((s) => s.date)).not.toContain("2026-11-09");
+  });
+});

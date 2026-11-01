@@ -79,6 +79,10 @@ target calories = avgTDEE + (goal rate lb/week × 3500) / 7
 ```
 - The user enters a **goal weight**; the rate is chosen as a pace (% bodyweight/week) within limits:
   lose ≤ **1%**/week, gain ≤ **0.5%**/week.
+- The goal's **direction is fixed when it is set** (start weight vs goal). Reaching or overshooting the goal
+  settles into maintenance — a cut never flips into a build (or vice versa) because of a scale wobble.
+- **Taper:** a week never plans more change than is left to go: rate = min(pace × bodyweight, |remaining|),
+  so the deficit/surplus eases out on the approach. Within ±0.5 lb of the goal → maintenance.
 - The app projects a **target date range**: date at the chosen pace and date at the actually observed
   trend rate.
 - **Target macros** are shown with target calories: protein from g/lb bodyweight, fat from g/lb,
