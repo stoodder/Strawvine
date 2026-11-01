@@ -1,5 +1,6 @@
 import clsx from "clsx";
 import { useMemo, useState } from "react";
+import { Check } from "lucide-react";
 import { addDays, formatShortDate } from "../../shared/dates";
 import { CALIBRATION_DAYS, computeEnergySeries } from "../../shared/energy";
 import { currentMax } from "../../shared/program";
@@ -8,6 +9,8 @@ import { LineChart, Sparkline } from "../components/charts";
 import { MaxSheet } from "../components/MaxSheet";
 import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
+import { formatProjectedRange } from "../components/projection";
+import { useTitle } from "../components/useTitle";
 import { fmt, minutesToHM, signed } from "../lib/format";
 import { useData } from "../lib/store";
 
@@ -26,6 +29,7 @@ export function ProgressScreen() {
   const [range, setRange] = useState<number>(30);
   const [maxFor, setMaxFor] = useState<Exercise | null>(null);
   const c = model.checkin;
+  useTitle("Progress");
 
   const first = data.days.find((d) => d.weightLb !== null || d.calories !== null)?.date ?? today;
   const series = useMemo(() => {
@@ -41,14 +45,14 @@ export function ProgressScreen() {
     <div>
       <header className="pt-2">
         <div className="label text-fg-2">Progress</div>
-        <h1 className="mt-6 text-[44px] leading-none font-light tracking-tight">The trend</h1>
+        <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">The trend</h1>
       </header>
 
       {/* Weekly check-in */}
       <Section
         label="Weekly check-in"
         right={
-          <span className="label text-faint">
+          <span className="label">
             {formatShortDate(c.from)} – {formatShortDate(c.to)}
           </span>
         }
@@ -66,7 +70,15 @@ export function ProgressScreen() {
                 value={fmt(c.tdee?.value)}
                 unit="kcal"
                 tone="accent"
-                sub={!c.tdee ? "—" : c.tdee.provisional ? `provisional · ${Math.round(c.tdee.confidence * 100)}% measured` : "measured"}
+                sub={
+                  !c.tdee
+                    ? "—"
+                    : !c.tdee.provisional
+                      ? "learned from your logs"
+                      : c.tdee.confidence > 0
+                        ? `still learning · ${Math.round(c.tdee.confidence * 100)}% from your logs`
+                        : "starting estimate"
+                }
               />
               <Stat
                 label="Trend weight"
@@ -76,7 +88,7 @@ export function ProgressScreen() {
                   c.weightChangeLb !== null ? (
                     <>
                       <span className="text-fg-2">{signed(c.weightChangeLb, 1)} lb</span> this week
-                      {c.targetRateLbPerWeek ? <span className="text-faint"> · plan {signed(c.targetRateLbPerWeek, 1)}</span> : null}
+                      {c.targetRateLbPerWeek ? <span> · plan {signed(c.targetRateLbPerWeek, 1)}</span> : null}
                     </>
                   ) : (
                     "needs a week of data"
@@ -117,20 +129,28 @@ export function ProgressScreen() {
                   ["Metcon", c.metcon],
                   ["Zone 2", c.zone2],
                 ] as const
-              ).map(([label, v]) => (
-                <div key={label}>
-                  <div className="label mb-1.5">{label}</div>
-                  <div className="num text-lg font-light">
-                    {v.done}
-                    <span className="text-sm text-mute">/{v.planned}</span>
+              ).map(([label, v]) => {
+                const met = v.planned > 0 && v.done >= v.planned;
+                return (
+                  <div key={label}>
+                    <div className="label mb-1.5">{label}</div>
+                    <div className="num flex items-center gap-1.5 text-lg font-light">
+                      <span>
+                        {v.done}
+                        <span className="text-sm text-mute">/{v.planned}</span>
+                      </span>
+                      {/* Not colour alone: a met week also gets a check. */}
+                      {met && (
+                        <>
+                          <Check size={14} strokeWidth={2.5} className="text-gold" aria-hidden />
+                          <span className="sr-only">all done</span>
+                        </>
+                      )}
+                    </div>
+                    <Bar className="mt-2" value={v.planned ? v.done / v.planned : 0} tone={met ? "gold" : "accent"} />
                   </div>
-                  <Bar
-                    className="mt-2"
-                    value={v.planned ? v.done / v.planned : 0}
-                    tone={v.planned && v.done >= v.planned ? "gold" : "accent"}
-                  />
-                </div>
-              ))}
+                );
+              })}
             </div>
           </>
         )}
@@ -148,12 +168,7 @@ export function ProgressScreen() {
             </div>
             {c.projection?.range && goal && (
               <p className="mt-3 text-xs text-mute">
-                {goal.targetLb} lb projected{" "}
-                <span className="text-fg-2">
-                  {c.projection.range[0] === c.projection.range[1]
-                    ? formatShortDate(c.projection.range[0], true)
-                    : `${formatShortDate(c.projection.range[0])} – ${formatShortDate(c.projection.range[1], true)}`}
-                </span>
+                {goal.targetLb} lb projected <span className="text-fg-2">{formatProjectedRange(c.projection.range, today)}</span>
               </p>
             )}
           </div>
@@ -169,13 +184,19 @@ export function ProgressScreen() {
       <Section
         label="Bodyweight"
         right={
-          <div className="flex gap-1">
+          <div className="flex" role="group" aria-label="Chart range">
             {RANGES.map(([l, v]) => (
               <button
                 key={l}
                 type="button"
+                aria-pressed={range === v}
+                aria-label={v ? `${l} days` : "All time"}
                 onClick={() => setRange(v)}
-                className={clsx("chip px-2.5 py-0.5", range === v ? "bg-white/[0.08] text-fg" : "text-mute")}
+                className={clsx(
+                  // Small pill, 44px-wide and (invisibly) 44px-tall target.
+                  "tap relative inline-flex min-w-11 justify-center rounded-full px-2.5 py-0.5 text-xs font-medium after:absolute after:-inset-y-3 after:inset-x-0 after:content-['']",
+                  range === v ? "bg-white/[0.08] text-fg" : "text-mute",
+                )}
               >
                 {l}
               </button>
@@ -203,6 +224,7 @@ export function ProgressScreen() {
             },
           ]}
           refLine={goal ? { y: goal.targetLb, label: `goal ${goal.targetLb}` } : undefined}
+          title="Bodyweight"
           emptyText="Weigh in a couple of mornings to see your trend."
         />
       </Section>
@@ -222,14 +244,15 @@ export function ProgressScreen() {
               key: "tdee",
               label: "TDEE",
               kind: "line",
-              color: "var(--color-glow)",
+              color: "var(--color-accent)",
               points: series.map((d) => ({ x: d.date, y: d.avgTdee })),
               format: (v) => fmt(v),
             },
           ]}
           emptyText="Two logged days and the burn estimate starts drawing."
+          title="Energy balance"
         />
-        <p className="mt-3 text-xs leading-relaxed text-faint">
+        <p className="mt-3 text-xs leading-relaxed text-mute">
           Weighted 7-day averages. The gap between the lines is the surplus or deficit your scale is actually responding to.
         </p>
       </Section>
@@ -252,16 +275,18 @@ export function ProgressScreen() {
                 className="tap flex w-full items-center gap-4 rounded-2xl px-1 py-3.5 text-left"
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-[15px] text-fg-2">{ex.name}</div>
+                  <div className="text-[0.9375rem] text-fg-2">{ex.name}</div>
                   <div className="mt-0.5 text-xs text-mute">
                     {cur && start !== undefined && cur.valueLb !== start ? (
-                      <span className="text-accent">{signed(cur.valueLb - start, 0)} lb</span>
+                      <>
+                        <span className="text-accent">{signed(cur.valueLb - start, 0)} lb</span> since start
+                      </>
                     ) : cur ? (
-                      "since start"
+                      "no change yet"
                     ) : (
                       "no max yet"
                     )}
-                    {target && <span className="text-faint"> · target {target.targetLb}</span>}
+                    {target && <span> · target {fmt(target.targetLb)}</span>}
                   </div>
                 </div>
                 <Sparkline points={entries.map((e) => e.valueLb)} width={72} height={24} />

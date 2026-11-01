@@ -1,7 +1,9 @@
+import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { addDays } from "../../shared/dates";
-import { achievements, type Achievement } from "../../shared/gamify";
+import type { Achievement } from "../../shared/gamify";
 import { celebrate } from "../lib/haptics";
 import { useData, useMarkSeen } from "../lib/store";
 
@@ -12,46 +14,149 @@ const TIER_LABEL: Record<Achievement["tier"], string> = {
   goal: "Goal reached",
 };
 
+/** How often to re-check whether the moment is right, and how many calm checks in a row it takes. */
+const CHECK_MS = 500;
+const CALM_CHECKS = 2;
+/** An open checklist editor holds celebrations while the person is still working in it. */
+const EDITOR_IDLE_MS = 8000;
+/** Taps that land in the first instant of the overlay were meant for what was underneath. */
+const ARM_MS = 450;
+
+/** True while showing an overlay would interrupt data entry. */
+function isBusy(lastInteraction: number): boolean {
+  if (document.visibilityState !== "visible") return true;
+  const el = document.activeElement as HTMLElement | null;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return true;
+  if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return true;
+  if (document.querySelector("[data-celebration-hold]") && Date.now() - lastInteraction < EDITOR_IDLE_MS) return true;
+  return false;
+}
+
 /**
- * Watches derived achievements and plays a restrained celebration for each new one, once.
+ * Watches derived achievements and plays a restrained celebration for each new one, once —
+ * at a calm moment: never while a field is focused, a sheet is open or an editor is in use.
  */
 export function Celebrations() {
-  const { data, today } = useData();
+  const { data, today, achievements: all } = useData();
   const markSeen = useMarkSeen();
-  const all = useMemo(() => achievements(data, today), [data, today]);
   const [queue, setQueue] = useState<Achievement[]>([]);
+  // Keys already queued or dismissed this session. `seenAchievements` catches up a render
+  // later, and without this a just-dismissed celebration would immediately queue again.
+  const handled = useRef(new Set<string>());
 
   useEffect(() => {
     const seen = new Set(data.seenAchievements);
-    const fresh = all.filter((a) => !seen.has(a.key) && !queue.some((q) => q.key === a.key));
+    const fresh = all.filter((a) => !seen.has(a.key) && !handled.current.has(a.key));
     if (!fresh.length) return;
+    for (const a of fresh) handled.current.add(a.key);
     // Only celebrate recent things; quietly file away anything older.
     const cutoff = addDays(today, -3);
     const old = fresh.filter((a) => a.date < cutoff);
     if (old.length) markSeen(old.map((a) => a.key));
     const recent = fresh.filter((a) => a.date >= cutoff).reverse();
     if (recent.length) setQueue((q) => [...q, ...recent]);
-  }, [all, data.seenAchievements, today, markSeen, queue]);
+  }, [all, data.seenAchievements, today, markSeen]);
 
-  const current = queue[0];
+  // An edit can take an achievement back before it is shown; skip those.
+  const live = useMemo(() => {
+    const keys = new Set(all.map((a) => a.key));
+    return queue.filter((a) => keys.has(a.key));
+  }, [all, queue]);
+  const current = live[0];
+
+  // Wait for a calm moment. Once showing, stay up until the queue is through.
+  const [ready, setReady] = useState(false);
+  const lastInteraction = useRef(0);
+  const returnTo = useRef<HTMLElement | null>(null);
   useEffect(() => {
-    if (current) celebrate();
-  }, [current]);
+    const mark = () => (lastInteraction.current = Date.now());
+    const opts = { capture: true, passive: true } as const;
+    document.addEventListener("pointerdown", mark, opts);
+    document.addEventListener("keydown", mark, opts);
+    document.addEventListener("input", mark, opts);
+    return () => {
+      document.removeEventListener("pointerdown", mark, opts);
+      document.removeEventListener("keydown", mark, opts);
+      document.removeEventListener("input", mark, opts);
+    };
+  }, []);
+  useEffect(() => {
+    if (!current) {
+      setReady(false);
+      return;
+    }
+    if (ready) return;
+    let calm = 0;
+    const id = window.setInterval(() => {
+      calm = isBusy(lastInteraction.current) ? 0 : calm + 1;
+      if (calm >= CALM_CHECKS) {
+        // Remember where focus was (the overlay's button takes it on mount) to hand it back.
+        returnTo.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        setReady(true);
+      }
+    }, CHECK_MS);
+    return () => window.clearInterval(id);
+  }, [current, ready]);
 
-  const dismiss = () => {
-    if (!current) return;
-    markSeen([current.key]);
-    setQueue((q) => q.slice(1));
-  };
+  const shown = ready ? current : undefined;
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!shown) return;
+    celebrate();
+    setArmed(false);
+    const id = window.setTimeout(() => setArmed(true), ARM_MS);
+    return () => window.clearTimeout(id);
+  }, [shown]);
 
-  const gold = current?.tier === "pr" || current?.tier === "goal";
+  const dismiss = useCallback(() => {
+    if (!shown || !armed) return;
+    const key = shown.key;
+    markSeen([key]);
+    setQueue((q) => q.filter((a) => a.key !== key));
+  }, [shown, armed, markSeen]);
+
+  // Modal while open: the app behind is inert, Escape/Enter continue, focus returns afterwards.
+  const visible = !!shown;
+  const dismissRef = useRef(dismiss);
+  useLayoutEffect(() => {
+    dismissRef.current = dismiss;
+  });
+  useEffect(() => {
+    if (!visible) return;
+    const root = document.getElementById("root");
+    root?.setAttribute("inert", "");
+    const onKey = (e: KeyboardEvent) => {
+      // Enter on the Continue button is the button's own click.
+      if (e.key === "Escape" || (e.key === "Enter" && !(e.target instanceof HTMLButtonElement))) {
+        e.preventDefault();
+        dismissRef.current();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      root?.removeAttribute("inert");
+      const el = returnTo.current;
+      if (el?.isConnected && el !== document.body) el.focus({ preventScroll: true });
+    };
+  }, [visible]);
+
+  const tierId = useId();
+  const titleId = useId();
+  const detailId = useId();
+  const gold = shown?.tier === "pr" || shown?.tier === "goal";
   const color = gold ? "var(--color-gold)" : "var(--color-accent)";
+  const more = live.length - 1;
 
-  return (
+  return createPortal(
     <AnimatePresence>
-      {current && (
+      {shown && (
         <motion.div
-          key={current.key}
+          key={shown.key}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={`${tierId} ${titleId}`}
+          aria-describedby={detailId}
           className="fixed inset-0 z-[60] grid place-items-center px-8"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -66,7 +171,7 @@ export function Celebrations() {
             exit={{ scale: 0.96, opacity: 0 }}
             transition={{ type: "spring", stiffness: 260, damping: 24 }}
           >
-            <div className="relative mb-8 grid h-36 w-36 place-items-center">
+            <div className="relative mb-8 grid h-36 w-36 place-items-center" aria-hidden="true">
               <motion.div
                 className="absolute inset-0 rounded-full"
                 style={{ background: `radial-gradient(circle, ${color} 0%, transparent 65%)` }}
@@ -115,18 +220,31 @@ export function Celebrations() {
               </svg>
             </div>
             <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35 }}>
-              <div className="label mb-3" style={{ color }}>
-                {TIER_LABEL[current.tier]}
+              <div id={tierId} className="label mb-3" style={{ color }}>
+                {TIER_LABEL[shown.tier]}
               </div>
-              <div className={gold ? "glow-gold text-4xl font-light tracking-tight" : "glow text-4xl font-light tracking-tight"}>
-                {current.title}
-              </div>
-              <p className="mx-auto mt-3 max-w-xs text-sm leading-relaxed text-fg-2">{current.detail}</p>
-              <div className="label mt-10 text-faint">Tap to continue{queue.length > 1 ? ` · ${queue.length - 1} more` : ""}</div>
+              <h2 id={titleId} className={clsx("text-4xl font-light tracking-tight", gold ? "glow-gold text-gold" : "glow")}>
+                {shown.title}
+              </h2>
+              <p id={detailId} className="mx-auto mt-3 max-w-xs text-sm leading-relaxed text-fg-2">
+                {shown.detail}
+              </p>
+              <button
+                type="button"
+                autoFocus
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dismiss();
+                }}
+                className="label mt-8 min-h-11 rounded-full px-5 text-mute focus-visible:outline-mute"
+              >
+                Continue{more > 0 ? ` · ${more} more` : ""}
+              </button>
             </motion.div>
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

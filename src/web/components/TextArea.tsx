@@ -70,26 +70,37 @@ export function JournalText({
     };
   }, [flush]);
 
+  // Flush with the page — no box. A hairline underneath brightens on focus so it's clear where
+  // typing goes.
   return (
-    <textarea
-      ref={ref}
-      aria-label={ariaLabel}
-      value={text}
-      rows={minRows}
-      placeholder={placeholder}
-      onFocus={() => (focused.current = true)}
-      onBlur={() => {
-        focused.current = false;
-        flush();
-      }}
-      onChange={(e) => {
-        const v = e.target.value;
-        setText(v);
-        latest.current = v;
-        window.clearTimeout(timer.current);
-        timer.current = window.setTimeout(flush, 900);
-      }}
-      className={clsx("field resize-none leading-relaxed text-fg-2 placeholder:text-faint", className)}
-    />
+    <div className="group relative">
+      <textarea
+        ref={ref}
+        aria-label={ariaLabel}
+        value={text}
+        rows={minRows}
+        placeholder={placeholder}
+        onFocus={() => (focused.current = true)}
+        onBlur={() => {
+          focused.current = false;
+          flush();
+        }}
+        onChange={(e) => {
+          const v = e.target.value;
+          setText(v);
+          latest.current = v;
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(flush, 900);
+        }}
+        className={clsx(
+          "block w-full resize-none bg-transparent pb-2 leading-relaxed text-fg-2 outline-none placeholder:text-faint",
+          className,
+        )}
+      />
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-white/[0.06] transition-colors duration-300 group-focus-within:bg-accent/50"
+      />
+    </div>
   );
 }

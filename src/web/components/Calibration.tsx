@@ -9,8 +9,11 @@ const MILESTONES: Array<[number, string]> = [
   [CALIBRATION_DAYS, "fully calibrated"],
 ];
 
-/** The ramp-up as a row of ticks with the next unlock spelled out. */
-export function Calibration({ logged }: { logged: number }) {
+/**
+ * The ramp-up as a row of ticks with the next unlock spelled out.
+ * `missing`: the viewed day has one half of a logged day (weight or calories) but not the other.
+ */
+export function Calibration({ logged, missing = null }: { logged: number; missing?: "weight" | "calories" | null }) {
   const n = Math.min(logged, CALIBRATION_DAYS);
   const next = MILESTONES.find(([d]) => d > n);
   return (
@@ -33,15 +36,21 @@ export function Calibration({ logged }: { logged: number }) {
           );
         })}
       </div>
-      <div className="mt-2 flex justify-between text-xs">
+      <div className="mt-2 flex flex-wrap justify-between gap-x-3 gap-y-1 text-xs">
         <span className="text-fg-2">
           Calibrating <span className="num text-accent">{n}</span>
           <span className="text-mute">/{CALIBRATION_DAYS}</span>
         </span>
-        {next && (
+        {missing ? (
           <span className="text-mute">
-            {next[0] - n} {next[0] - n === 1 ? "day" : "days"} to {next[1]}
+            Add {missing} to complete day <span className="num">{n + 1}</span>
           </span>
+        ) : (
+          next && (
+            <span className="text-mute">
+              {next[0] - n} {next[0] - n === 1 ? "day" : "days"} to {next[1]}
+            </span>
+          )
         )}
       </div>
     </div>

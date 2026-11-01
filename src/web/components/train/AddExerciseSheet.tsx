@@ -1,21 +1,40 @@
 import clsx from "clsx";
 import { useMemo, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { Check, Plus, Search } from "lucide-react";
 import type { Exercise, ExerciseCategory, Measure } from "../../../shared/schemas";
 import { Sheet } from "../ui";
 
+/** One name per category, used for both the create chips and the list tags. */
 const CATEGORIES: Array<[ExerciseCategory, string]> = [
   ["accessory", "Accessory"],
   ["core", "Core"],
   ["carry", "Carry"],
-  ["primary", "Compound"],
+  ["primary", "Barbell"],
   ["conditioning", "Conditioning"],
 ];
+const CATEGORY_LABEL = Object.fromEntries(CATEGORIES) as Record<ExerciseCategory, string>;
 const MEASURES: Array<[Measure, string]> = [
   ["reps", "Reps"],
   ["seconds", "Time"],
   ["meters", "Distance"],
 ];
+/** List tag: category, plus the unit when it isn't reps ("carry · m"). */
+const tag = (e: Exercise) =>
+  `${CATEGORY_LABEL[e.category] ?? e.category}${e.measure === "seconds" ? " · s" : e.measure === "meters" ? " · m" : ""}`;
+
+function ChoiceChip({ on, onClick, children }: { on: boolean; onClick: () => void; children: string }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      onClick={onClick}
+      className={clsx("chip min-h-9 gap-1", on ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2")}
+    >
+      {on && <Check size={12} strokeWidth={3} aria-hidden />}
+      {children}
+    </button>
+  );
+}
 
 export function AddExerciseSheet({
   open,
@@ -58,7 +77,7 @@ export function AddExerciseSheet({
   };
 
   return (
-    <Sheet open={open} onClose={close} title={title}>
+    <Sheet open={open} onClose={close} title={title} className="min-h-[80dvh]">
       <div className="flex items-center gap-3 rounded-2xl bg-white/[0.05] px-4 py-3">
         <Search size={16} className="text-mute" />
         <input
@@ -66,7 +85,7 @@ export function AddExerciseSheet({
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search or create…"
-          className="field flex-1"
+          className="field flex-1 text-base"
           autoFocus
         />
       </div>
@@ -76,28 +95,24 @@ export function AddExerciseSheet({
           <div className="text-sm">
             Create <span className="text-accent">“{q.trim()}”</span>
           </div>
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="label mt-3 mb-1.5" id="new-ex-category">
+            Category
+          </div>
+          <div className="flex flex-wrap gap-2" role="group" aria-labelledby="new-ex-category">
             {CATEGORIES.map(([k, l]) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setCategory(k)}
-                className={clsx("chip", category === k ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2")}
-              >
+              <ChoiceChip key={k} on={category === k} onClick={() => setCategory(k)}>
                 {l}
-              </button>
+              </ChoiceChip>
             ))}
           </div>
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="label mt-3 mb-1.5" id="new-ex-measure">
+            Measured in
+          </div>
+          <div className="flex flex-wrap gap-2" role="group" aria-labelledby="new-ex-measure">
             {MEASURES.map(([k, l]) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setMeasure(k)}
-                className={clsx("chip", measure === k ? "bg-fg text-ink-950" : "bg-white/[0.05] text-fg-2")}
-              >
+              <ChoiceChip key={k} on={measure === k} onClick={() => setMeasure(k)}>
                 {l}
-              </button>
+              </ChoiceChip>
             ))}
           </div>
           <button
@@ -131,7 +146,7 @@ export function AddExerciseSheet({
               }}
             >
               <span className="text-[15px]">{e.name}</span>
-              <span className="label">{e.measure === "reps" ? e.category : e.measure === "seconds" ? "time" : "distance"}</span>
+              <span className="label shrink-0 pl-3">{tag(e)}</span>
             </button>
           </li>
         ))}

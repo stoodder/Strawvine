@@ -1,7 +1,8 @@
 /**
  * Lightweight SVG charts: sparklines that sit inline with text, and a scrubbable line chart.
  */
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import clsx from "clsx";
+import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { formatShortDate } from "../../shared/dates";
 
 export interface Point {
@@ -58,17 +59,20 @@ export function LineChart({
   refLine,
   formatY = (v) => v.toFixed(0),
   emptyText = "Not enough data yet.",
+  title = "Chart",
 }: {
   series: Series[];
   height?: number;
   refLine?: { y: number; label: string };
   formatY?: (v: number) => string;
   emptyText?: ReactNode;
+  /** Names the chart for screen readers ("Bodyweight"); the summary is generated. */
+  title?: string;
 }) {
-  const ref = useRef<SVGSVGElement>(null);
+  const ref = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
   const width = 360;
-  const pad = { t: 12, r: 8, b: 20, l: 8 };
+  const pad = { t: 12, r: 8, b: 8, l: 8 };
 
   const dates = useMemo(() => {
     const set = new Set<string>();
@@ -77,16 +81,27 @@ export function LineChart({
   }, [series]);
 
   const all = series.flatMap((s) => s.points.map((p) => p.y)).filter((v): v is number => v !== null);
-  if (refLine) all.push(refLine.y);
   if (all.length < 2 || dates.length < 2) return <div className="grid h-28 place-items-center text-sm text-mute">{emptyText}</div>;
 
+  // The y-domain hugs the data. A reference line close to the data joins the domain; one far
+  // outside it is pinned to the edge as a marker instead of squashing the lines flat.
   let min = Math.min(...all);
   let max = Math.max(...all);
-  const padY = (max - min || Math.abs(max) * 0.05 || 1) * 0.15;
+  const span = max - min || Math.abs(max) * 0.05 || 1;
+  let pinned: "above" | "below" | null = null;
+  if (refLine) {
+    const near = span * 0.75;
+    if (refLine.y >= min - near && refLine.y <= max + near) {
+      min = Math.min(min, refLine.y);
+      max = Math.max(max, refLine.y);
+    } else pinned = refLine.y < min ? "below" : "above";
+  }
+  const padY = (max - min || span) * 0.15;
   min -= padY;
   max += padY;
 
-  const xOf = (i: number) => pad.l + (i / (dates.length - 1)) * (width - pad.l - pad.r);
+  const plotW = width - pad.l - pad.r;
+  const xOf = (i: number) => pad.l + (i / (dates.length - 1)) * plotW;
   const yOf = (v: number) => pad.t + (1 - (v - min) / (max - min)) * (height - pad.t - pad.b);
   const idx = new Map(dates.map((d, i) => [d, i]));
 
@@ -95,47 +110,81 @@ export function LineChart({
     if (!el) return;
     const r = el.getBoundingClientRect();
     const x = ((clientX - r.left) / r.width) * width;
-    const i = Math.round(((x - pad.l) / (width - pad.l - pad.r)) * (dates.length - 1));
+    const i = Math.round(((x - pad.l) / plotW) * (dates.length - 1));
     setHover(Math.max(0, Math.min(dates.length - 1, i)));
+  };
+  const onKey = (e: ReactKeyboardEvent) => {
+    const last = dates.length - 1;
+    const step = e.shiftKey ? 7 : 1;
+    let next: number | null | undefined;
+    if (e.key === "ArrowLeft") next = Math.max(0, (hover ?? last + 1) - step);
+    else if (e.key === "ArrowRight") next = Math.min(last, (hover ?? last - 1) + step);
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    else if (e.key === "Escape" && hover !== null) next = null;
+    if (next !== undefined) {
+      e.preventDefault();
+      setHover(next);
+    }
   };
 
   const hoverDate = hover !== null ? dates[hover]! : null;
+  const fmtOf = (s: Series) => s.format ?? formatY;
+  const lastOf = (s: Series) => [...s.points].reverse().find((q) => q.y !== null);
+  const firstOf = (s: Series) => s.points.find((q) => q.y !== null);
+  const summary = [
+    `${title}, ${formatShortDate(dates[0]!)} to ${formatShortDate(dates[dates.length - 1]!)}.`,
+    ...series.map((s) => {
+      const a = firstOf(s);
+      const b = lastOf(s);
+      return a && b ? `${s.label} ${fmtOf(s)(a.y!)} to ${fmtOf(s)(b.y!)}.` : `${s.label}: no data.`;
+    }),
+    refLine ? `${refLine.label}.` : "",
+    "Use the left and right arrow keys to read each day.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const pct = (v: number) => `${(v / height) * 100}%`;
 
   return (
     <div className="relative">
-      <div className="mb-2 flex min-h-[34px] flex-wrap items-end gap-x-5 gap-y-1">
+      <div className="mb-2 flex min-h-[34px] flex-wrap items-end gap-x-5 gap-y-1" aria-live="polite" aria-atomic="true">
         {series.map((s) => {
-          const p = hoverDate ? s.points.find((q) => q.x === hoverDate) : [...s.points].reverse().find((q) => q.y !== null);
+          const p = hoverDate ? s.points.find((q) => q.x === hoverDate) : lastOf(s);
           return (
             <div key={s.key} className="flex items-center gap-2">
-              <span className="h-1.5 w-1.5 rounded-full" style={{ background: s.color }} />
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full" style={{ background: s.color }} />
               <span className="text-xs text-mute">{s.label}</span>
-              <span className="num text-sm">{p?.y != null ? (s.format ?? formatY)(p.y) : "—"}</span>
+              <span className="num text-sm">{p?.y != null ? fmtOf(s)(p.y) : "—"}</span>
             </div>
           );
         })}
         <span className="label ml-auto">{hoverDate ? formatShortDate(hoverDate) : "Latest"}</span>
       </div>
-      <svg
+      <div
         ref={ref}
-        viewBox={`0 0 ${width} ${height}`}
-        className="w-full touch-pan-y select-none"
+        role="img"
+        aria-label={summary}
+        tabIndex={0}
+        className="relative touch-pan-y rounded-md select-none"
         onPointerMove={(e) => onMove(e.clientX)}
         onPointerDown={(e) => onMove(e.clientX)}
         onPointerLeave={() => setHover(null)}
+        onKeyDown={onKey}
+        onBlur={() => setHover(null)}
       >
-        {[0.25, 0.5, 0.75].map((f) => (
-          <line
-            key={f}
-            x1={pad.l}
-            x2={width - pad.r}
-            y1={pad.t + f * (height - pad.t - pad.b)}
-            y2={pad.t + f * (height - pad.t - pad.b)}
-            stroke="rgba(255,255,255,0.04)"
-          />
-        ))}
-        {refLine && (
-          <g>
+        <svg viewBox={`0 0 ${width} ${height}`} className="block w-full" aria-hidden>
+          {[0.25, 0.5, 0.75].map((f) => (
+            <line
+              key={f}
+              x1={pad.l}
+              x2={width - pad.r}
+              y1={pad.t + f * (height - pad.t - pad.b)}
+              y2={pad.t + f * (height - pad.t - pad.b)}
+              stroke="rgba(255,255,255,0.04)"
+            />
+          ))}
+          {refLine && !pinned && (
             <line
               x1={pad.l}
               x2={width - pad.r}
@@ -145,45 +194,60 @@ export function LineChart({
               strokeDasharray="3 5"
               opacity={0.6}
             />
-            <text
-              x={width - pad.r}
-              y={yOf(refLine.y) - 5}
-              textAnchor="end"
-              fontSize="9"
-              fill="var(--color-gold)"
-              opacity={0.8}
-              fontFamily="var(--font-mono)"
-            >
-              {refLine.label}
-            </text>
-          </g>
-        )}
-        {series.map((s) => {
-          const pts = s.points.filter((p) => p.y !== null).map((p) => [xOf(idx.get(p.x)!), yOf(p.y!)] as const);
-          if (s.kind === "dots")
+          )}
+          {series.map((s) => {
+            const pts = s.points.filter((p) => p.y !== null).map((p) => [xOf(idx.get(p.x)!), yOf(p.y!)] as const);
+            if (s.kind === "dots")
+              return (
+                <g key={s.key}>
+                  {pts.map(([x, y], i) => (
+                    <circle key={i} cx={x} cy={y} r={1.8} fill={s.color} opacity={0.55} />
+                  ))}
+                </g>
+              );
+            const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join("");
             return (
               <g key={s.key}>
-                {pts.map(([x, y], i) => (
-                  <circle key={i} cx={x} cy={y} r={1.8} fill={s.color} opacity={0.55} />
-                ))}
+                <path d={d} fill="none" stroke={s.color} strokeWidth={6} opacity={0.08} strokeLinejoin="round" />
+                <path d={d} fill="none" stroke={s.color} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" />
               </g>
             );
-          const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join("");
-          return (
-            <g key={s.key}>
-              <path d={d} fill="none" stroke={s.color} strokeWidth={6} opacity={0.08} strokeLinejoin="round" />
-              <path d={d} fill="none" stroke={s.color} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" />
+          })}
+          {hover !== null && (
+            <g>
+              <line x1={xOf(hover)} x2={xOf(hover)} y1={pad.t} y2={height - pad.b} stroke="rgba(255,255,255,0.18)" />
+              {series.map((s) => {
+                const p = s.points.find((q) => q.x === hoverDate);
+                return p?.y != null ? <circle key={s.key} cx={xOf(hover)} cy={yOf(p.y)} r={3} fill={s.color} /> : null;
+              })}
             </g>
-          );
-        })}
-        {hover !== null && <line x1={xOf(hover)} x2={xOf(hover)} y1={pad.t} y2={height - pad.b} stroke="rgba(255,255,255,0.18)" />}
-        <text x={pad.l} y={height - 4} fontSize="9" fill="var(--color-faint)" fontFamily="var(--font-mono)">
-          {formatShortDate(dates[0]!)}
-        </text>
-        <text x={width - pad.r} y={height - 4} fontSize="9" fill="var(--color-faint)" textAnchor="end" fontFamily="var(--font-mono)">
-          {formatShortDate(dates[dates.length - 1]!)}
-        </text>
-      </svg>
+          )}
+        </svg>
+        {refLine && !pinned && (
+          <span
+            aria-hidden
+            className="pointer-events-none absolute right-0 -translate-y-full pb-1 font-mono text-[0.625rem] text-gold/90"
+            style={{ top: pct(yOf(refLine.y)) }}
+          >
+            {refLine.label}
+          </span>
+        )}
+        {refLine && pinned && (
+          <span
+            aria-hidden
+            className={clsx(
+              "pointer-events-none absolute right-0 font-mono text-[0.625rem] text-gold/90",
+              pinned === "below" ? "bottom-0" : "top-0",
+            )}
+          >
+            {refLine.label} {pinned === "below" ? "↓" : "↑"}
+          </span>
+        )}
+      </div>
+      <div aria-hidden className="mt-1.5 flex justify-between px-2 font-mono text-[0.625rem] text-mute">
+        <span>{formatShortDate(dates[0]!)}</span>
+        <span>{formatShortDate(dates[dates.length - 1]!)}</span>
+      </div>
     </div>
   );
 }

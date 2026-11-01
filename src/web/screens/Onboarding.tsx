@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight } from "lucide-react";
 import { addDays, formatShortDate, nextMonday, startOfWeek, weekdayName } from "../../shared/dates";
 import { goalDirection } from "../../shared/nutrition";
@@ -10,6 +10,7 @@ import { BoxNumber, Field } from "../components/ui";
 import { PaceSlider } from "../components/PaceSlider";
 import { Logo } from "../components/Logo";
 import { fmt } from "../lib/format";
+import { useTitle } from "../components/useTitle";
 import { success } from "../lib/haptics";
 
 export function Onboarding() {
@@ -28,6 +29,19 @@ export function Onboarding() {
   const upcoming = nextMonday(today);
   const [start, setStart] = useState(upcoming);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const firstRender = useRef(true);
+  useTitle("Set up");
+  // Each step's heading takes focus when the step changes, so screen readers hear where they are.
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    const t = window.setTimeout(() => headingRef.current?.focus({ preventScroll: true }), 400);
+    return () => window.clearTimeout(t);
+  }, [step]);
 
   const direction = weight && goal ? goalDirection(weight, goal) : "maintain";
   const limit = direction === "gain" ? data.settings.limits.maxGainPctPerWeek : data.settings.limits.maxLossPctPerWeek;
@@ -37,6 +51,7 @@ export function Onboarding() {
 
   const finish = async () => {
     setBusy(true);
+    setError(null);
     try {
       for (const ex of tracked) {
         const v = maxes[ex.id];
@@ -53,8 +68,11 @@ export function Onboarding() {
         program: { ...data.settings.program, cycleStartDate: start },
       });
       success();
-    } catch {
+    } catch (e) {
       setBusy(false);
+      setError(
+        `Couldn't finish setting up${e instanceof Error && e.message ? ` (${e.message})` : ""}. Check your connection and try Begin again — nothing you entered is lost.`,
+      );
     }
   };
 
@@ -62,7 +80,9 @@ export function Onboarding() {
     // 0 — welcome
     <div key="0">
       <Logo size={40} />
-      <h1 className="mt-8 text-4xl leading-tight font-light tracking-tight">Let's calibrate.</h1>
+      <h1 ref={headingRef} tabIndex={-1} className="mt-8 text-4xl leading-tight font-light tracking-tight outline-none">
+        Let's calibrate.
+      </h1>
       <p className="mt-4 max-w-sm leading-relaxed text-fg-2">
         Strawvine learns your real energy burn from your morning weight and daily calories, calculates every working set from your maxes,
         and keeps the whole picture — training, fuel, recovery — in one quiet place.
@@ -83,7 +103,9 @@ export function Onboarding() {
     // 1 — maxes
     <div key="1">
       <div className="label text-accent">01 · Maxes</div>
-      <h2 className="mt-3 text-3xl font-light tracking-tight">Where are you starting?</h2>
+      <h1 ref={headingRef} tabIndex={-1} className="mt-3 text-3xl font-light tracking-tight outline-none">
+        Where are you starting?
+      </h1>
       <p className="mt-2 text-sm text-mute">Your current 1-rep max for each lift. Change these any time.</p>
       <div className="mt-8 divide-y divide-white/[0.05]">
         {tracked.map((ex) => (
@@ -111,7 +133,9 @@ export function Onboarding() {
     // 2 — body
     <div key="2">
       <div className="label text-accent">02 · Body</div>
-      <h2 className="mt-3 text-3xl font-light tracking-tight">Bodyweight & goal</h2>
+      <h1 ref={headingRef} tabIndex={-1} className="mt-3 text-3xl font-light tracking-tight outline-none">
+        Bodyweight & goal
+      </h1>
       <p className="mt-2 text-sm text-mute">All optional — the app works with whatever you give it.</p>
       <div className="mt-8 divide-y divide-white/[0.05]">
         <Field label="Today's weight" hint="Morning, after the bathroom">
@@ -120,13 +144,19 @@ export function Onboarding() {
         <Field label="Goal weight">
           <BoxNumber ariaLabel="Goal weight" value={goal} onCommit={setGoal} unit="lb" decimals={1} />
         </Field>
-        <Field label="Maintenance estimate" hint={`Used while your TDEE calibrates${weight ? ` · default ${fmt(weight * 15)}` : ""}`}>
+        <Field
+          label="Maintenance estimate"
+          hint={`Used while your TDEE calibrates. Leave empty to use ${weight ? `the default, ${fmt(weight * 15)} kcal` : "a default from your weight"}.`}
+        >
           <BoxNumber
-            ariaLabel="Maintenance calories estimate"
+            ariaLabel="Maintenance estimate"
             value={tdee}
             onCommit={setTdee}
             unit="kcal"
-            placeholder={weight ? fmt(weight * 15) : "—"}
+            placeholder="auto"
+            grouping
+            min={800}
+            max={10000}
           />
         </Field>
       </div>
@@ -140,7 +170,9 @@ export function Onboarding() {
     // 3 — start
     <div key="3">
       <div className="label text-accent">03 · Cycle</div>
-      <h2 className="mt-3 text-3xl font-light tracking-tight">Week 1 begins…</h2>
+      <h1 ref={headingRef} tabIndex={-1} className="mt-3 text-3xl font-light tracking-tight outline-none">
+        Week 1 begins…
+      </h1>
       <p className="mt-2 text-sm text-mute">
         {data.settings.program.weeks.length}-week cycle:{" "}
         {data.settings.program.weeks.map((w) => (w.deload ? "deload" : w.reps.join("/"))).join(" → ")}
@@ -150,6 +182,7 @@ export function Onboarding() {
           <button
             key={d}
             type="button"
+            aria-pressed={start === d}
             onClick={() => setStart(d)}
             className={`tap flex w-full items-center justify-between rounded-2xl px-5 py-4 text-left transition-colors ${start === d ? "bg-accent/10 text-fg ring-1 ring-accent/40" : "bg-white/[0.03] text-fg-2"}`}
           >
@@ -166,15 +199,28 @@ export function Onboarding() {
   const last = step === steps.length - 1;
 
   return (
-    <div className="pt-safe mx-auto flex min-h-dvh max-w-lg flex-col px-6 pb-10">
-      <div className="mt-4 flex gap-1.5">
+    <main className="pt-safe mx-auto flex min-h-dvh max-w-lg flex-col px-5 pb-10">
+      <div
+        className="mt-4 flex gap-1.5"
+        role="progressbar"
+        aria-label="Setup"
+        aria-valuemin={1}
+        aria-valuemax={steps.length}
+        aria-valuenow={step + 1}
+        aria-valuetext={`Step ${step + 1} of ${steps.length}`}
+      >
         {steps.map((_, i) => (
           <div
             key={i}
-            className={`h-[3px] flex-1 rounded-full transition-colors duration-500 ${i <= step ? "bg-accent" : "bg-white/[0.08]"}`}
+            className={`h-[3px] flex-1 rounded-full transition-colors duration-500 ${
+              i < step ? "bg-accent" : i === step ? "bg-accent/40" : "bg-white/[0.08]"
+            }`}
           />
         ))}
       </div>
+      <p className="sr-only" aria-live="polite">
+        Step {step + 1} of {steps.length}
+      </p>
       <div className="flex-1 pt-14">
         <AnimatePresence mode="wait">
           <motion.div
@@ -188,6 +234,11 @@ export function Onboarding() {
           </motion.div>
         </AnimatePresence>
       </div>
+      {error && (
+        <p role="alert" className="mt-8 text-sm leading-relaxed text-warn">
+          {error}
+        </p>
+      )}
       <div className="mt-10 flex items-center justify-between">
         {step > 0 ? (
           <button type="button" className="btn-ghost" onClick={() => setStep(step - 1)}>
@@ -200,6 +251,6 @@ export function Onboarding() {
           {last ? "Begin" : "Continue"} <ArrowRight size={16} />
         </button>
       </div>
-    </div>
+    </main>
   );
 }

@@ -1,0 +1,229 @@
+import clsx from "clsx";
+import { AnimatePresence, motion } from "motion/react";
+import { useId, useState, type ReactNode } from "react";
+import { Link, useNavigate } from "react-router";
+import type { ChecklistItem } from "../../../shared/gamify";
+import type { DayLog, DayLogPatch } from "../../../shared/schemas";
+import { compactSteps, fmt, minutesToHM } from "../../lib/format";
+import { Bar, CheckDot } from "../ui";
+import { FuelEditor, MetconEditor, MorningEditor, StepsEditor, Zone2Editor } from "./editors";
+
+export interface LiftSummary {
+  href: string;
+  label: string | undefined;
+  primaryName: string | null | undefined;
+  setsDone: number;
+  setsTotal: number;
+}
+
+/**
+ * "Close the day": one row per checklist item. Render it with `key={date}` so the expanded
+ * editor (and every field in it) belongs to exactly one day.
+ *
+ * Row anatomy — the dot is only a real control where it is a plain toggle (metcon, zone 2).
+ * Derived items (weigh-in, nutrition, steps) are done by entering their value, so their dot is
+ * status, and tapping it opens the editor just like the row. The lift row is a link to Train.
+ */
+export function DayChecklist({
+  items,
+  day,
+  patch,
+  stepTarget,
+  zone2Minutes,
+  lift,
+}: {
+  items: ChecklistItem[];
+  day: DayLog;
+  patch: (p: DayLogPatch) => void;
+  stepTarget: number;
+  zone2Minutes: number;
+  lift: LiftSummary;
+}) {
+  const [open, setOpen] = useState<string | null>(null);
+  const toggle = (k: string) => setOpen((o) => (o === k ? null : k));
+
+  return (
+    <div className="-mx-1">
+      {items.map((item) => {
+        const summary = summaryFor(item, day, stepTarget, lift);
+        if (item.key === "lift") return <LiftRow key={item.key} item={item} summary={summary} href={lift.href} />;
+        const onCheck =
+          item.key === "metcon"
+            ? () => patch({ metconDone: !day.metconDone })
+            : item.key === "zone2"
+              ? () =>
+                  patch({
+                    zone2Done: !day.zone2Done,
+                    zone2Minutes: !day.zone2Done && day.zone2Minutes === null ? zone2Minutes : day.zone2Minutes,
+                  })
+              : null;
+        return (
+          <ChecklistRow
+            key={item.key}
+            item={item}
+            open={open === item.key}
+            onToggleOpen={() => toggle(item.key)}
+            onCheck={onCheck}
+            summary={summary}
+          >
+            {item.key === "morning" && <MorningEditor day={day} patch={patch} />}
+            {item.key === "fuel" && <FuelEditor day={day} patch={patch} />}
+            {item.key === "steps" && <StepsEditor day={day} patch={patch} target={stepTarget} />}
+            {item.key === "zone2" && <Zone2Editor day={day} patch={patch} />}
+            {item.key === "metcon" && <MetconEditor day={day} patch={patch} />}
+          </ChecklistRow>
+        );
+      })}
+    </div>
+  );
+}
+
+type Summary = { value: ReactNode; sub?: ReactNode };
+
+/** Value column: light numerals, unit in mute — the same for every row. */
+function Value({ n, unit }: { n: ReactNode; unit?: string }) {
+  return (
+    <>
+      {n}
+      {unit && <span className="text-mute"> {unit}</span>}
+    </>
+  );
+}
+
+function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: LiftSummary): Summary {
+  switch (item.key) {
+    case "morning":
+      return {
+        value: day.weightLb !== null ? <Value n={fmt(day.weightLb, 1)} unit="lb" /> : null,
+        sub:
+          [day.sleepMinutes !== null && minutesToHM(day.sleepMinutes), day.hrvMs !== null && `HRV ${fmt(day.hrvMs)}`]
+            .filter(Boolean)
+            .join(" · ") || "Weight · sleep · HRV",
+      };
+    case "fuel":
+      return {
+        value: day.calories !== null ? <Value n={fmt(day.calories)} unit="kcal" /> : null,
+        sub: day.proteinG !== null ? `P ${fmt(day.proteinG)} · C ${fmt(day.carbsG)} · F ${fmt(day.fatG)}` : "Daily totals",
+      };
+    case "steps":
+      return {
+        value: day.steps !== null ? <Value n={fmt(day.steps)} /> : null,
+        sub: `Target ${compactSteps(stepTarget)}`,
+      };
+    case "zone2":
+      return {
+        value: day.zone2Done ? <Value n={fmt(day.zone2Minutes)} unit="min" /> : null,
+        sub: "Cycling",
+      };
+    case "metcon":
+      return {
+        value: day.metconScore ? <span className="block max-w-[8.5rem] truncate">{day.metconScore}</span> : null,
+        sub: day.metconBenchmark ?? (day.metconNotes ? day.metconNotes.slice(0, 40) : "CrossFit"),
+      };
+    case "lift":
+      return {
+        value: lift.setsTotal ? <Value n={`${lift.setsDone}/${lift.setsTotal}`} unit="sets" /> : null,
+        sub: [lift.label, lift.primaryName].filter(Boolean).join(" · ") || "Session",
+      };
+  }
+}
+
+/** Status-only dot: hidden from assistive tech (the row says done / not done), tap forwards to the row. */
+function StatusDot({ done, onActivate }: { done: boolean; onActivate?: () => void }) {
+  return (
+    <div className="-m-[9px] shrink-0 cursor-pointer p-[9px]" onClick={onActivate} aria-hidden="true">
+      <div inert>
+        <CheckDot done={done} />
+      </div>
+    </div>
+  );
+}
+
+function RowText({ item, summary, srState }: { item: ChecklistItem; summary: Summary; srState: boolean }) {
+  return (
+    <>
+      <span className="block min-w-0 flex-1">
+        <span className={clsx("block text-[15px]", item.done ? "text-fg" : "text-fg-2")}>
+          {item.label}
+          {srState && <span className="sr-only">{item.done ? ", done" : ", not done"}</span>}
+        </span>
+        {summary.sub && <span className="mt-0.5 block truncate text-xs text-mute">{summary.sub}</span>}
+        {item.key === "steps" && !item.done && item.progress > 0 && <Bar className="mt-2 w-32" value={item.progress} />}
+      </span>
+      {summary.value && <span className="num shrink-0 text-right text-lg font-light">{summary.value}</span>}
+    </>
+  );
+}
+
+function ChecklistRow({
+  item,
+  open,
+  onToggleOpen,
+  onCheck,
+  summary,
+  children,
+}: {
+  item: ChecklistItem;
+  open: boolean;
+  onToggleOpen: () => void;
+  /** A real done/not-done toggle (metcon, zone 2); `null` for items done by entering a value. */
+  onCheck: (() => void) | null;
+  summary: Summary;
+  children: ReactNode;
+}) {
+  const panelId = useId();
+  return (
+    <div
+      className="rounded-2xl transition-colors"
+      style={{ background: open ? "rgba(255,255,255,0.025)" : undefined }}
+      // While an editor is open, celebrations wait (see Celebrations).
+      data-celebration-hold={open ? "" : undefined}
+    >
+      <div className="flex items-center gap-4 px-1">
+        {onCheck ? (
+          <CheckDot done={item.done} onClick={onCheck} label={`${item.label} complete`} />
+        ) : (
+          <StatusDot done={item.done} onActivate={onToggleOpen} />
+        )}
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={panelId}
+          onClick={onToggleOpen}
+          className="flex min-w-0 flex-1 items-center gap-4 rounded-lg py-3.5 text-left"
+        >
+          <RowText item={item} summary={summary} srState={!onCheck} />
+        </button>
+      </div>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            id={panelId}
+            role="group"
+            aria-label={`${item.label} details`}
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="px-1 pt-1 pb-4 pl-[46px]">{children}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/** The lift is logged on Train: the whole row is a link there; the dot shows completion. */
+function LiftRow({ item, summary, href }: { item: ChecklistItem; summary: Summary; href: string }) {
+  const navigate = useNavigate();
+  return (
+    <div className="flex items-center gap-4 px-1">
+      <StatusDot done={item.done} onActivate={() => navigate(href)} />
+      <Link to={href} className="flex min-w-0 flex-1 items-center gap-4 rounded-lg py-3.5">
+        <RowText item={item} summary={summary} srState />
+      </Link>
+    </div>
+  );
+}

@@ -1,24 +1,142 @@
 import clsx from "clsx";
-import { useState } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { ChevronLeft, Download, LogOut, Plus, Trash2 } from "lucide-react";
 import { isISODate, startOfWeek, WEEKDAY_SHORT } from "../../shared/dates";
 import { repMaxPct } from "../../shared/program";
-import type { Program, ProgramWeek, Settings } from "../../shared/schemas";
+import { settingsSchema, type Program, type ProgramWeek, type Settings } from "../../shared/schemas";
+import { useToast } from "../components/Toast";
 import { BoxNumber, Field, Section, Toggle } from "../components/ui";
+import { useTitle } from "../components/useTitle";
+import { fmt } from "../lib/format";
 import { api } from "../lib/api";
 import { clearCache, useCreateExercise, useData, useSaveSettings, useUpdateExercise } from "../lib/store";
 
 // Weekday order shown Monday-first; values are JS weekday indices.
 const ORDER = [1, 2, 3, 4, 5, 6, 0];
 
+/** Human names for settings paths, so a rejected save reads "Steps target …", not "targets.steps: …". */
+const PATH_NAMES: Array<[RegExp, string]> = [
+  [/^targets\.steps/, "Steps target"],
+  [/^targets\.zone2Minutes/, "Zone 2 minutes"],
+  [/^nutrition\.proteinGPerLb/, "Protein"],
+  [/^nutrition\.fatGPerLb/, "Fat"],
+  [/^nutrition\.initialTdee/, "Maintenance estimate"],
+  [/^nutrition\.kcalPerLb/, "Calories per lb"],
+  [/^limits\.maxLoss/, "Max loss"],
+  [/^limits\.maxGain/, "Max gain"],
+  [/^program\.name/, "Program name"],
+  [/^program\.intensity/, "Working weight"],
+  [/^program\.roundToLb/, "Rounding"],
+  [/^program\.progression/, "Per extra rep"],
+  [/^program\.deloadAccessoryLoad/, "Deload accessories"],
+  [/^program\.repMaxPct/, "Rep-max table"],
+  [/^program\.weeks\.(\d+)/, "Week $1"],
+  [/^program\.weeks/, "Cycle weeks"],
+  [/^program\.days/, "Weekly layout"],
+  [/^program\.cycleStartDate/, "Cycle start date"],
+];
+
+/** A readable sentence for a schema issue. */
+function readableIssue(issue: { path: PropertyKey[]; code: string; message: string } & Record<string, unknown>): string {
+  const path = issue.path.join(".");
+  let name = "That value";
+  for (const [re, label] of PATH_NAMES) {
+    const m = path.match(re);
+    if (m) {
+      name = label.replace("$1", String(Number(m[1] ?? 0) + 1));
+      break;
+    }
+  }
+  if (issue.code === "too_big" && typeof issue.maximum === "number")
+    return `${name} can be at most ${fmt(issue.maximum, 2).replace(/\.?0+$/, "")}.`;
+  if (issue.code === "too_small" && typeof issue.minimum === "number")
+    return `${name} must be at least ${fmt(issue.minimum, 2).replace(/\.?0+$/, "")}.`;
+  if (issue.code === "invalid_type") return `${name} needs a number.`;
+  return `${name}: ${issue.message.toLowerCase()}.`;
+}
+
+/** Inline range check for a number setting; returns a message or null. */
+function rangeError(
+  v: number | null,
+  min: number,
+  max: number,
+  opts: { unit?: string; optional?: boolean; integer?: boolean } = {},
+): string | null {
+  if (v === null) return opts.optional ? null : "Enter a number.";
+  const u = opts.unit ?? "";
+  if (v < min || v > max) return `Between ${fmt(min, min % 1 ? 1 : 0)}${u} and ${fmt(max, max % 1 ? 1 : 0)}${u}.`;
+  if (opts.integer && !Number.isInteger(v)) return "Whole numbers only.";
+  return null;
+}
+
+/**
+ * A Field with a BoxNumber that validates on commit: an out-of-range value stays visible with an
+ * inline message (and isn't saved) until it's fixed.
+ */
+function NumSetting({
+  label,
+  hint,
+  value,
+  onSave,
+  min,
+  max,
+  unit,
+  decimals = 0,
+  optional,
+  integer,
+  placeholder,
+  grouping,
+  unitInMessage,
+}: {
+  label: ReactNode;
+  hint?: ReactNode;
+  value: number | null;
+  onSave: (v: number | null) => void;
+  min: number;
+  max: number;
+  unit?: string;
+  decimals?: number;
+  optional?: boolean;
+  integer?: boolean;
+  placeholder?: string;
+  grouping?: boolean;
+  unitInMessage?: string;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <Field label={label} hint={hint} error={error}>
+      <BoxNumber
+        ariaLabel={typeof label === "string" ? label : "Value"}
+        value={value}
+        unit={unit}
+        decimals={decimals}
+        placeholder={placeholder}
+        grouping={grouping}
+        onCommit={(v) => {
+          const e = rangeError(v, min, max, { unit: unitInMessage, optional, integer });
+          setError(e);
+          if (!e) onSave(v);
+        }}
+      />
+    </Field>
+  );
+}
+
 export function SettingsScreen() {
   const { data } = useData();
   const saveSettings = useSaveSettings();
   const s = data.settings;
   const [error, setError] = useState<string | null>(null);
+  useTitle("Settings");
 
   const save = (next: Settings) => {
+    // Validate here with the server's own schema, so a bad value never leaves the device.
+    const r = settingsSchema.safeParse(next);
+    if (!r.success) {
+      setError(readableIssue(r.error.issues[0] as unknown as Parameters<typeof readableIssue>[0]));
+      return;
+    }
     setError(null);
     saveSettings(next).catch((e: unknown) => setError(e instanceof Error ? e.message : "Couldn't save."));
   };
@@ -27,96 +145,117 @@ export function SettingsScreen() {
   return (
     <div>
       <header className="flex items-center gap-2 pt-2">
-        <Link to="/" aria-label="Back" className="tap -ml-2 p-2 text-mute">
+        <Link to="/" aria-label="Back" className="tap -my-2 -ml-3 grid h-11 w-11 place-items-center text-mute">
           <ChevronLeft size={18} />
         </Link>
         <div className="label text-fg-2">Settings</div>
       </header>
-      <h1 className="mt-6 text-[44px] leading-none font-light tracking-tight">The rules</h1>
+      <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">The rules</h1>
       <p className="mt-3 text-sm text-mute">Nothing here is set in stone. Change it and everything recalculates.</p>
-      {error && <p className="mt-4 text-sm text-warn">{error}</p>}
+      {error && (
+        <p role="alert" className="mt-4 text-sm text-warn">
+          {error}
+        </p>
+      )}
 
       <Section label="Daily targets">
         <div className="divide-y divide-white/[0.04]">
-          <Field label="Steps">
-            <BoxNumber
-              ariaLabel="Steps target"
-              value={s.targets.steps}
-              onCommit={(v) => v !== null && save({ ...s, targets: { ...s.targets, steps: v } })}
-            />
-          </Field>
-          <Field label="Zone 2" hint="Default duration when you check it off">
-            <BoxNumber
-              ariaLabel="Zone 2 minutes"
-              value={s.targets.zone2Minutes}
-              unit="min"
-              onCommit={(v) => v !== null && save({ ...s, targets: { ...s.targets, zone2Minutes: v } })}
-            />
-          </Field>
+          <NumSetting
+            label="Steps"
+            value={s.targets.steps}
+            min={0}
+            max={100_000}
+            integer
+            grouping
+            onSave={(v) => v !== null && save({ ...s, targets: { ...s.targets, steps: v } })}
+          />
+          <NumSetting
+            label="Zone 2"
+            hint="Default duration when you check it off"
+            value={s.targets.zone2Minutes}
+            unit="min"
+            min={0}
+            max={600}
+            unitInMessage=" min"
+            onSave={(v) => v !== null && save({ ...s, targets: { ...s.targets, zone2Minutes: v } })}
+          />
         </div>
       </Section>
 
       <Section label="Schedule">
         <DayPicker label="Metcon" value={s.schedule.metcon} onChange={(metcon) => save({ ...s, schedule: { ...s.schedule, metcon } })} />
-        <div className="h-5" />
+        <div className="h-6" />
         <DayPicker label="Zone 2" value={s.schedule.zone2} onChange={(zone2) => save({ ...s, schedule: { ...s.schedule, zone2 } })} />
       </Section>
 
       <Section label="Nutrition">
         <div className="divide-y divide-white/[0.04]">
-          <Field label="Protein" hint="Grams per lb of trend bodyweight">
-            <BoxNumber
-              ariaLabel="Protein per lb"
-              value={s.nutrition.proteinGPerLb}
-              decimals={2}
-              unit="g/lb"
-              onCommit={(v) => v !== null && save({ ...s, nutrition: { ...s.nutrition, proteinGPerLb: v } })}
-            />
-          </Field>
-          <Field label="Fat" hint="Grams per lb; carbs fill the rest">
-            <BoxNumber
-              ariaLabel="Fat per lb"
-              value={s.nutrition.fatGPerLb}
-              decimals={2}
-              unit="g/lb"
-              onCommit={(v) => v !== null && save({ ...s, nutrition: { ...s.nutrition, fatGPerLb: v } })}
-            />
-          </Field>
-          <Field label="Maintenance estimate" hint="Blended in while the TDEE calibrates">
-            <BoxNumber
-              ariaLabel="Maintenance estimate"
-              value={s.nutrition.initialTdee}
-              unit="kcal"
-              placeholder="auto"
-              onCommit={(v) => save({ ...s, nutrition: { ...s.nutrition, initialTdee: v } })}
-            />
-          </Field>
-          <Field label="Energy per lb">
-            <BoxNumber
-              ariaLabel="Calories per pound"
-              value={s.nutrition.kcalPerLb}
-              unit="kcal"
-              onCommit={(v) => v !== null && save({ ...s, nutrition: { ...s.nutrition, kcalPerLb: v } })}
-            />
-          </Field>
-          <Field label="Max loss" hint="% bodyweight per week">
-            <BoxNumber
-              ariaLabel="Max loss per week"
-              value={s.limits.maxLossPctPerWeek}
-              decimals={2}
-              unit="%"
-              onCommit={(v) => v !== null && save({ ...s, limits: { ...s.limits, maxLossPctPerWeek: v } })}
-            />
-          </Field>
-          <Field label="Max gain" hint="% bodyweight per week">
-            <BoxNumber
-              ariaLabel="Max gain per week"
-              value={s.limits.maxGainPctPerWeek}
-              decimals={2}
-              unit="%"
-              onCommit={(v) => v !== null && save({ ...s, limits: { ...s.limits, maxGainPctPerWeek: v } })}
-            />
-          </Field>
+          <NumSetting
+            label="Protein"
+            hint="Grams per lb of trend bodyweight"
+            value={s.nutrition.proteinGPerLb}
+            decimals={2}
+            unit="g/lb"
+            min={0}
+            max={3}
+            unitInMessage=" g"
+            onSave={(v) => v !== null && save({ ...s, nutrition: { ...s.nutrition, proteinGPerLb: v } })}
+          />
+          <NumSetting
+            label="Fat"
+            hint="Grams per lb; carbs fill the rest"
+            value={s.nutrition.fatGPerLb}
+            decimals={2}
+            unit="g/lb"
+            min={0}
+            max={2}
+            unitInMessage=" g"
+            onSave={(v) => v !== null && save({ ...s, nutrition: { ...s.nutrition, fatGPerLb: v } })}
+          />
+          <NumSetting
+            label="Maintenance estimate"
+            hint="Blended in while the TDEE calibrates. Leave empty for auto."
+            value={s.nutrition.initialTdee}
+            unit="kcal"
+            placeholder="auto"
+            optional
+            grouping
+            min={800}
+            max={10_000}
+            onSave={(v) => save({ ...s, nutrition: { ...s.nutrition, initialTdee: v } })}
+          />
+          <NumSetting
+            label="Calories per lb"
+            hint="Energy in a pound of bodyweight change"
+            value={s.nutrition.kcalPerLb}
+            unit="kcal"
+            grouping
+            min={1000}
+            max={6000}
+            onSave={(v) => v !== null && save({ ...s, nutrition: { ...s.nutrition, kcalPerLb: v } })}
+          />
+          <NumSetting
+            label="Max loss"
+            hint="% bodyweight per week"
+            value={s.limits.maxLossPctPerWeek}
+            decimals={2}
+            unit="%"
+            min={0}
+            max={3}
+            unitInMessage="%"
+            onSave={(v) => v !== null && save({ ...s, limits: { ...s.limits, maxLossPctPerWeek: v } })}
+          />
+          <NumSetting
+            label="Max gain"
+            hint="% bodyweight per week"
+            value={s.limits.maxGainPctPerWeek}
+            decimals={2}
+            unit="%"
+            min={0}
+            max={3}
+            unitInMessage="%"
+            onSave={(v) => v !== null && save({ ...s, limits: { ...s.limits, maxGainPctPerWeek: v } })}
+          />
         </div>
       </Section>
 
@@ -142,29 +281,34 @@ export function SettingsScreen() {
           </button>
         </div>
       </Section>
-      <p className="mt-12 text-center text-[11px] text-faint">Strawvine · built for pushing boundaries</p>
+      <p className="mt-12 text-center text-[0.6875rem] text-faint">Strawvine · built for pushing boundaries</p>
     </div>
   );
 }
 
 function DayPicker({ label, value, onChange }: { label: string; value: boolean[]; onChange: (v: boolean[]) => void }) {
   return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-sm text-fg-2">{label}</span>
-      <div className="flex gap-1">
+    <div role="group" aria-label={`${label} days`}>
+      <div className="mb-1 text-sm text-fg-2">{label}</div>
+      {/* Seven equal cells: each is a full 44px-tall target around a small round day. */}
+      <div className="grid max-w-sm grid-cols-7">
         {ORDER.map((d) => (
           <button
             key={d}
             type="button"
             aria-pressed={value[d]}
-            aria-label={`${label} on ${WEEKDAY_SHORT[d]}`}
+            aria-label={WEEKDAY_SHORT[d]}
             onClick={() => onChange(value.map((x, i) => (i === d ? !x : x)))}
-            className={clsx(
-              "tap grid h-8 w-8 place-items-center rounded-full text-[11px] font-medium",
-              value[d] ? "bg-accent text-accent-ink" : "bg-white/[0.04] text-mute",
-            )}
+            className="tap grid h-11 place-items-center"
           >
-            {WEEKDAY_SHORT[d]![0]}
+            <span
+              className={clsx(
+                "grid h-8 w-8 place-items-center rounded-full text-[0.6875rem] font-medium",
+                value[d] ? "bg-accent text-accent-ink" : "bg-white/[0.04] text-mute",
+              )}
+            >
+              {WEEKDAY_SHORT[d]![0]}
+            </span>
           </button>
         ))}
       </div>
@@ -174,72 +318,121 @@ function DayPicker({ label, value, onChange }: { label: string; value: boolean[]
 
 function RepsInput({ value, onCommit, ariaLabel }: { value: number[]; onCommit: (v: number[]) => void; ariaLabel: string }) {
   const [text, setText] = useState(value.join(", "));
+  const [error, setError] = useState<string | null>(null);
+  const errId = useId();
   return (
-    <input
-      aria-label={ariaLabel}
-      value={text}
-      inputMode="numeric"
-      onChange={(e) => setText(e.target.value)}
-      onBlur={() => {
-        const reps = text
-          .split(/[\s,/]+/)
-          .map(Number)
-          .filter((n) => Number.isInteger(n) && n > 0 && n <= 50);
-        if (reps.length) onCommit(reps);
-        setText((reps.length ? reps : value).join(", "));
-      }}
-      className="field num w-full rounded-xl bg-white/[0.05] px-3 py-2 text-sm"
-    />
+    <div>
+      <input
+        aria-label={ariaLabel}
+        aria-invalid={!!error || undefined}
+        aria-describedby={error ? errId : undefined}
+        value={text}
+        inputMode="numeric"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          const parts = text.split(/[\s,/]+/).filter(Boolean);
+          const reps = parts.map(Number);
+          const ok = reps.length > 0 && reps.length <= 12 && reps.every((n) => Number.isInteger(n) && n > 0 && n <= 50);
+          if (!ok) {
+            setError(
+              reps.length > 12
+                ? "Up to 12 sets."
+                : reps.length === 0
+                  ? "Enter the reps for each set, e.g. 5, 5, 5."
+                  : "Reps are whole numbers from 1 to 50.",
+            );
+            return;
+          }
+          setError(null);
+          if (reps.join() !== value.join()) onCommit(reps);
+          setText(reps.join(", "));
+        }}
+        className="field num w-full rounded-xl bg-white/[0.05] px-3 py-2 text-base"
+      />
+      {error && (
+        <div id={errId} role="alert" className="mt-1.5 text-xs text-warn">
+          {error}
+        </div>
+      )}
+    </div>
   );
 }
 
 function ProgramEditor({ program, setProgram }: { program: Program; setProgram: (p: Partial<Program>) => void }) {
   const { data } = useData();
+  const toast = useToast();
   const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
   const setWeek = (i: number, w: Partial<ProgramWeek>) =>
     setProgram({ weeks: program.weeks.map((x, j) => (j === i ? { ...x, ...w } : x)) });
   const tableReps = Object.keys(program.repMaxPct)
     .map(Number)
     .sort((a, b) => a - b);
+  // Undo runs from a toast, later: restore into the program as it is then.
+  const latest = useRef(program);
+  latest.current = program;
+  const [nameError, setNameError] = useState<string | null>(null);
 
   return (
     <>
       <Section label="Program">
         <div className="divide-y divide-white/[0.04]">
-          <Field label="Name">
+          {/* Long names need the full width: label above, input below. */}
+          <div className="py-3">
+            <label htmlFor="program-name" className="text-sm text-fg-2">
+              Program name
+            </label>
             <input
-              aria-label="Program name"
+              id="program-name"
               defaultValue={program.name}
-              onBlur={(e) => e.target.value.trim() && e.target.value !== program.name && setProgram({ name: e.target.value.trim() })}
-              className="field w-44 rounded-xl bg-white/[0.05] px-3 py-2 text-right text-sm"
+              maxLength={60}
+              aria-invalid={!!nameError || undefined}
+              aria-describedby={nameError ? "program-name-error" : undefined}
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (!v) {
+                  setNameError("Give the program a name.");
+                  return;
+                }
+                setNameError(null);
+                if (v !== program.name) setProgram({ name: v });
+              }}
+              className="field mt-2 rounded-xl bg-white/[0.05] px-3 py-2 text-base"
             />
-          </Field>
-          <Field label="Cycle 1 starts" hint="Snaps to that week's Monday">
+            {nameError && (
+              <div id="program-name-error" role="alert" className="mt-1.5 text-xs text-warn">
+                {nameError}
+              </div>
+            )}
+          </div>
+          <Field label="Cycle start date" hint="Snaps to that week's Monday">
             <input
               type="date"
-              aria-label="Cycle start date"
               value={program.cycleStartDate}
               onChange={(e) => isISODate(e.target.value) && setProgram({ cycleStartDate: startOfWeek(e.target.value) })}
-              className="field num rounded-xl bg-white/[0.05] px-3 py-2 text-sm [color-scheme:dark]"
+              className="field num rounded-xl bg-white/[0.05] px-3 py-2 text-base [color-scheme:dark]"
             />
           </Field>
-          <Field label="Working weight" hint="% of the N-rep max">
-            <BoxNumber
-              ariaLabel="Working weight percent"
-              value={Math.round(program.intensity * 100)}
-              unit="%"
-              onCommit={(v) => v !== null && setProgram({ intensity: v / 100 })}
-            />
-          </Field>
-          <Field label="Round to">
-            <BoxNumber
-              ariaLabel="Rounding increment"
-              value={program.roundToLb}
-              decimals={1}
-              unit="lb"
-              onCommit={(v) => v !== null && v > 0 && setProgram({ roundToLb: v })}
-            />
-          </Field>
+          <NumSetting
+            label="Working weight"
+            hint="% of the N-rep max"
+            value={Math.round(program.intensity * 100)}
+            unit="%"
+            min={30}
+            max={120}
+            unitInMessage="%"
+            onSave={(v) => v !== null && setProgram({ intensity: v / 100 })}
+          />
+          <NumSetting
+            label="Round weights to"
+            hint="Nearest plate increment"
+            value={program.roundToLb}
+            decimals={1}
+            unit="lb"
+            min={0.5}
+            max={25}
+            unitInMessage=" lb"
+            onSave={(v) => v !== null && setProgram({ roundToLb: v })}
+          />
           <Field label="AMRAP last set" hint="Main lift, non-deload weeks">
             <Toggle label="AMRAP last set" on={program.amrapLastSet} onChange={(v) => setProgram({ amrapLastSet: v })} />
           </Field>
@@ -251,43 +444,51 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
             />
           </Field>
           {program.progression.enabled && (
-            <Field label="Per extra rep">
-              <BoxNumber
-                ariaLabel="Pounds per extra rep"
-                value={program.progression.lbPerExtraRep}
-                decimals={1}
-                unit="lb"
-                onCommit={(v) => v !== null && setProgram({ progression: { ...program.progression, lbPerExtraRep: v } })}
-              />
-            </Field>
-          )}
-          <Field label="Deload accessories" hint="% of normal load">
-            <BoxNumber
-              ariaLabel="Deload accessory load"
-              value={Math.round(program.deloadAccessoryLoad * 100)}
-              unit="%"
-              onCommit={(v) => v !== null && setProgram({ deloadAccessoryLoad: v / 100 })}
+            <NumSetting
+              label="Per extra rep"
+              value={program.progression.lbPerExtraRep}
+              decimals={1}
+              unit="lb"
+              min={0}
+              max={25}
+              unitInMessage=" lb"
+              onSave={(v) => v !== null && setProgram({ progression: { ...program.progression, lbPerExtraRep: v } })}
             />
-          </Field>
+          )}
+          <NumSetting
+            label="Deload accessories"
+            hint="% of normal load"
+            value={Math.round(program.deloadAccessoryLoad * 100)}
+            unit="%"
+            min={30}
+            max={100}
+            unitInMessage="%"
+            onSave={(v) => v !== null && setProgram({ deloadAccessoryLoad: v / 100 })}
+          />
         </div>
       </Section>
 
-      <Section label="Cycle weeks" right={<span className="label text-faint">{program.weeks.length}</span>}>
-        <div className="space-y-5">
+      <Section label="Cycle weeks" right={<span className="label">{program.weeks.length}</span>}>
+        <div className="space-y-6">
           {program.weeks.map((w, i) => (
             <div key={i}>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="label w-5 text-accent">{String(i + 1).padStart(2, "0")}</span>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="label w-5 shrink-0 text-accent" aria-hidden>
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
                   <input
-                    aria-label={`Week ${i + 1} label`}
+                    aria-label={`Week ${i + 1} name`}
                     defaultValue={w.label}
+                    maxLength={40}
                     onBlur={(e) => e.target.value !== w.label && setWeek(i, { label: e.target.value })}
-                    className="field w-28 text-sm"
+                    className="field w-32 min-w-0 py-1 text-sm"
                   />
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-mute">Deload</span>
+                <div className="flex shrink-0 items-center gap-3">
+                  <span className="text-xs text-mute" aria-hidden>
+                    Deload
+                  </span>
                   <Toggle
                     label={`Week ${i + 1} deload`}
                     on={w.deload}
@@ -297,32 +498,46 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
                     <button
                       type="button"
                       aria-label={`Remove week ${i + 1}`}
-                      className="tap p-1 text-faint"
-                      onClick={() => setProgram({ weeks: program.weeks.filter((_, j) => j !== i) })}
+                      className="tap -my-2 -mr-3 grid h-11 w-11 place-items-center text-mute"
+                      onClick={() => {
+                        setProgram({ weeks: program.weeks.filter((_, j) => j !== i) });
+                        toast.show({
+                          message: `Week ${i + 1} removed`,
+                          action: {
+                            label: "Undo",
+                            onAction: () => {
+                              const weeks = [...latest.current.weeks];
+                              weeks.splice(Math.min(i, weeks.length), 0, w);
+                              setProgram({ weeks });
+                            },
+                          },
+                        });
+                      }}
                     >
                       <Trash2 size={14} />
                     </button>
                   )}
                 </div>
               </div>
-              <div className="flex items-center gap-3 pl-7">
-                <div className="flex-1">
+              <div className="flex items-start gap-3 pl-7">
+                <div className="min-w-0 flex-1">
                   <RepsInput
                     key={w.reps.join()}
-                    ariaLabel={`Week ${i + 1} reps`}
+                    ariaLabel={`Week ${i + 1} reps per set`}
                     value={w.reps}
                     onCommit={(reps) => setWeek(i, { reps })}
                   />
                 </div>
                 {w.deload && (
-                  <div className="flex items-center gap-2 text-xs text-mute">
-                    @{" "}
+                  <div className="flex shrink-0 items-center gap-2 pt-1 text-xs text-mute">
+                    <span aria-hidden>@</span>
                     <BoxNumber
-                      ariaLabel={`Week ${i + 1} basis reps`}
+                      ariaLabel={`Week ${i + 1} load based on rep max`}
                       value={w.basisReps}
-                      onCommit={(v) => setWeek(i, { basisReps: v })}
+                      onCommit={(v) => v !== null && v >= 1 && v <= 50 && setWeek(i, { basisReps: Math.round(v) })}
+                      min={1}
+                      max={50}
                       unit="RM"
-                      inputClassName="w-8 text-right text-sm"
                     />
                   </div>
                 )}
@@ -333,6 +548,7 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
         <button
           type="button"
           className="btn-ghost mt-6"
+          disabled={program.weeks.length >= 16}
           onClick={() =>
             setProgram({
               weeks: [...program.weeks, { label: `Week ${program.weeks.length + 1}`, deload: false, reps: [5, 5, 5, 5], basisReps: null }],
@@ -347,6 +563,7 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
         <div className="space-y-1">
           {ORDER.map((wd) => {
             const day = program.days[String(wd)];
+            const name = WEEKDAY_SHORT[wd]!;
             const setDay = (patch: Partial<NonNullable<typeof day>> | null) => {
               const days = { ...program.days };
               if (patch === null) delete days[String(wd)];
@@ -355,27 +572,28 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
             };
             return (
               <div key={wd} className="py-3">
-                <div className="flex items-center justify-between">
-                  <span className={clsx("w-10 text-sm", day ? "text-fg" : "text-faint")}>{WEEKDAY_SHORT[wd]}</span>
+                <div className="flex items-center justify-between gap-3">
+                  <span className={clsx("w-10 shrink-0 text-sm", day ? "text-fg" : "text-mute")}>{name}</span>
                   {day ? (
                     <input
-                      aria-label={`${WEEKDAY_SHORT[wd]} label`}
+                      aria-label={`${name} session name`}
                       defaultValue={day.label}
+                      maxLength={40}
                       onBlur={(e) => e.target.value !== day.label && setDay({ label: e.target.value || "Training" })}
-                      className="field min-w-0 flex-1 text-sm text-fg-2"
+                      className="field min-w-0 flex-1 py-1 text-sm text-fg-2"
                     />
                   ) : (
-                    <span className="flex-1 text-sm text-faint">No lifting</span>
+                    <span className="flex-1 text-sm text-mute">No lifting</span>
                   )}
-                  <Toggle label={`${WEEKDAY_SHORT[wd]} lifting day`} on={!!day} onChange={(v) => setDay(v ? {} : null)} />
+                  <Toggle label={`${name} lifting day`} on={!!day} onChange={(v) => setDay(v ? {} : null)} />
                 </div>
                 {day && (
-                  <div className="mt-2 flex items-center gap-3 pl-10">
+                  <div className="mt-2 flex items-center gap-3 min-[25rem]:pl-[3.25rem]">
                     <select
-                      aria-label={`${WEEKDAY_SHORT[wd]} main lift`}
+                      aria-label={`${name} main lift`}
                       value={day.primaryExerciseId ?? ""}
                       onChange={(e) => setDay({ primaryExerciseId: e.target.value ? Number(e.target.value) : null })}
-                      className="field flex-1 rounded-xl bg-white/[0.05] px-3 py-2 text-sm [color-scheme:dark]"
+                      className="field min-w-0 flex-1 rounded-xl bg-white/[0.05] px-3 py-2 text-base [color-scheme:dark]"
                     >
                       <option value="">No main lift</option>
                       {tracked.map((e) => (
@@ -384,8 +602,10 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
                         </option>
                       ))}
                     </select>
-                    <span className="text-xs text-mute">AMRAP</span>
-                    <Toggle label={`${WEEKDAY_SHORT[wd]} progression`} on={day.progression} onChange={(v) => setDay({ progression: v })} />
+                    <span className="text-xs text-mute" aria-hidden>
+                      AMRAP
+                    </span>
+                    <Toggle label={`${name} AMRAP progression`} on={day.progression} onChange={(v) => setDay({ progression: v })} />
                   </div>
                 )}
               </div>
@@ -396,17 +616,22 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
 
       <Section label="Rep-max table">
         <p className="mb-4 text-xs text-mute">The % of your max you could lift for N reps. Missing counts are interpolated.</p>
-        <div className="grid grid-cols-3 gap-x-5 gap-y-3">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-3 min-[25rem]:grid-cols-3 min-[25rem]:gap-x-5">
           {tableReps.map((r) => (
-            <div key={r} className="flex items-center justify-between">
-              <span className="num text-xs text-mute">{r} RM</span>
+            <div key={r} className="flex items-center justify-between gap-2">
+              <span className="num text-xs text-mute" aria-hidden>
+                {r} RM
+              </span>
               <BoxNumber
-                ariaLabel={`${r} rep max percent`}
+                ariaLabel={`${r} RM percent of max`}
                 value={Math.round(repMaxPct(program.repMaxPct, r) * 1000) / 10}
                 decimals={1}
-                inputClassName="w-10 text-right text-sm"
                 className="px-2 py-1"
                 onCommit={(v) => {
+                  if (v !== null && (v < 10 || v > 100)) {
+                    toast.show({ message: `${r} RM: enter a percent between 10 and 100.`, tone: "warn" });
+                    return;
+                  }
                   const next = { ...program.repMaxPct };
                   if (v === null) delete next[String(r)];
                   else next[String(r)] = v / 100;
@@ -423,6 +648,7 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
 
 function LiftsEditor() {
   const { data } = useData();
+  const toast = useToast();
   const updateExercise = useUpdateExercise();
   const createExercise = useCreateExercise();
   const [name, setName] = useState("");
@@ -432,33 +658,50 @@ function LiftsEditor() {
     <Section
       label="Exercise library"
       right={
-        <button type="button" className="label text-faint" onClick={() => setShowArchived(!showArchived)}>
+        <button
+          type="button"
+          aria-pressed={showArchived}
+          className="label hit -my-2 py-2 text-mute"
+          onClick={() => setShowArchived(!showArchived)}
+        >
           {showArchived ? "hide archived" : "show archived"}
         </button>
       }
     >
       <div className="divide-y divide-white/[0.04]">
         {list.map((e) => (
-          <div key={e.id} className={clsx("flex items-center gap-3 py-2.5", e.archived && "opacity-40")}>
+          <div key={e.id} className={clsx("flex items-center gap-3 py-2", e.archived && "opacity-50")}>
             <input
-              aria-label="Exercise name"
+              aria-label={`Rename ${e.name}`}
               defaultValue={e.name}
+              maxLength={80}
               onBlur={(ev) =>
                 ev.target.value.trim() && ev.target.value !== e.name && void updateExercise(e.id, { name: ev.target.value.trim() })
               }
-              className="field min-w-0 flex-1 text-sm"
+              className="field min-w-0 flex-1 py-1 text-sm"
             />
             <button
               type="button"
+              aria-pressed={e.tracksMax}
+              aria-label={`${e.name}: track max`}
               onClick={() => void updateExercise(e.id, { tracksMax: !e.tracksMax })}
-              className={clsx("chip", e.tracksMax ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-faint")}
+              className={clsx("chip", e.tracksMax ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-mute")}
             >
               max
             </button>
             <button
               type="button"
-              onClick={() => void updateExercise(e.id, { archived: !e.archived })}
-              className="chip bg-white/[0.04] text-faint"
+              aria-label={`${e.name}: ${e.archived ? "restore" : "archive"}`}
+              onClick={() => {
+                const archived = !e.archived;
+                void updateExercise(e.id, { archived });
+                if (archived && !showArchived)
+                  toast.show({
+                    message: `${e.name} archived`,
+                    action: { label: "Undo", onAction: () => void updateExercise(e.id, { archived: false }) },
+                  });
+              }}
+              className="chip bg-white/[0.04] text-mute"
             >
               {e.archived ? "restore" : "archive"}
             </button>
@@ -467,16 +710,17 @@ function LiftsEditor() {
       </div>
       <div className="mt-4 flex gap-3">
         <input
-          aria-label="New exercise name"
+          aria-label="New lift name"
           value={name}
+          maxLength={80}
           onChange={(e) => setName(e.target.value)}
           placeholder="New lift…"
-          className="field min-w-0 flex-1 rounded-xl bg-white/[0.05] px-3 py-2 text-sm"
+          className="field min-w-0 flex-1 rounded-xl bg-white/[0.05] px-3 py-2 text-base"
         />
         <button
           type="button"
           disabled={!name.trim()}
-          className="btn-ghost disabled:opacity-30"
+          className="btn-ghost shrink-0"
           onClick={async () => {
             await createExercise({ name: name.trim(), category: "primary", measure: "reps", tracksMax: true });
             setName("");

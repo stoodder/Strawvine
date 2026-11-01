@@ -1,6 +1,7 @@
 /**
  * App-wide toasts: transient messages with an optional action (e.g. Undo / Retry).
  * Also the app's polite live region, so messages are announced to screen readers.
+ * Rendered into document.body (outside #root) so it stays interactive while a sheet makes #root inert.
  *
  *   const toast = useToast();
  *   toast.show({ message: "Week removed", action: { label: "Undo", onAction: restore } });
@@ -9,6 +10,7 @@
 import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 export interface ToastInput {
   message: string;
@@ -73,42 +75,46 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={api}>
       {children}
-      <div
-        role="status"
-        aria-live="polite"
-        className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] z-[55] mx-auto flex max-w-lg flex-col items-center gap-2 px-5"
-      >
-        <AnimatePresence initial={false}>
-          {items.map((t) => (
-            <motion.div
-              key={t.id}
-              layout
-              initial={{ y: 16, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              exit={{ y: 16, opacity: 0 }}
-              transition={{ type: "spring", stiffness: 420, damping: 34 }}
-              className={clsx(
-                "pointer-events-auto flex w-full items-center gap-3 rounded-2xl bg-ink-700/95 py-2.5 pr-2 pl-4 text-sm shadow-[0_10px_40px_-10px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.06] backdrop-blur-xl",
-                t.tone === "warn" ? "text-warn" : t.tone === "good" ? "text-accent" : "text-fg",
-              )}
-            >
-              <span className="min-w-0 flex-1">{t.message}</span>
-              {t.action && (
-                <button
-                  type="button"
-                  className="tap min-h-11 shrink-0 rounded-full px-4 font-medium text-accent"
-                  onClick={() => {
-                    t.action!.onAction();
-                    dismiss(t.id);
-                  }}
-                >
-                  {t.action.label}
-                </button>
-              )}
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
+      {/* Portaled outside #root: sheets make #root inert, and Undo must stay reachable. */}
+      {createPortal(
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] z-[55] mx-auto flex max-w-lg flex-col items-center gap-2 px-5"
+        >
+          <AnimatePresence initial={false}>
+            {items.map((t) => (
+              <motion.div
+                key={t.id}
+                layout
+                initial={{ y: 16, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: 16, opacity: 0 }}
+                transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                className={clsx(
+                  "pointer-events-auto flex w-full items-center gap-3 rounded-2xl bg-ink-700/95 py-2.5 pr-2 pl-4 text-sm shadow-[0_10px_40px_-10px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.06] backdrop-blur-xl",
+                  t.tone === "warn" ? "text-warn" : t.tone === "good" ? "text-accent" : "text-fg",
+                )}
+              >
+                <span className="min-w-0 flex-1">{t.message}</span>
+                {t.action && (
+                  <button
+                    type="button"
+                    className="tap min-h-11 shrink-0 rounded-full px-4 font-medium text-accent"
+                    onClick={() => {
+                      t.action!.onAction();
+                      dismiss(t.id);
+                    }}
+                  >
+                    {t.action.label}
+                  </button>
+                )}
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>,
+        document.body,
+      )}
     </ToastContext.Provider>
   );
 }

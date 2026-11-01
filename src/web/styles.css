@@ -20,7 +20,8 @@
   --color-fg: #eceef1;
   --color-fg-2: #b4b9c2;
   --color-mute: #7d838e;
-  --color-faint: #4f555f;
+  /* Decoration, hairlines and placeholders only (≈4:1). Information-bearing text uses mute (≈5.2:1). */
+  --color-faint: #6b717c;
 
   --color-accent: #b7f36a;
   --color-accent-2: #8fd14a;
@@ -76,16 +77,23 @@
     -moz-appearance: textfield;
   }
   :focus-visible {
-    outline: 1.5px solid rgb(183 243 106 / 0.7);
+    outline: 2px solid rgb(183 243 106 / 0.75);
     outline-offset: 2px;
     border-radius: 6px;
+  }
+}
+
+/* Reduced motion: keep the calm, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse {
+    animation: none;
   }
 }
 
 /* Custom utilities (Tailwind v4 @utility so they can be composed with @apply). */
 @utility label {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 0.65625rem; /* 10.5px at default size; scales with the user's font size */
   text-transform: uppercase;
   letter-spacing: 0.16em;
   color: var(--color-mute);
@@ -105,18 +113,85 @@
 @utility glow-gold {
   filter: drop-shadow(0 0 14px rgb(244 184 96 / 0.4));
 }
+/*
+ * Text inputs. Box-less fields carry a faint bottom hairline (an "editable" affordance) that
+ * brightens on focus; boxed ones (a rounded field, or a `box-field` wrapper) get an inset ring
+ * that turns lime on focus. Either way the indicator replaces the generic focus outline.
+ */
 @utility field {
   width: 100%;
   background: transparent;
-  outline: none;
+  box-shadow: inset 0 -1px 0 rgb(255 255 255 / 0.08);
+  transition: box-shadow 150ms var(--ease-out-soft);
   &::placeholder {
     color: var(--color-faint);
+  }
+  &:focus,
+  &:focus-visible {
+    outline: none;
+    box-shadow: inset 0 -2px 0 rgb(183 243 106 / 0.75);
+  }
+  &[class*="rounded"] {
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
+  }
+  &[class*="rounded"]:focus,
+  &[class*="rounded"]:focus-visible {
+    box-shadow: inset 0 0 0 1px rgb(183 243 106 / 0.6);
+  }
+  /* The caller draws the line/box (and its focus state) on a wrapper. */
+  &.field-plain,
+  &.field-plain:focus,
+  &.field-plain:focus-visible {
+    box-shadow: none;
+  }
+}
+/* A boxed wrapper around a bare field (BoxNumber). */
+@utility box-field {
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
+  transition: box-shadow 150ms var(--ease-out-soft);
+  &:focus-within {
+    box-shadow: inset 0 0 0 1px rgb(183 243 106 / 0.6);
+  }
+  & .field,
+  & .field:focus,
+  & .field:focus-visible {
+    box-shadow: none;
+  }
+}
+/* Number inputs that size to their content (falls back to an inline ch width). */
+@utility size-to-content {
+  @supports (field-sizing: content) {
+    field-sizing: content;
+    width: auto !important;
+    min-width: 1.5ch;
   }
 }
 @utility tap {
   transition: transform 150ms var(--ease-out-soft);
-  &:active {
-    transform: scale(0.97);
+  @media (prefers-reduced-motion: no-preference) {
+    &:active {
+      transform: scale(0.97);
+    }
+  }
+}
+/*
+ * Enlarge an element's hit area without changing how it looks: an invisible pseudo-element
+ * extends 8px on every side (use hit-lg for 12px). The element needs no other ::after.
+ */
+@utility hit {
+  position: relative;
+  &::after {
+    content: "";
+    position: absolute;
+    inset: -0.5rem;
+  }
+}
+@utility hit-lg {
+  position: relative;
+  &::after {
+    content: "";
+    position: absolute;
+    inset: -0.75rem;
   }
 }
 @utility btn {
@@ -124,12 +199,71 @@
 }
 @utility btn-primary {
   @apply btn bg-accent text-accent-ink shadow-[0_0_32px_-8px_rgb(183_243_106/0.6)];
+  /* Disabled reads as a quiet ghost, not a muddy olive. */
+  &:disabled {
+    background: rgb(255 255 255 / 0.05);
+    color: var(--color-mute);
+    box-shadow: none;
+    cursor: default;
+  }
 }
 @utility btn-ghost {
   @apply btn bg-white/[0.04] text-fg-2 hover:bg-white/[0.07];
+  &:disabled {
+    color: var(--color-faint);
+    cursor: default;
+  }
 }
+/* Chips keep their small look; the hit area reaches 44px tall. */
 @utility chip {
-  @apply tap inline-flex items-center rounded-full px-3 py-1 text-xs font-medium;
+  @apply tap hit inline-flex min-h-9 items-center rounded-full px-3 py-1 text-xs font-medium;
+}
+/*
+ * A range input whose box is a 44px tap target: the track is drawn by the element behind it
+ * (see PaceSlider), the input itself only paints the thumb.
+ */
+@utility range {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+  &::-webkit-slider-runnable-track {
+    background: transparent;
+    height: 100%;
+  }
+  &::-moz-range-track {
+    background: transparent;
+  }
+  &::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    margin-top: calc((2.75rem - 18px) / 2);
+    border-radius: 9999px;
+    background: var(--color-accent);
+    box-shadow: 0 0 12px rgb(183 243 106 / 0.5);
+  }
+  &::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border: 0;
+    border-radius: 9999px;
+    background: var(--color-accent);
+    box-shadow: 0 0 12px rgb(183 243 106 / 0.5);
+  }
+  &:focus-visible {
+    outline: none;
+  }
+  &:focus-visible::-webkit-slider-thumb {
+    box-shadow:
+      0 0 0 3px var(--color-ink-950),
+      0 0 0 5px rgb(183 243 106 / 0.75);
+  }
+  &:focus-visible::-moz-range-thumb {
+    box-shadow:
+      0 0 0 3px var(--color-ink-950),
+      0 0 0 5px rgb(183 243 106 / 0.75);
+  }
 }
 @utility scrollbar-none {
   scrollbar-width: none;
@@ -143,4 +277,30 @@
 }
 .pt-safe {
   padding-top: max(env(safe-area-inset-top), 1rem);
+}
+
+/*
+ * iOS zooms the page when focusing an input under 16px. On touch devices, lift small inputs to
+ * 16px; inputs with an explicit large size (the hero numbers) keep theirs.
+ */
+@media (pointer: coarse) {
+  :is(input:not([type="range"], [type="checkbox"], [type="radio"]), textarea, select):not(
+    [class*="text-base"],
+    [class*="text-lg"],
+    [class*="text-xl"],
+    [class*="text-2xl"],
+    [class*="text-3xl"],
+    [class*="text-4xl"],
+    [class*="text-5xl"],
+    [class*="text-6xl"],
+    [class*="text-7xl"],
+    [class*="text-8xl"],
+    [class*="text-9xl"],
+    [class*="text-["]
+  ) {
+    font-size: max(16px, 1em);
+  }
+  :is(input, textarea, select):is(.text-xs, .text-sm) {
+    font-size: 16px;
+  }
 }

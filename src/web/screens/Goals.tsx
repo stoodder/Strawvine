@@ -1,15 +1,18 @@
 import clsx from "clsx";
 import { motion } from "motion/react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Award, Flame, Plus, Trash2, Trophy } from "lucide-react";
 import { addDays, formatShortDate, startOfWeek } from "../../shared/dates";
-import { achievements, checklist, streaks, type Achievement } from "../../shared/gamify";
-import { goalDirection, project } from "../../shared/nutrition";
+import { checklist, type Achievement } from "../../shared/gamify";
+import { goalDirection } from "../../shared/nutrition";
 import { currentMax } from "../../shared/program";
 import { newId } from "../../shared/session";
 import type { Settings } from "../../shared/schemas";
 import { PaceSlider } from "../components/PaceSlider";
+import { formatProjectedRange } from "../components/projection";
+import { useToast } from "../components/Toast";
 import { Bar, BoxNumber, Empty, Section, Sheet } from "../components/ui";
+import { useTitle } from "../components/useTitle";
 import { fmt, signed } from "../lib/format";
 import { useData, useSaveSettings } from "../lib/store";
 
@@ -19,15 +22,29 @@ export function GoalsScreen() {
   const settings = data.settings;
   const goal = settings.weightGoal;
   const trend = model.todayEnergy?.avgWeight ?? null;
-  const weekAgo = model.series.find((d) => d.date === addDays(today, -7))?.avgWeight ?? null;
-  const projection = goal && trend !== null ? project(settings, today, trend, weekAgo) : null;
+  // One source for the projected date: the weekly check-in's (same as Progress).
+  const projection = goal ? model.checkin.projection : null;
   const direction = goal && trend !== null ? goalDirection(trend, goal.targetLb, goal.startLb) : "maintain";
-  const streak = useMemo(() => streaks(data, today), [data, today]);
-  const earned = useMemo(() => achievements(data, today), [data, today]);
+  const { streak, achievements: earned } = useData();
   const [goalInput, setGoalInput] = useState<number | null>(null);
+  const [goalDraft, setGoalDraft] = useState<number | null>(null);
   const [addingTarget, setAddingTarget] = useState(false);
+  const toast = useToast();
+  useTitle("Goals");
+  // Undo runs later (from a toast); it must patch the settings as they are then, not now.
+  const latest = useRef(settings);
+  latest.current = settings;
 
   const save = (patch: Partial<Settings>) => void saveSettings({ ...settings, ...patch });
+  const undoable = (patch: Partial<Settings>, message: string, undo: (s: Settings) => Partial<Settings>) => {
+    save(patch);
+    toast.show({
+      message,
+      action: { label: "Undo", onAction: () => void saveSettings({ ...latest.current, ...undo(latest.current) }) },
+    });
+  };
+  const goalValue = goalDraft ?? goalInput;
+  const goalValid = goalValue !== null && goalValue >= 50 && goalValue <= 1000;
 
   const latestWeighIn = (onOrBefore: string) =>
     [...data.days].filter((d) => d.weightLb !== null && d.date <= onOrBefore).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.weightLb ??
@@ -44,7 +61,7 @@ export function GoalsScreen() {
     <div>
       <header className="pt-2">
         <div className="label text-fg-2">Goals</div>
-        <h1 className="mt-6 text-[44px] leading-none font-light tracking-tight">The why</h1>
+        <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">The why</h1>
       </header>
 
       {/* Weight goal */}
@@ -71,13 +88,9 @@ export function GoalsScreen() {
               {projection?.range && (
                 <div className="text-right">
                   <div className="label mb-1">Projected</div>
-                  <div className="text-sm text-fg-2">
-                    {projection.range[0] === projection.range[1]
-                      ? formatShortDate(projection.range[0], true)
-                      : `${formatShortDate(projection.range[0])} – ${formatShortDate(projection.range[1])}`}
-                  </div>
+                  <div className="text-sm text-fg-2">{formatProjectedRange(projection.range, today)}</div>
                   {projection.observedRateLbPerWeek !== null && (
-                    <div className="num mt-0.5 text-[11px] text-faint">actual {signed(projection.observedRateLbPerWeek, 1)} lb/wk</div>
+                    <div className="num mt-0.5 text-[0.6875rem] text-mute">actual {signed(projection.observedRateLbPerWeek, 1)} lb/wk</div>
                   )}
                 </div>
               )}
@@ -85,7 +98,7 @@ export function GoalsScreen() {
             </div>
             <Bar className="mt-5" value={Math.max(0, progress)} tone={progress >= 1 ? "gold" : "accent"} />
             {startWeight !== null && (
-              <div className="mt-2 flex justify-between text-[11px] text-faint">
+              <div className="mt-2 flex justify-between text-[0.6875rem] text-mute">
                 <span className="num">{fmt(startWeight, 1)} start</span>
                 <span className="num">{Math.round(Math.max(0, progress) * 100)}%</span>
               </div>
@@ -101,25 +114,41 @@ export function GoalsScreen() {
                 />
               </div>
             )}
-            <button type="button" className="label mt-6 text-faint" onClick={() => save({ weightGoal: null })}>
+            <button
+              type="button"
+              className="label hit mt-6 text-mute"
+              onClick={() => undoable({ weightGoal: null }, "Goal cleared", () => ({ weightGoal: goal }))}
+            >
               Clear goal
             </button>
           </>
         ) : (
           <div className="flex items-center gap-3">
-            <BoxNumber ariaLabel="Goal weight" value={goalInput} onCommit={setGoalInput} unit="lb" decimals={1} />
+            <BoxNumber
+              ariaLabel="Goal weight"
+              value={goalInput}
+              onCommit={(v) => {
+                setGoalInput(v);
+                setGoalDraft(null);
+              }}
+              onDraft={setGoalDraft}
+              unit="lb"
+              decimals={1}
+            />
             <button
               type="button"
-              disabled={!goalInput}
-              className="btn-primary disabled:opacity-30"
+              disabled={!goalValid}
+              className="btn-primary"
               onClick={() => {
-                if (!goalInput) return;
+                if (!goalValid || goalValue === null) return;
+                const targetLb = Math.round(goalValue * 10) / 10;
                 // Bodyweight now fixes the goal's direction (cut vs build).
                 const startLb = trend ?? latestWeighIn(today);
-                const dir = startLb !== null ? goalDirection(startLb, goalInput) : "lose";
+                const dir = startLb !== null ? goalDirection(startLb, targetLb) : "lose";
+                setGoalDraft(null);
                 save({
                   weightGoal: {
-                    targetLb: goalInput,
+                    targetLb,
                     pacePctPerWeek: dir === "gain" ? settings.limits.maxGainPctPerWeek : settings.limits.maxLossPctPerWeek,
                     setOn: today,
                     startLb,
@@ -137,36 +166,59 @@ export function GoalsScreen() {
       <Section
         label="Strength targets"
         right={
-          <button type="button" aria-label="Add strength target" className="tap -mr-1 p-1 text-mute" onClick={() => setAddingTarget(true)}>
+          <button
+            type="button"
+            aria-label="Add strength target"
+            className="tap -my-3.5 -mr-3 grid h-11 w-11 place-items-center text-mute"
+            onClick={() => setAddingTarget(true)}
+          >
             <Plus size={16} />
           </button>
         }
       >
         {settings.strengthTargets.length === 0 && <Empty>Pick a number worth chasing — a 600 deadlift, a 315 bench.</Empty>}
         <div className="space-y-6">
-          {settings.strengthTargets.map((t) => {
+          {settings.strengthTargets.map((t, i) => {
             const ex = data.exercises.find((e) => e.id === t.exerciseId);
             const cur = currentMax(data.maxEntries, t.exerciseId)?.valueLb ?? 0;
             const done = cur >= t.targetLb;
+            const name = ex?.name ?? "Lift";
             return (
               <div key={t.id}>
-                <div className="flex items-baseline justify-between">
-                  <div className="text-[15px] text-fg-2">{ex?.name}</div>
-                  <div className="num text-sm">
+                <div className="flex items-center justify-between">
+                  <div className="text-[0.9375rem] text-fg-2">{name}</div>
+                  <div className="num flex items-center text-sm">
+                    {done && (
+                      <>
+                        <Trophy size={13} className="mr-1.5 text-gold" aria-hidden />
+                        <span className="sr-only">Reached: </span>
+                      </>
+                    )}
                     <span className={done ? "text-gold" : "text-fg"}>{fmt(cur)}</span>
-                    <span className="text-mute"> / {fmt(t.targetLb)}</span>
+                    <span className="text-mute">&nbsp;/ {fmt(t.targetLb)}</span>
                     <button
                       type="button"
-                      aria-label="Remove target"
-                      className="tap ml-3 align-middle text-faint"
-                      onClick={() => save({ strengthTargets: settings.strengthTargets.filter((x) => x.id !== t.id) })}
+                      aria-label={`Remove ${name} target`}
+                      className="tap -my-3 -mr-3 ml-0.5 grid h-11 w-11 place-items-center text-mute"
+                      onClick={() =>
+                        undoable(
+                          { strengthTargets: settings.strengthTargets.filter((x) => x.id !== t.id) },
+                          `${name} target removed`,
+                          (now) => {
+                            if (now.strengthTargets.some((x) => x.id === t.id)) return {};
+                            const list = [...now.strengthTargets];
+                            list.splice(Math.min(i, list.length), 0, t);
+                            return { strengthTargets: list };
+                          },
+                        )
+                      }
                     >
-                      <Trash2 size={12} />
+                      <Trash2 size={13} />
                     </button>
                   </div>
                 </div>
                 <Bar className="mt-2" value={t.targetLb ? cur / t.targetLb : 0} tone={done ? "gold" : "accent"} />
-                {!done && cur > 0 && <div className="mt-1.5 text-[11px] text-faint">{fmt(t.targetLb - cur)} lb to go</div>}
+                {!done && cur > 0 && <div className="mt-1.5 text-[0.6875rem] text-mute">{fmt(t.targetLb - cur)} lb to go</div>}
               </div>
             );
           })}
@@ -177,9 +229,10 @@ export function GoalsScreen() {
       <Section label="Consistency">
         <div className="flex items-end gap-10">
           <div>
-            <div className="flex items-center gap-2 text-gold">
-              <Flame size={18} />
-              <span className="num glow-gold text-5xl font-light">{streak.current}</span>
+            {/* Gold is earned: a zero streak stays neutral. */}
+            <div className={clsx("flex items-center gap-2", streak.current > 0 ? "text-gold" : "text-fg-2")}>
+              <Flame size={18} aria-hidden />
+              <span className={clsx("num text-5xl font-light", streak.current > 0 && "glow-gold")}>{streak.current}</span>
             </div>
             <div className="label mt-2">current streak</div>
           </div>
@@ -192,7 +245,7 @@ export function GoalsScreen() {
       </Section>
 
       {/* Achievements */}
-      <Section label="Achievements" right={<span className="label text-faint">{earned.length}</span>}>
+      <Section label="Achievements" right={<span className="label">{earned.length}</span>}>
         {earned.length === 0 ? (
           <Empty>Your first one unlocks the moment you log a morning weight and a day of calories.</Empty>
         ) : (
@@ -224,8 +277,8 @@ function AchievementRow({ a }: { a: Achievement }) {
         <Icon size={15} />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[15px]">{a.title}</div>
-        <div className="truncate text-xs text-mute">{a.detail}</div>
+        <div className="truncate text-[0.9375rem]">{a.title}</div>
+        <div className="line-clamp-2 text-xs text-mute">{a.detail}</div>
       </div>
       <div className="label shrink-0">{formatShortDate(a.date)}</div>
     </li>
@@ -236,12 +289,15 @@ function NextUp({ current }: { current: number }) {
   const next = [3, 7, 14, 30, 60, 100, 180, 365].find((t) => t > current);
   if (!next) return null;
   return (
-    <div className="mt-6 flex items-center gap-4 opacity-60">
-      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full ring-1 ring-white/10 ring-dashed text-faint">
-        <Flame size={15} />
+    <div className="mt-6 flex items-center gap-4">
+      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-dashed border-white/20 text-faint">
+        <Flame size={15} aria-hidden />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="text-[15px] text-fg-2">{next}-day streak</div>
+        <div className="text-[0.9375rem] text-mute">
+          <span className="label mr-2">next</span>
+          {next}-day streak
+        </div>
         <div className="text-xs text-mute">
           {next - current} more closed {next - current === 1 ? "day" : "days"}
         </div>
@@ -267,15 +323,22 @@ function Heatmap() {
       return { date, v: items.filter((i) => i.done).length / items.length };
     }),
   );
+  const past = cols.flat().filter((c) => c.v >= 0);
+  const closed = past.filter((c) => c.v >= 1).length;
+  const partial = past.filter((c) => c.v > 0 && c.v < 1).length;
+  const todayCell = past.find((c) => c.date === today);
+  const summary =
+    `Closed days, last ${weeks} weeks: ${closed} closed, ${partial} partly done, ${past.length - closed - partial} empty.` +
+    (todayCell ? ` Today is ${todayCell.v >= 1 ? "closed" : `${Math.round(todayCell.v * 100)}% done`}.` : "");
   return (
-    <div className="mt-8 flex justify-between gap-[3px]" aria-label="Closed days, last 16 weeks">
+    <div className="mt-8 flex justify-between gap-[3px]" role="img" aria-label={summary}>
       {cols.map((col, i) => (
         <div key={i} className="flex flex-1 flex-col gap-[3px]">
           {col.map((c) => (
             <motion.div
               key={c.date}
               title={c.date}
-              className="aspect-square w-full rounded-[3px]"
+              className="relative grid aspect-square w-full place-items-center rounded-[3px]"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               transition={{ delay: i * 0.02 }}
@@ -289,9 +352,13 @@ function Heatmap() {
                         ? `rgb(183 243 106 / ${0.08 + c.v * 0.3})`
                         : "rgba(255,255,255,0.04)",
                 boxShadow: c.v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
-                outline: c.date === today ? "1px solid rgba(255,255,255,0.35)" : undefined,
+                outline: c.date === today ? "1px solid rgba(255,255,255,0.6)" : undefined,
+                outlineOffset: c.date === today ? 1 : undefined,
               }}
-            />
+            >
+              {/* Today is marked by shape too, not just the outline colour. */}
+              {c.date === today && <span className={clsx("h-1 w-1 rounded-full", c.v >= 1 ? "bg-accent-ink" : "bg-fg")} />}
+            </motion.div>
           ))}
         </div>
       ))}
@@ -305,6 +372,9 @@ function AddTargetSheet({ open, onClose }: { open: boolean; onClose: () => void 
   const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
   const [exerciseId, setExerciseId] = useState<number | null>(null);
   const [target, setTarget] = useState<number | null>(null);
+  const [draft, setDraft] = useState<number | null>(null);
+  const value = draft ?? target;
+  const valid = value !== null && value >= 1 && value <= 2000;
   const sel = exerciseId ?? tracked[0]?.id ?? null;
   const cur = sel !== null ? currentMax(data.maxEntries, sel)?.valueLb : undefined;
   return (
@@ -314,6 +384,7 @@ function AddTargetSheet({ open, onClose }: { open: boolean; onClose: () => void 
           <button
             key={e.id}
             type="button"
+            aria-pressed={sel === e.id}
             onClick={() => setExerciseId(e.id)}
             className={clsx("chip", sel === e.id ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2")}
           >
@@ -323,19 +394,34 @@ function AddTargetSheet({ open, onClose }: { open: boolean; onClose: () => void 
       </div>
       <div className="mt-6 flex items-center justify-between">
         <span className="text-sm text-mute">{cur ? `Current max ${fmt(cur)}` : "No max yet"}</span>
-        <BoxNumber ariaLabel="Target" value={target} onCommit={setTarget} unit="lb" />
+        <BoxNumber
+          ariaLabel="Target"
+          value={target}
+          onCommit={(v) => {
+            setTarget(v);
+            setDraft(null);
+          }}
+          onDraft={setDraft}
+          unit="lb"
+          min={1}
+          max={2000}
+        />
       </div>
       <button
         type="button"
-        disabled={!sel || !target}
-        className="btn-primary mt-6 w-full disabled:opacity-30"
+        disabled={!sel || !valid}
+        className="btn-primary mt-6 w-full"
         onClick={async () => {
-          if (!sel || !target) return;
+          if (!sel || !valid || value === null) return;
           await saveSettings({
             ...data.settings,
-            strengthTargets: [...data.settings.strengthTargets, { id: newId(), exerciseId: sel, targetLb: target, setOn: today }],
+            strengthTargets: [
+              ...data.settings.strengthTargets,
+              { id: newId(), exerciseId: sel, targetLb: Math.round(value), setOn: today },
+            ],
           });
           setTarget(null);
+          setDraft(null);
           onClose();
         }}
       >

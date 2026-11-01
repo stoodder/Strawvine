@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { createBrowserRouter, Outlet, RouterProvider, ScrollRestoration } from "react-router";
-import { api, ApiError } from "./lib/api";
-import { clearCache, DataProvider, useBootstrapQuery, useData } from "./lib/store";
+import { DataProvider, useBootstrapQuery, useData } from "./lib/store";
+import { onSignedOut, resumeAfterLogin } from "./lib/sync";
+import { SyncStatus } from "./components/SyncStatus";
 import { BottomNav } from "./components/BottomNav";
 import { Celebrations } from "./components/Celebrations";
 import { Logo } from "./components/Logo";
@@ -21,6 +22,7 @@ function Shell() {
       <main className="pt-safe pb-nav mx-auto w-full max-w-lg px-5">
         <Outlet />
       </main>
+      <SyncStatus />
       <BottomNav />
       <Celebrations />
       <ScrollRestoration />
@@ -64,30 +66,46 @@ function Authed() {
       </DataProvider>
     );
   }
-  if (q.isError) return <Splash message="Couldn't reach Strawvine. Check your connection and reopen the app." />;
+  if (q.isError)
+    return (
+      <div className="grid min-h-dvh place-items-center">
+        <div className="flex flex-col items-center gap-4">
+          <Logo size={44} />
+          <p className="max-w-xs text-center text-sm text-mute">Couldn't reach Strawvine. Check your connection.</p>
+          <button type="button" className="btn-ghost" onClick={() => void q.refetch()}>
+            Try again
+          </button>
+        </div>
+      </div>
+    );
   return <Splash />;
 }
 
+/**
+ * No blocking auth check: the app renders straight from this device's copy (if any) while the
+ * bootstrap request doubles as the auth check. Only a definite 401 shows the sign-in screen,
+ * and unsynced edits survive it (they resume after sign-in).
+ */
 export function App() {
-  const [authed, setAuthed] = useState<boolean | null>(null);
+  const [authed, setAuthed] = useState(true);
 
   useEffect(() => {
-    api("/auth/me")
-      .then(() => setAuthed(true))
-      .catch((e) => {
-        // Offline with cached data: let the app open.
-        if (!(e instanceof ApiError) && localStorage.getItem("strawvine:bootstrap")) setAuthed(true);
-        else setAuthed(false);
-      });
     const onUnauthorized = () => {
-      clearCache();
       setAuthed(false);
+      onSignedOut();
     };
     window.addEventListener("strawvine:unauthorized", onUnauthorized);
     return () => window.removeEventListener("strawvine:unauthorized", onUnauthorized);
   }, []);
 
-  if (authed === null) return <Splash />;
-  if (!authed) return <Login onSuccess={() => setAuthed(true)} />;
+  if (!authed)
+    return (
+      <Login
+        onSuccess={() => {
+          setAuthed(true);
+          resumeAfterLogin();
+        }}
+      />
+    );
   return <Authed />;
 }

@@ -14,8 +14,14 @@ export function Plates({ weight }: { weight: number | null }) {
   if (!weight || weight <= 45) return null;
   const { plates, remainder } = platesPerSide(weight);
   return (
-    <div className="flex items-center gap-1.5" aria-label={`Plates per side: ${plates.join(", ")}`}>
-      <span className="label mr-1">per side</span>
+    <div
+      role="img"
+      className="flex items-center gap-1.5"
+      aria-label={`Plates per side: ${plates.join(", ")}${remainder > 0 ? `, plus ${remainder} lb` : ""}`}
+    >
+      <span className="label mr-1 whitespace-nowrap" aria-hidden>
+        per side
+      </span>
       {plates.map((p, i) => (
         <span
           key={i}
@@ -30,6 +36,25 @@ export function Plates({ weight }: { weight: number | null }) {
   );
 }
 
+/** ±2.5 lb fine-tuning under a load stepper. */
+function FineLoad({ weight, onChange }: { weight: number; onChange: (v: number) => void }) {
+  return (
+    <div className="flex gap-2">
+      {[-2.5, 2.5].map((d) => (
+        <button
+          key={d}
+          type="button"
+          aria-label={`${d > 0 ? "Add" : "Remove"} 2.5 lb`}
+          className="chip min-h-11 bg-white/[0.04] px-4 text-mute"
+          onClick={() => onChange(Math.max(0, weight + d))}
+        >
+          {d > 0 ? "+" : "−"}2.5
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** Edit a single set's reps/time/distance and load. */
 export function SetEditSheet({
   open,
@@ -37,6 +62,7 @@ export function SetEditSheet({
   title,
   set,
   measure,
+  showPlates,
   onSave,
   onDelete,
 }: {
@@ -45,6 +71,8 @@ export function SetEditSheet({
   title: string;
   set: SetEntry | null;
   measure: Measure;
+  /** Barbell work only: plates make no sense for dumbbells or cables. */
+  showPlates?: boolean;
   onSave: (s: SetEntry) => void;
   onDelete?: () => void;
 }) {
@@ -60,36 +88,38 @@ export function SetEditSheet({
   }, [open, setId, measure]);
   if (!set) return null;
   const repStep = measure === "reps" ? 1 : measure === "seconds" ? 5 : 5;
+  const repLabel = measure === "reps" ? "Reps" : measure === "seconds" ? "Seconds" : "Meters";
   return (
     <Sheet open={open} onClose={onClose} title={title}>
       <div className="space-y-8 pb-2">
         <div className="flex flex-col items-center gap-2">
-          <div className="label">{measure === "reps" ? "Reps" : measure === "seconds" ? "Seconds" : "Meters"}</div>
-          <Stepper value={reps} onChange={setReps} step={repStep} max={10000} />
+          <div className="label">{repLabel}</div>
+          <Stepper value={reps} onChange={setReps} step={repStep} max={10000} editable label={repLabel.toLowerCase()} />
         </div>
         <div className="flex flex-col items-center gap-2">
           <div className="label">Load · lb</div>
-          <Stepper value={weight} onChange={setWeight} step={5} max={2000} />
-          <div className="flex gap-2">
-            {[-2.5, 2.5].map((d) => (
-              <button key={d} type="button" className="chip bg-white/[0.04] text-mute" onClick={() => setWeight(Math.max(0, weight + d))}>
-                {d > 0 ? "+" : "−"}2.5
-              </button>
-            ))}
-          </div>
-          <div className="mt-2 min-h-6">
-            <Plates weight={weight} />
-          </div>
+          <Stepper value={weight} onChange={setWeight} step={5} max={2000} editable label="load" />
+          <FineLoad weight={weight} onChange={setWeight} />
+          {showPlates && (
+            <div className="mt-2 min-h-6">
+              <Plates weight={weight} />
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-3">
           {onDelete && (
-            <button type="button" aria-label="Delete set" className="btn-ghost px-4" onClick={onDelete}>
+            <button
+              type="button"
+              aria-label="Delete set"
+              className="btn h-11 w-11 shrink-0 bg-warn/10 px-0 text-warn hover:bg-warn/15"
+              onClick={onDelete}
+            >
               <Trash2 size={16} />
             </button>
           )}
           <button
             type="button"
-            className="btn-ghost flex-1"
+            className="btn-ghost flex-1 whitespace-nowrap"
             onClick={() =>
               onSave({
                 ...set,
@@ -104,7 +134,7 @@ export function SetEditSheet({
           </button>
           <button
             type="button"
-            className="btn-primary flex-1"
+            className="btn-primary flex-1 whitespace-nowrap"
             onClick={() => {
               success();
               onSave({ ...set, reps, weight: weight || null, done: true });
@@ -139,10 +169,11 @@ export function AmrapSheet({
   currentMaxLb: number | null;
   lbPerExtraRep: number;
   progressionEnabled: boolean;
-  onLog: (reps: number) => void;
+  onLog: (reps: number, weight: number | null) => void;
   onApply: (gainLb: number, reps: number) => Promise<void>;
 }) {
   const [reps, setReps] = useState(0);
+  const [weight, setWeight] = useState(0);
   const [phase, setPhase] = useState<"count" | "result">("count");
   const [busy, setBusy] = useState(false);
   // The max before the bump, frozen for the result: Apply updates currentMaxLb while pending.
@@ -153,6 +184,7 @@ export function AmrapSheet({
   useEffect(() => {
     if (open && set) {
       setReps(set.reps ?? set.targetReps ?? 0);
+      setWeight(set.weight ?? set.targetWeight ?? 0);
       setPhase("count");
       setBusy(false);
       setMaxBefore(currentMaxLb);
@@ -166,7 +198,7 @@ export function AmrapSheet({
   const alreadyApplied = set.appliedProgressionLb !== null;
 
   return (
-    <Sheet open={open} onClose={onClose}>
+    <Sheet open={open} onClose={onClose} title={<span className="label text-accent">AMRAP · last set</span>}>
       <AnimatePresence mode="wait">
         {phase === "count" ? (
           <motion.div
@@ -176,12 +208,11 @@ export function AmrapSheet({
             exit={{ opacity: 0 }}
             className="flex flex-col items-center pb-2 text-center"
           >
-            <div className="label text-accent">AMRAP · last set</div>
-            <div className="mt-2 text-sm text-mute">
-              {exerciseName} · {set.targetWeight} lb · target {target}+
+            <div className="text-sm text-mute">
+              {exerciseName} · target <span className="num">{target}+</span>
             </div>
-            <div className="mt-10">
-              <Stepper value={reps} onChange={setReps} size="xl" max={100} />
+            <div className="mt-8">
+              <Stepper value={reps} onChange={setReps} size="xl" max={100} editable label="reps" />
             </div>
             <div className="mt-4 h-6 text-sm">
               {extra > 0 ? (
@@ -192,11 +223,16 @@ export function AmrapSheet({
                 <span className="text-mute">reps completed</span>
               )}
             </div>
+            <div className="mt-6 flex flex-col items-center gap-2">
+              <div className="label">Load · lb</div>
+              <Stepper value={weight} onChange={setWeight} step={5} max={2000} editable label="load" />
+              <FineLoad weight={weight} onChange={setWeight} />
+            </div>
             <button
               type="button"
-              className="btn-primary mt-8 w-full py-3.5 text-base"
+              className="btn-primary mt-6 w-full py-3.5 text-base"
               onClick={() => {
-                onLog(reps);
+                onLog(reps, weight || null);
                 if (gain > 0 && !alreadyApplied) {
                   celebrate();
                   setMaxBefore(currentMaxLb);
