@@ -1,0 +1,285 @@
+/**
+ * Data contracts shared by the API and the web app. Zod schemas validate input on the
+ * server; the inferred types are used everywhere.
+ */
+import { z } from "zod";
+import { isISODate } from "./dates";
+
+export const isoDate = z.string().refine(isISODate, "Expected a YYYY-MM-DD date");
+
+const optNum = (min: number, max: number) => z.number().min(min).max(max).nullable();
+
+// ---------------------------------------------------------------------------
+// Daily log
+// ---------------------------------------------------------------------------
+
+export const dayLogFields = {
+  weightLb: optNum(50, 1000),
+  calories: optNum(0, 20000),
+  proteinG: optNum(0, 2000),
+  carbsG: optNum(0, 3000),
+  fatG: optNum(0, 1000),
+  micros: z.record(z.string().max(40), z.number().min(0).max(1_000_000)).nullable(),
+  steps: z.number().int().min(0).max(200_000).nullable(),
+  sleepScore: optNum(0, 100),
+  hrvMs: optNum(0, 500),
+  sleepMinutes: optNum(0, 24 * 60),
+  energy: z.number().int().min(1).max(5).nullable(),
+  soreness: z.number().int().min(1).max(5).nullable(),
+  zone2Done: z.boolean(),
+  zone2Minutes: optNum(0, 600),
+  metconDone: z.boolean(),
+  metconNotes: z.string().max(5000).nullable(),
+  metconBenchmark: z.string().max(120).nullable(),
+  metconScore: z.string().max(120).nullable(),
+  journal: z.string().max(50_000).nullable(),
+};
+
+export const dayLogPatchSchema = z.object(dayLogFields).partial().strict();
+export type DayLogPatch = z.infer<typeof dayLogPatchSchema>;
+
+export const dayLogSchema = z.object({ date: isoDate, ...dayLogFields });
+export type DayLog = z.infer<typeof dayLogSchema>;
+
+export function emptyDayLog(date: string): DayLog {
+  return {
+    date,
+    weightLb: null,
+    calories: null,
+    proteinG: null,
+    carbsG: null,
+    fatG: null,
+    micros: null,
+    steps: null,
+    sleepScore: null,
+    hrvMs: null,
+    sleepMinutes: null,
+    energy: null,
+    soreness: null,
+    zone2Done: false,
+    zone2Minutes: null,
+    metconDone: false,
+    metconNotes: null,
+    metconBenchmark: null,
+    metconScore: null,
+    journal: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Exercises & maxes
+// ---------------------------------------------------------------------------
+
+export const exerciseCategory = z.enum(["primary", "accessory", "core", "carry", "conditioning"]);
+export type ExerciseCategory = z.infer<typeof exerciseCategory>;
+
+export const measure = z.enum(["reps", "seconds", "meters"]);
+export type Measure = z.infer<typeof measure>;
+
+export const exerciseSchema = z.object({
+  id: z.number().int(),
+  name: z.string().min(1).max(80),
+  category: exerciseCategory,
+  tracksMax: z.boolean(),
+  measure,
+  archived: z.boolean(),
+});
+export type Exercise = z.infer<typeof exerciseSchema>;
+
+export const exerciseCreateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80),
+    category: exerciseCategory.default("accessory"),
+    tracksMax: z.boolean().default(false),
+    measure: measure.default("reps"),
+  })
+  .strict();
+
+export const exercisePatchSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80),
+    category: exerciseCategory,
+    tracksMax: z.boolean(),
+    measure,
+    archived: z.boolean(),
+  })
+  .partial()
+  .strict();
+
+export const maxSource = z.enum(["initial", "manual", "amrap"]);
+export type MaxSource = z.infer<typeof maxSource>;
+
+export const maxEntrySchema = z.object({
+  id: z.number().int(),
+  exerciseId: z.number().int(),
+  date: isoDate,
+  valueLb: z.number(),
+  source: maxSource,
+  note: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type MaxEntry = z.infer<typeof maxEntrySchema>;
+
+export const maxEntryCreateSchema = z
+  .object({
+    date: isoDate,
+    valueLb: z.number().min(0).max(2000),
+    source: maxSource.default("manual"),
+    note: z.string().max(500).nullable().default(null),
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
+// Training program (all user-editable)
+// ---------------------------------------------------------------------------
+
+export const programWeekSchema = z.object({
+  label: z.string().max(40),
+  deload: z.boolean(),
+  /** Reps for each set of the main lift, in order. */
+  reps: z.array(z.number().int().min(1).max(50)).min(1).max(12),
+  /**
+   * When set, every set's load is based on this rep-max instead of the set's own reps
+   * (deload: 4×10 at 90% of the 12-rep max).
+   */
+  basisReps: z.number().int().min(1).max(50).nullable(),
+});
+export type ProgramWeek = z.infer<typeof programWeekSchema>;
+
+export const programDaySchema = z.object({
+  label: z.string().max(40),
+  /** The calculated main lift for the day, if any. */
+  primaryExerciseId: z.number().int().nullable(),
+  /** Whether the AMRAP progression rule applies to this day's main lift. */
+  progression: z.boolean(),
+});
+export type ProgramDay = z.infer<typeof programDaySchema>;
+
+export const programSchema = z.object({
+  name: z.string().max(60),
+  /** Monday the first cycle begins. */
+  cycleStartDate: isoDate,
+  weeks: z.array(programWeekSchema).min(1).max(16),
+  /** Fraction of the N-rep max used as the working weight (0.9). */
+  intensity: z.number().min(0.3).max(1.2),
+  roundToLb: z.number().min(0.5).max(25),
+  /** Rep count → fraction of 1RM. Missing rep counts are interpolated. */
+  repMaxPct: z.record(z.string().regex(/^\d+$/), z.number().min(0.1).max(1)),
+  amrapLastSet: z.boolean(),
+  progression: z.object({
+    enabled: z.boolean(),
+    lbPerExtraRep: z.number().min(0).max(25),
+  }),
+  deloadAccessoryLoad: z.number().min(0.3).max(1),
+  /** Keyed by weekday: "0" (Sun) … "6" (Sat). Days without an entry are not lifting days. */
+  days: z.record(z.string().regex(/^[0-6]$/), programDaySchema),
+});
+export type Program = z.infer<typeof programSchema>;
+
+// ---------------------------------------------------------------------------
+// Settings (one document)
+// ---------------------------------------------------------------------------
+
+const weekdayFlags = z.array(z.boolean()).length(7);
+
+export const settingsSchema = z.object({
+  onboarded: z.boolean(),
+  targets: z.object({
+    steps: z.number().int().min(0).max(100_000),
+    zone2Minutes: z.number().min(0).max(600),
+  }),
+  /** Which weekdays (index 0 = Sun) each pillar is expected. */
+  schedule: z.object({
+    metcon: weekdayFlags,
+    zone2: weekdayFlags,
+  }),
+  nutrition: z.object({
+    kcalPerLb: z.number().min(1000).max(6000),
+    proteinGPerLb: z.number().min(0).max(3),
+    fatGPerLb: z.number().min(0).max(2),
+    /** Starting maintenance estimate used while the TDEE calibrates. */
+    initialTdee: z.number().min(800).max(10000).nullable(),
+  }),
+  limits: z.object({
+    maxLossPctPerWeek: z.number().min(0).max(3),
+    maxGainPctPerWeek: z.number().min(0).max(3),
+  }),
+  weightGoal: z
+    .object({
+      targetLb: z.number().min(50).max(1000),
+      /** Chosen pace in % of bodyweight per week (absolute). Capped by limits. */
+      pacePctPerWeek: z.number().min(0).max(3),
+      setOn: isoDate,
+    })
+    .nullable(),
+  strengthTargets: z.array(
+    z.object({
+      id: z.string().max(40),
+      exerciseId: z.number().int(),
+      targetLb: z.number().min(1).max(2000),
+      setOn: isoDate,
+    }),
+  ),
+  program: programSchema,
+});
+export type Settings = z.infer<typeof settingsSchema>;
+
+// ---------------------------------------------------------------------------
+// Training sessions (stored as a document per date)
+// ---------------------------------------------------------------------------
+
+export const setEntrySchema = z.object({
+  id: z.string().max(40),
+  targetReps: z.number().min(0).max(10_000).nullable(),
+  targetWeight: z.number().min(0).max(2000).nullable(),
+  /** Actual reps / seconds / meters performed. */
+  reps: z.number().min(0).max(10_000).nullable(),
+  weight: z.number().min(0).max(2000).nullable(),
+  done: z.boolean(),
+  amrap: z.boolean(),
+  /** For AMRAP sets: the max increase already applied from this set. */
+  appliedProgressionLb: z.number().nullable(),
+});
+export type SetEntry = z.infer<typeof setEntrySchema>;
+
+export const blockExerciseSchema = z.object({
+  exerciseId: z.number().int(),
+  measure,
+  sets: z.array(setEntrySchema).max(30),
+});
+export type BlockExercise = z.infer<typeof blockExerciseSchema>;
+
+export const blockSchema = z.object({
+  id: z.string().max(40),
+  kind: z.enum(["primary", "accessory"]),
+  /** More than one exercise = superset. */
+  exercises: z.array(blockExerciseSchema).min(1).max(6),
+});
+export type Block = z.infer<typeof blockSchema>;
+
+export const sessionSchema = z.object({
+  date: isoDate,
+  label: z.string().max(60),
+  cycle: z.number().int().nullable(),
+  week: z.number().int().nullable(),
+  deload: z.boolean(),
+  /** Max used to compute the main lift (snapshot at session creation). */
+  primaryMaxLb: z.number().nullable(),
+  blocks: z.array(blockSchema).max(30),
+  notes: z.string().max(20_000),
+  completedAt: z.string().nullable(),
+});
+export type Session = z.infer<typeof sessionSchema>;
+
+// ---------------------------------------------------------------------------
+// Bootstrap payload
+// ---------------------------------------------------------------------------
+
+export interface Bootstrap {
+  settings: Settings;
+  days: DayLog[];
+  exercises: Exercise[];
+  maxEntries: MaxEntry[];
+  sessions: Session[];
+  seenAchievements: string[];
+}
