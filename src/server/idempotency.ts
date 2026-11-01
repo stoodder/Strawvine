@@ -7,8 +7,12 @@
  * create: a concurrent retry blocks on the uncommitted key row and then reads the committed
  * response; if the first attempt rolls back, the retry claims the key itself. Only successful
  * (2xx) responses are stored. Keys expire after IDEMPOTENCY_TTL_MS.
+ *
+ * A stored key remembers the request it answered: method, canonical path and a hash of the
+ * canonical parsed body. Reusing a key for anything else is a 422, never a replay.
  */
-import { eq, lt } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { and, eq, lt, sql } from "drizzle-orm";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { Db } from "./db/client";
@@ -41,6 +45,37 @@ export async function pruneIdempotencyKeys(db: Db, now = new Date()): Promise<nu
   return rows.length;
 }
 
+/** JSON with object keys sorted, so equal values always serialise (and hash) the same way. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_k, v: unknown) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  );
+}
+
+export const requestHash = (body: unknown) =>
+  createHash("sha256")
+    .update(canonicalJson(body ?? null))
+    .digest("hex");
+
+/**
+ * Forgets stored responses that created the max entry `id` (it was deleted), so they can't be
+ * replayed as if the row still existed.
+ */
+export async function forgetMaxCreate(db: Db | Tx, id: number) {
+  await db
+    .delete(idempotencyKeys)
+    .where(and(sql`${idempotencyKeys.path} ~ '^/api/exercises/[0-9]+/maxes$'`, sql`${idempotencyKeys.body}->>'id' = ${String(id)}`));
+}
+
+export interface IdempotentRequest {
+  /** Canonical path of the resource being created (built from parsed parameters, not the raw URL). */
+  path: string;
+  /** The parsed, validated body (hashed to tell a retry from a different request). */
+  body: unknown;
+}
+
 const PRUNE_EVERY_MS = 60 * 60_000;
 
 /**
@@ -57,7 +92,7 @@ export function idempotency(db: Db, onError: (err: unknown) => void = () => {}) 
     void pruneIdempotencyKeys(db).catch(onError);
   };
 
-  return async function run(c: Context, create: (tx: Tx) => Promise<CreateResult>): Promise<Response> {
+  return async function run(c: Context, request: IdempotentRequest, create: (tx: Tx) => Promise<CreateResult>): Promise<Response> {
     const key = c.req.header(IDEMPOTENCY_HEADER);
     if (key === undefined) {
       const r = await db.transaction(create);
@@ -65,14 +100,15 @@ export function idempotency(db: Db, onError: (err: unknown) => void = () => {}) 
     }
     if (!KEY_PATTERN.test(key)) return c.json({ error: `Invalid ${IDEMPOTENCY_HEADER}` }, 400);
     const method = c.req.method;
-    const path = c.req.path;
+    const { path } = request;
+    const hash = requestHash(request.body);
 
     let outcome: { fresh: CreateResult } | { replay: typeof idempotencyKeys.$inferSelect | undefined };
     try {
       outcome = await db.transaction(async (tx) => {
         const claimed = await tx
           .insert(idempotencyKeys)
-          .values({ key, method, path, status: 0, body: null })
+          .values({ key, method, path, status: 0, body: null, requestHash: hash })
           .onConflictDoNothing()
           .returning({ key: idempotencyKeys.key });
         if (!claimed.length) {
@@ -92,9 +128,9 @@ export function idempotency(db: Db, onError: (err: unknown) => void = () => {}) 
 
     if ("fresh" in outcome) return c.json(outcome.fresh.body as object, outcome.fresh.status);
     const row = outcome.replay;
-    if (!row || row.status === 0) return c.json({ error: "A request with this key is still in progress" }, 409);
-    if (row.method !== method || row.path !== path)
+    if (row && (row.method !== method || row.path !== path || (row.requestHash !== null && row.requestHash !== hash)))
       return c.json({ error: `${IDEMPOTENCY_HEADER} was already used for a different request` }, 422);
+    if (!row || row.status === 0) return c.json({ error: "A request with this key is still in progress" }, 409);
     c.header("Idempotent-Replayed", "true");
     return c.json(row.body as object, row.status as ContentfulStatusCode);
   };

@@ -12,14 +12,14 @@ Built to be dogfooded daily by one athlete; see [`docs/SPEC.md`](docs/SPEC.md) f
 
 ## How the numbers work
 
-| | |
-|---|---|
+|                        |                                                                                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Weighted 7-day average | `(T0·5 + T1·5 + T2·5 + T3·4 + T4·3 + T5·2 + T6) / 25`; missing days drop out of the divisor. A day counts only with **both** weight and calories. |
-| Daily TDEE | `avgCalories − (avgWeight(today) − avgWeight(yesterday)) × 3500` |
-| Smoothed TDEE | the same weighted average over daily TDEEs |
-| Target calories | `TDEE + (pace × bodyweight × 3500) / 7`, pace capped at −1% / +0.5% bodyweight per week |
-| Today's targets | built from data **through yesterday**, so they don't move while you log meals |
-| Calibration | for the first 14 logged days the TDEE blends your starting estimate with the measured value |
+| Daily TDEE             | `avgCalories − (avgWeight(today) − avgWeight(yesterday)) × 3500`                                                                                  |
+| Smoothed TDEE          | the same weighted average over daily TDEEs                                                                                                        |
+| Target calories        | `TDEE + (pace × bodyweight × 3500) / 7`, pace capped at −1% / +0.5% bodyweight per week                                                           |
+| Today's targets        | built from data **through yesterday**, so they don't move while you log meals                                                                     |
+| Calibration            | for the first 14 logged days the TDEE blends your starting estimate with the measured value                                                       |
 
 All derived values are recomputed from raw entries — edit any past day and everything after it updates.
 
@@ -60,7 +60,26 @@ npm run build
 ```
 
 Schema changes: edit `src/server/db/schema.ts`, then `npm run db:generate` and commit the new file in `drizzle/`.
-`npm run db:migrate` applies migrations without starting the server.
+`npm run db:migrate` applies migrations without starting the server. CI fails when `drizzle/` is out of date with the
+schema.
+
+The API tests drop and recreate the schema of `TEST_DATABASE_URL`, so they refuse to run unless the database name
+contains `test` and the host is local (`CI=true` lifts the host check). `npm run e2e` likewise only resets a database
+whose name contains `e2e`, on a local host.
+
+#### Migrations must be backward compatible
+
+The release phase migrates the database **before** the new dynos start, so for a while the old release runs against
+the new schema (and a rollback runs the old code on it indefinitely). Every migration has to work with the code that
+was live before it — expand, then contract:
+
+1. **Expand** (one deploy): add new tables/columns as nullable or with a default; never rename or drop in the same
+   deploy. Code reads the old and the new shape.
+2. **Migrate data** if needed (in code or a follow-up migration), then switch the code over to the new shape.
+3. **Contract** (a later deploy, once no running release uses it): drop the old column/table.
+
+Avoid long table rewrites and locks: a booting dyno waits at most 30 s for the migration lock (Heroku kills a dyno that
+doesn't bind its port within 60 s) and the release phase at most 15 minutes.
 
 ### Builds
 
@@ -68,8 +87,9 @@ Schema changes: edit `src/server/db/schema.ts`, then `npm run db:generate` and c
 `restore.js`), writes Brotli/gzip copies of the web assets, and stamps the build:
 
 - `BUILD_ID` (default: the Unix time of the build; override with `BUILD_ID=<sha> npm run build` or
-  `docker build --build-arg BUILD_ID=<sha>`) is exported for both steps. Vite compiles it into the client as
-  `__BUILD_ID__`; the server reads it back from `dist/build-id.txt` at boot and sends it as the `x-strawvine-build`
+  `docker build --build-arg BUILD_ID=<sha>`) is a **build-time** input, exported for both steps. Vite compiles it into
+  the client as `__BUILD_ID__`; the server reads it back from `dist/build-id.txt` at boot — never from the runtime
+  environment, which could disagree with what the client was compiled with — and sends it as the `x-strawvine-build`
   header on every `/api/*` response, so an open client can tell a newer deploy is live. No header is sent in dev
   (no `dist/build-id.txt`).
 
@@ -92,7 +112,8 @@ heroku open
 
 In production the server **refuses to boot** when `SESSION_SECRET` is a placeholder (the values in `.env.example` /
 `docker-compose.yml`) or weaker than `openssl rand -hex 32` (64+ hex or 43+ base64 characters), or when `APP_PASSWORD`
-is shorter than 12 characters or a known default. The log says exactly what to fix.
+is shorter than 12 characters (surrounding spaces don't count), uses fewer than 6 different characters, or is a known
+default. The log says exactly what to fix.
 
 ### Environment
 
@@ -103,22 +124,38 @@ is shorter than 12 characters or a known default. The log says exactly what to f
 | `SESSION_SECRET` | signs session cookies; production requires `openssl rand -hex 32` strength                                                                                                              |
 | `NODE_ENV`       | `production` in the image: secure `__Host-` cookie, HTTPS redirect, strict secret checks                                                                                                |
 | `TRUST_PROXY`    | `1` to trust `X-Forwarded-For`/`-Proto` from a TLS-terminating proxy (login rate limiting by client IP, HTTP→HTTPS redirect). Defaults to on when `DYNO` is set (Heroku), off elsewhere |
-| `BUILD_ID`       | optional override for the build id (see _Builds_)                                                                                                                                       |
+| `BUILD_ID`       | **build time only** (`npm run build` / `docker build --build-arg`): labels the build (see _Builds_). Ignored at runtime                                                                 |
 | `PORT`           | default 3000                                                                                                                                                                            |
 
 ### Sessions
 
 Signing in sets a 180-day cookie that renews itself while the app is in use. **Sign out signs out every device**
-(the session epoch stored in `auth_state` moves on). Changing `APP_PASSWORD` or `SESSION_SECRET`, or restoring an
-export, also signs every device out.
+(the session epoch stored in `auth_state` moves on) and answers with `Clear-Site-Data: "cache"`. Changing
+`APP_PASSWORD` or `SESSION_SECRET`, or restoring an export, also signs every device out: the signing key mixes in a random
+per-database salt (`auth_state.key_salt`) that a restore replaces, so even a restore into a fresh database (whose epoch
+starts over) can't revive an old cookie. Databases from before the salt existed keep an unsalted key until their next
+restore, so upgrading signs nobody out.
+
+Failed sign-ins are rate limited per network (IPv4 /24, IPv6 /64): 10 failures in 15 minutes block that network for a
+while (429 with `Retry-After`). Beyond 50 failures an hour across all clients, sign-ins from unknown devices are slowed
+down (a serialised tarpit, doubling delays capped at 10 s; refused when the queue is longer). A successful sign-in marks
+the browser as a **known device** (`sv_device`, a signed, httpOnly 400-day cookie kept across sign-outs; a password change
+forgets every device): known devices skip the tarpit and are limited per device rather than per network, so the owner
+isn't locked out by someone else's guessing.
+
+`GET /api/bootstrap` is sent with `Cache-Control: no-store` (health data never lands in the browser's HTTP cache) and an
+`ETag` computed from a cheap version stamp of every table; a request with a matching `If-None-Match` gets a `304` without
+the data set being read. JSON responses are compressed with Brotli (or gzip).
 
 ### Offline writes
 
 Edits are queued on the device and replayed in order. `POST /api/exercises` and `POST /api/exercises/:id/maxes`
 accept an `Idempotency-Key` header (8–80 characters of `A-Z a-z 0-9 . _ : -`); the client generates one per create and
 persists it with the queued edit. A repeated key returns the first response (with `Idempotent-Replayed: true`) instead of
-creating the row again; reusing a key for a different request is a 422. Keys live in `idempotency_keys` and are pruned
-after 7 days.
+creating the row again; reusing a key for a different request — another path, or another body (compared by a hash of the
+parsed body) — is a 422. Keys live in `idempotency_keys` and are pruned after 7 days (hourly while running, and on every
+boot/release); deleting a max entry forgets the key that created it. A queued max entry also carries the time it was made
+on the device (`createdAt`, trusted within the last 30 days), so a backlog flushed at once keeps its real order.
 
 ### Backups
 
@@ -152,7 +189,8 @@ heroku run --no-tty "node dist/server/restore.js -" < export.json               
 The restore applies migrations, then replaces everything in a single transaction (rows keep their ids; id sequences
 are moved past them) and **signs every device out** (the session epoch moves on, so a cookie revoked before the restore
 can't come back). It refuses to run on a database that already has data — anything beyond the untouched first-boot
-seed — unless you add `--force`. Older, unversioned exports are accepted too.
+seed, including exercises you created, renamed or archived — unless you add `--force`. Older, unversioned exports are
+accepted too. On failure it prints what went wrong (error name, code, database detail), never the data.
 
 A database-level rollback (`heroku pg:backups:restore`) also rolls `auth_state` back, which can revive cookies that were
 signed out after the backup. Move the epoch past anything issued since:

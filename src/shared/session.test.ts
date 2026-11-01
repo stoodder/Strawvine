@@ -3,7 +3,7 @@ import { defaultSettings } from "./defaults";
 import { buildModel } from "./insights";
 import { achievements, checklist, streaks, type AppData } from "./gamify";
 import { emptyDayLog, type Exercise, type MaxEntry, type Session } from "./schemas";
-import { accessoryHint, blankSet, buildSession, planMatches, sessionVolume } from "./session";
+import { accessoryHint, blankSet, buildSession, planChanged, planMatches, planSignature, sessionCounts, sessionVolume } from "./session";
 import { addDays } from "./dates";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -68,7 +68,8 @@ describe("buildSession", () => {
     const acc = normal.blocks.find((b) => b.kind === "accessory")!;
     expect(acc.exercises).toHaveLength(2); // superset preserved
     expect(acc.exercises[0]!.sets[0]!.targetWeight).toBe(50);
-    expect(acc.exercises[1]!.sets[0]!.targetReps).toBe(45);
+    // Targets carry over, not what was done (45 s held against a 30 s target stays a 30 s target).
+    expect(acc.exercises[1]!.sets[0]!.targetReps).toBe(30);
 
     const deload = buildSession("2026-11-30", { settings, exercises, maxEntries, sessions: [prior] });
     expect(deload.deload).toBe(true);
@@ -315,5 +316,119 @@ describe("accessoryHint", () => {
     const unlogged = sess("2026-11-17", [[null, 12, 60, false]]);
     expect(accessoryHint(10, "2026-11-23", [good, short, skipped, unlogged], 5)).toBeNull(); // Nov 9 fell short
     expect(accessoryHint(10, "2026-11-09", [good, short, skipped, unlogged], 5)?.suggestedWeight).toBe(45); // before Nov 9
+  });
+});
+
+describe("carrying numbers across weeks", () => {
+  const set = (weight: number, target: number | null, reps: number | null, done = true) =>
+    blankSet({ id: `s${weight}-${target}-${reps}`, targetReps: target, targetWeight: weight, reps, weight: done ? weight : null, done });
+  const session = (date: string, ex: Session["blocks"][number]["exercises"]): Session => ({
+    ...buildSession(date, { settings, exercises: [], maxEntries: [], sessions: [] }),
+    blocks: [{ id: `b-${date}`, kind: "accessory", exercises: ex }],
+  });
+  const fly = (s: Session) => s.blocks.find((b) => b.kind === "accessory")!.exercises.find((e) => e.exerciseId === 10)!;
+  // Default program: cycle starts Mon 2026-11-02, week 5 (Nov 30 – Dec 6) is the deload.
+
+  it("keeps a missed rep from becoming next week's target", () => {
+    const last = session("2026-11-09", [
+      { exerciseId: 10, measure: "reps", sets: [set(50, 12, 10), set(50, null, 8)] }, // 2nd set added by the athlete
+    ]);
+    const next = buildSession("2026-11-16", { settings, exercises, maxEntries, sessions: [last] });
+    expect(fly(next).sets.map((s) => [s.targetReps, s.targetWeight])).toEqual([
+      [12, 50],
+      [8, 50],
+    ]);
+  });
+
+  it("never carries a deload load into a normal week after a skip", () => {
+    const normal = session("2026-11-23", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12, 12)] }]);
+    const deload = session("2026-11-30", [{ exerciseId: 10, measure: "reps", sets: [set(40, 12, 12)] }]);
+    expect(deload.deload).toBe(true);
+    const skipped = session("2026-12-07", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12, null, false)], skipped: true }]);
+    const next = buildSession("2026-12-14", { settings, exercises, maxEntries, sessions: [normal, deload, skipped] });
+    expect(fly(next).sets[0]!.targetWeight).toBe(50); // from Nov 23, not the deload's 40
+
+    // Only a deload performance exists: its load is scaled back up (40 / 0.8 = 50).
+    const onlyDeload = buildSession("2026-12-14", { settings, exercises, maxEntries, sessions: [deload, skipped] });
+    expect(fly(onlyDeload).sets[0]!.targetWeight).toBe(50);
+    // …and so is a deload week used as the template itself.
+    const fromDeload = buildSession("2026-12-07", { settings, exercises, maxEntries, sessions: [deload] });
+    expect(fly(fromDeload).sets[0]!.targetWeight).toBe(50);
+  });
+
+  it("bases the progression hint on the last normal week, against that session's targets", () => {
+    const normal = session("2026-11-23", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12, 12)] }]);
+    const deload = session("2026-11-30", [{ exerciseId: 10, measure: "reps", sets: [set(40, 12, 12)] }]);
+    expect(accessoryHint(10, "2026-12-07", [normal, deload], 5)?.suggestedWeight).toBe(55);
+    const short = session("2026-11-23", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12, 11)] }]);
+    expect(accessoryHint(10, "2026-12-07", [short, deload], 5)).toBeNull();
+  });
+});
+
+describe("plan signature", () => {
+  const ctx = { settings, exercises, maxEntries, sessions: [] as Session[] };
+
+  it("is stored by buildSession and null without a main lift", () => {
+    const s = buildSession("2026-11-02", ctx);
+    expect(s.planSig).toBe(planSignature("2026-11-02", ctx));
+    expect(typeof s.planSig).toBe("string");
+    expect(buildSession("2026-11-06", ctx).planSig).toBeNull();
+    expect(planSignature("2026-11-06", ctx)).toBeNull();
+  });
+
+  it("flags program and max changes, but not the athlete's own edits", () => {
+    const s = buildSession("2026-11-02", ctx);
+    expect(planChanged(s, ctx)).toBe(false);
+    const primary = s.blocks[0]!;
+    const edited: Session = {
+      ...s,
+      blocks: [
+        {
+          ...primary,
+          exercises: [
+            { ...primary.exercises[0]!, sets: primary.exercises[0]!.sets.map((x) => ({ ...x, targetWeight: 135, targetReps: 3 })) },
+          ],
+        },
+      ],
+    };
+    expect(planChanged(edited, ctx)).toBe(false);
+    expect(planChanged({ ...edited, blocks: [] }, ctx)).toBe(false);
+
+    const newMax: MaxEntry = { ...maxEntries[0]!, id: 2, valueLb: 335, createdAt: "2026-11-01T01:00:00Z" };
+    expect(planChanged(s, { ...ctx, maxEntries: [...maxEntries, newMax] })).toBe(true);
+    const noAmrap = { ...settings, program: { ...settings.program, amrapLastSet: false } };
+    expect(planChanged(s, { ...ctx, settings: noAmrap })).toBe(true);
+    // A day that had no main lift gains one.
+    const days = { ...settings.program.days, "5": { label: "Carries", primaryExerciseId: 1, progression: false } };
+    expect(
+      planChanged(buildSession("2026-11-06", ctx), { ...ctx, settings: { ...settings, program: { ...settings.program, days } } }),
+    ).toBe(true);
+  });
+
+  it("falls back to comparing sets for sessions saved before the signature existed", () => {
+    const { planSig: _sig, ...legacy } = buildSession("2026-11-02", ctx);
+    expect(planChanged(legacy, ctx)).toBe(false);
+    const newMax: MaxEntry = { ...maxEntries[0]!, id: 2, valueLb: 335, createdAt: "2026-11-01T01:00:00Z" };
+    expect(planChanged(legacy, { ...ctx, maxEntries: [...maxEntries, newMax] })).toBe(true);
+  });
+});
+
+describe("sessionCounts", () => {
+  it("counts logged and total sets, leaving out skipped exercises", () => {
+    const s: Session = {
+      ...buildSession("2026-11-06", { settings, exercises: [], maxEntries: [], sessions: [] }),
+      blocks: [
+        {
+          id: "a",
+          kind: "accessory",
+          exercises: [
+            { exerciseId: 10, measure: "reps", sets: [blankSet({ done: true }), blankSet()] },
+            { exerciseId: 11, measure: "seconds", sets: [blankSet({ done: true }), blankSet({ done: true })], skipped: true },
+          ],
+        },
+        { id: "b", kind: "accessory", exercises: [{ exerciseId: 12, measure: "reps", sets: [blankSet({ done: true })] }] },
+      ],
+    };
+    expect(sessionCounts(s)).toEqual({ done: 2, total: 3 });
   });
 });

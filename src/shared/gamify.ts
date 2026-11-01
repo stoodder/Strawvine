@@ -1,7 +1,7 @@
 /**
  * Closing the day, streaks and achievements — all derived from raw data.
  */
-import { benchmarkPrs } from "./benchmarks";
+import { benchmarkPrs, type BenchmarkPr } from "./benchmarks";
 import { addDays, dateRange, formatShortDate, weekdayOf, type ISODate } from "./dates";
 import { CALIBRATION_DAYS, firstTdeeDate, isLogged } from "./energy";
 import { cyclePosition, scheduledProgramDay } from "./program";
@@ -225,10 +225,20 @@ export interface AmrapPr {
  * AMRAP rep PRs: a completed AMRAP set with more reps than every earlier AMRAP set of the same
  * lift at the same or a heavier load (a first AMRAP at a load only sets the baseline). One per
  * lift per session — its best set. Skipped exercises and unsaved (temporary-id) lifts are ignored.
+ * A PR depends only on earlier sessions, so `upTo` just cuts the list.
  */
 export function amrapPrs(sessions: ReadonlyArray<Session>, upTo?: ISODate): AmrapPr[] {
-  const sorted = sessions.filter((s) => !upTo || s.date <= upTo).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  const history = new Map<number, Array<{ reps: number; weightLb: number }>>();
+  const all = memo(amrapMemo, sessions, computeAmrapPrs);
+  return upTo === undefined ? [...all] : all.filter((pr) => pr.date <= upTo);
+}
+
+const amrapMemo = new WeakMap<object, AmrapPr[]>();
+
+function computeAmrapPrs(sessions: ReadonlyArray<Session>): AmrapPr[] {
+  const sorted = [...sessions].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  // Per lift: load → most reps ever done at it. The best at-or-above a load is a scan over the
+  // (few) distinct loads, so the whole pass stays linear in the number of sets.
+  const history = new Map<number, Map<number, number>>();
   const out: AmrapPr[] = [];
   for (const s of sorted) {
     const today = new Map<number, Array<{ reps: number; weightLb: number }>>();
@@ -238,22 +248,54 @@ export function amrapPrs(sessions: ReadonlyArray<Session>, upTo?: ISODate): Amra
         for (const set of e.sets) {
           const weightLb = set.weight ?? set.targetWeight;
           if (!set.amrap || !set.done || set.reps === null || weightLb === null) continue;
-          today.set(e.exerciseId, [...(today.get(e.exerciseId) ?? []), { reps: set.reps, weightLb }]);
+          const list = today.get(e.exerciseId);
+          if (list) list.push({ reps: set.reps, weightLb });
+          else today.set(e.exerciseId, [{ reps: set.reps, weightLb }]);
         }
       }
     for (const [exerciseId, sets] of today) {
-      const past = history.get(exerciseId) ?? [];
+      let past = history.get(exerciseId);
+      if (!past) history.set(exerciseId, (past = new Map()));
       let pr: AmrapPr | null = null;
       for (const set of sets) {
-        const atOrAbove = past.filter((p) => p.weightLb >= set.weightLb);
-        if (!atOrAbove.length) continue;
-        const previousReps = Math.max(...atOrAbove.map((p) => p.reps));
+        let previousReps = -1;
+        for (const [w, reps] of past) if (w >= set.weightLb && reps > previousReps) previousReps = reps;
+        if (previousReps < 0) continue;
         if (set.reps > previousReps && (!pr || set.reps > pr.reps || (set.reps === pr.reps && set.weightLb > pr.weightLb)))
           pr = { key: `amrap-${s.date}-${exerciseId}`, date: s.date, exerciseId, reps: set.reps, weightLb: set.weightLb, previousReps };
       }
       if (pr) out.push(pr);
-      history.set(exerciseId, [...past, ...sets]);
+      for (const set of sets) past.set(set.weightLb, Math.max(past.get(set.weightLb) ?? -1, set.reps));
     }
+  }
+  return out;
+}
+
+/**
+ * Per-input memo: the client recomputes achievements on every write, but most writes change one
+ * collection (a day log, a session…) and leave the other arrays untouched (same identity).
+ */
+function memo<K extends object, V>(cache: WeakMap<object, V>, key: K, compute: (key: K) => V): V {
+  let v = cache.get(key);
+  if (v === undefined) cache.set(key, (v = compute(key)));
+  return v;
+}
+
+const maxHistoryMemo = new WeakMap<object, Map<number, EffectiveMaxEntry[]>>();
+const maxPrMemo = new WeakMap<object, MaxPr[]>();
+const benchmarkMemo = new WeakMap<object, BenchmarkPr[]>();
+const loggedMemo = new WeakMap<object, ISODate[]>();
+const stepsMemo = new WeakMap<object, Array<{ date: ISODate; key: string; tier: number }>>();
+const volumeMemo = new WeakMap<object, Array<{ date: ISODate; tier: number }>>();
+
+/** Each tier of a running total, with the date it was first reached (items sorted by date). */
+function tierDates<T>(items: T[], value: (t: T) => number, date: (t: T) => ISODate, tiers: number[]) {
+  const out: Array<{ date: ISODate; tier: number }> = [];
+  let total = 0;
+  let i = 0;
+  for (const it of items) {
+    total += value(it);
+    while (i < tiers.length && total >= tiers[i]!) out.push({ date: date(it), tier: tiers[i++]! });
   }
   return out;
 }
@@ -262,11 +304,14 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   const out: Achievement[] = [];
   const exName = (id: number) => data.exercises.find((e) => e.id === id)?.name ?? "Lift";
 
-  // Calibration ramp-up.
-  const logged = data.days
-    .filter((d) => isLogged(d) && d.date <= today)
-    .map((d) => d.date)
-    .sort();
+  // Calibration ramp-up. Each milestone is the first date something became true, so computing
+  // them over every logged day and dropping those after `today` is the same as cutting first.
+  const logged = memo(loggedMemo, data.days, (days) =>
+    days
+      .filter((d) => isLogged(d))
+      .map((d) => d.date)
+      .sort(),
+  );
   const calib: Array<[ISODate | null | undefined, string, string, string]> = [
     [logged[0], "calib-1", "First entry", "Weight and calories logged. The engine is warming up."],
     // Not simply the 2nd logged day: a TDEE needs another logged day within the week before.
@@ -274,7 +319,7 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
     [logged[6], "calib-7", "Averages online", "A full week of weighted averages."],
     [logged[CALIBRATION_DAYS - 1], "calib-14", "Calibrated", "Your TDEE is now fully measured, not estimated."],
   ];
-  for (const [d, key, title, detail] of calib) if (d) out.push({ key, title, detail, date: d, tier: "milestone" });
+  for (const [d, key, title, detail] of calib) if (d && d <= today) out.push({ key, title, detail, date: d, tier: "milestone" });
 
   // Closed days & streaks.
   const closed = [...closedDates(data, today)].sort();
@@ -294,8 +339,8 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   }
 
   // Max PRs (see `maxPrs`).
-  const byExercise = effectiveMaxHistory(data.maxEntries);
-  for (const pr of maxPrs(byExercise)) {
+  const byExercise = memo(maxHistoryMemo, data.maxEntries, effectiveMaxHistory);
+  for (const pr of memo(maxPrMemo, byExercise, maxPrs)) {
     const { entry: e, gainLb } = pr;
     out.push({
       key: `max-${pr.keyId}`,
@@ -316,15 +361,16 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
       tier: "pr",
     });
 
-  // Benchmark metcon PRs (see `benchmarkPrs`).
-  for (const pr of benchmarkPrs(data.days.filter((d) => d.date <= today)))
-    out.push({
-      key: pr.key,
-      title: `${pr.entry.name} PR`,
-      detail: `${pr.entry.score} · previous ${pr.previous.score}`,
-      date: pr.entry.date,
-      tier: "pr",
-    });
+  // Benchmark metcon PRs (see `benchmarkPrs`); like AMRAP PRs they only look back in time.
+  for (const pr of memo(benchmarkMemo, data.days, benchmarkPrs))
+    if (pr.entry.date <= today)
+      out.push({
+        key: pr.key,
+        title: `${pr.entry.name} PR`,
+        detail: `${pr.entry.score} · previous ${pr.previous.score}`,
+        date: pr.entry.date,
+        tier: "pr",
+      });
 
   // Strength targets. A correction restates a max; it never hits a target by itself.
   for (const t of data.settings.strengthTargets) {
@@ -357,39 +403,24 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
         tier: "milestone",
       });
 
-  // Lifetime volume & steps.
-  const sessions = [...data.sessions].filter((s) => s.date <= today).sort((a, b) => (a.date < b.date ? -1 : 1));
-  let volume = 0;
-  let vi = 0;
-  for (const s of sessions) {
-    volume += sessionVolume(s);
-    while (vi < VOLUME_TIERS.length && volume >= VOLUME_TIERS[vi]!) {
-      out.push({
-        key: `volume-${VOLUME_TIERS[vi]}`,
-        title: `${compact(VOLUME_TIERS[vi]!)} lb moved`,
-        detail: "Lifetime training volume.",
-        date: s.date,
-        tier: "milestone",
-      });
-      vi++;
-    }
-  }
-  const stepDays = [...data.days].filter((d) => d.steps && d.date <= today).sort((a, b) => (a.date < b.date ? -1 : 1));
-  let steps = 0;
-  let si = 0;
-  for (const d of stepDays) {
-    steps += d.steps ?? 0;
-    while (si < STEP_TIERS.length && steps >= STEP_TIERS[si]!) {
-      out.push({
-        key: `steps-${STEP_TIERS[si]}`,
-        title: `${compact(STEP_TIERS[si]!)} steps`,
-        detail: "Lifetime steps logged.",
-        date: d.date,
-        tier: "milestone",
-      });
-      si++;
-    }
-  }
+  // Lifetime volume & steps (running totals: a tier's date never depends on later entries).
+  const byDate = <T extends { date: ISODate }>(a: T, b: T) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const volumeTiers = memo(volumeMemo, data.sessions, (sessions) =>
+    tierDates([...sessions].sort(byDate), sessionVolume, (s) => s.date, VOLUME_TIERS),
+  );
+  for (const { date, tier } of volumeTiers)
+    if (date <= today)
+      out.push({ key: `volume-${tier}`, title: `${compact(tier)} lb moved`, detail: "Lifetime training volume.", date, tier: "milestone" });
+  const stepTiers = memo(stepsMemo, data.days, (days) =>
+    tierDates(
+      days.filter((d) => d.steps).sort(byDate),
+      (d) => d.steps ?? 0,
+      (d) => d.date,
+      STEP_TIERS,
+    ).map((t) => ({ ...t, key: `steps-${t.tier}` })),
+  );
+  for (const { date, tier, key } of stepTiers)
+    if (date <= today) out.push({ key, title: `${compact(tier)} steps`, detail: "Lifetime steps logged.", date, tier: "milestone" });
 
   // Goal weight (raw weight reaching the target after the goal was set). The goal's direction
   // comes from the bodyweight it was set at: recorded with the goal, else the latest weigh-in

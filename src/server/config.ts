@@ -18,6 +18,8 @@ export const PLACEHOLDER_SECRETS = new Set([
 ]);
 
 export const MIN_PROD_PASSWORD_LENGTH = 12;
+/** "aaaaaaaaaaaa" or "abababababab" are 12 characters but barely a password. */
+export const MIN_PROD_PASSWORD_DISTINCT = 6;
 
 /**
  * Whether `secret` looks like ≥ 256 bits of real randomness: ≥ 64 hex characters (`openssl
@@ -53,8 +55,12 @@ export function secretProblems({
     );
   if (PLACEHOLDER_SECRETS.has(password.trim().toLowerCase()))
     problems.push("APP_PASSWORD is a placeholder/default value. Choose your own password (12+ characters).");
-  else if (password.length < MIN_PROD_PASSWORD_LENGTH)
-    problems.push(`APP_PASSWORD must be at least ${MIN_PROD_PASSWORD_LENGTH} characters in production.`);
+  else if (password.trim().length < MIN_PROD_PASSWORD_LENGTH)
+    problems.push(`APP_PASSWORD must be at least ${MIN_PROD_PASSWORD_LENGTH} characters (not counting surrounding spaces) in production.`);
+  else if (new Set(password.toLowerCase()).size < MIN_PROD_PASSWORD_DISTINCT)
+    problems.push(
+      `APP_PASSWORD is too repetitive: use at least ${MIN_PROD_PASSWORD_DISTINCT} different characters (a few random words work well).`,
+    );
   if (password === sessionSecret) problems.push("APP_PASSWORD and SESSION_SECRET must differ.");
   return problems;
 }
@@ -67,12 +73,14 @@ export function trustProxyFrom(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
- * The build id the web client was compiled with (`npm run build` writes dist/build-id.txt);
- * BUILD_ID in the environment wins. Undefined in dev, where no header is sent.
+ * The build id the web client was compiled with (`npm run build` writes dist/build-id.txt).
+ * Only the file counts: a runtime BUILD_ID could differ from what the client was compiled
+ * with, and the client would then think a newer deploy is always live. Undefined in dev, where
+ * no header is sent.
  */
-export function readBuildId(env: NodeJS.ProcessEnv, distDir = path.resolve(process.cwd(), "dist")): string | undefined {
+export function readBuildId(distDir = path.resolve(process.cwd(), "dist")): string | undefined {
   const file = path.join(distDir, "build-id.txt");
-  const raw = env.BUILD_ID?.trim() || (existsSync(file) ? readFileSync(file, "utf8").trim() : "");
+  const raw = existsSync(file) ? readFileSync(file, "utf8").trim() : "";
   return /^[\w.-]{1,64}$/.test(raw) ? raw : undefined;
 }
 
@@ -107,6 +115,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     sessionSecret,
     port: Number(env.PORT ?? 3000),
     trustProxy: trustProxyFrom(env),
-    buildId: readBuildId(env),
+    buildId: readBuildId(),
   };
 }

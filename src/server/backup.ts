@@ -19,6 +19,8 @@ import {
   type Session,
   type Settings,
 } from "../shared/schemas";
+import { SEED_ACCESSORIES, SEED_EXERCISES } from "../shared/defaults";
+import { newKeySalt } from "./auth";
 import type { Db } from "./db/client";
 import { authState, dayLogs, exercises, idempotencyKeys, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
 
@@ -113,7 +115,10 @@ export class RestoreError extends Error {
 }
 
 export interface RestoreSummary {
-  /** The new session epoch: every session cookie issued before the restore is revoked. */
+  /**
+   * The new session epoch. With the new key salt, every session cookie issued before the
+   * restore — on this database or any other — is revoked.
+   */
   sessionEpoch: number;
   days: number;
   exercises: number;
@@ -163,17 +168,33 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
       sql`lock table day_logs, sessions, max_entries, exercises, settings, seen_achievements, idempotency_keys in access exclusive mode`,
     );
     if (!force) {
-      const [counts] = await tx.execute<{ days: number; sessions: number; maxes: number; seen: number; onboarded: boolean | null }>(sql`
+      // Exercises are seeded in one transaction (one `created_at`) with known names; anything
+      // created later, renamed or archived is the athlete's.
+      const seeded = sql.join(
+        [...SEED_EXERCISES, ...SEED_ACCESSORIES].map((e) => sql`${e.name}`),
+        sql`, `,
+      );
+      const [counts] = await tx.execute<{
+        days: number;
+        sessions: number;
+        maxes: number;
+        seen: number;
+        exercises: number;
+        onboarded: boolean | null;
+      }>(sql`
         select (select count(*)::int from day_logs) as days,
                (select count(*)::int from sessions) as sessions,
                (select count(*)::int from max_entries) as maxes,
                (select count(*)::int from seen_achievements) as seen,
+               (select count(*)::int from exercises
+                 where archived or name not in (${seeded})
+                    or created_at > (select min(created_at) from exercises)) as exercises,
                (select (data->>'onboarded')::boolean from settings where id = 1) as onboarded`);
       const c = counts!;
-      if (c.days || c.sessions || c.maxes || c.seen || c.onboarded)
+      if (c.days || c.sessions || c.maxes || c.seen || c.exercises || c.onboarded)
         throw new RestoreError(
-          `The database already has data (${c.days} days, ${c.sessions} sessions, ${c.maxes} max entries). ` +
-            "Re-run with --force to replace all of it with the export.",
+          `The database already has data (${c.days} days, ${c.sessions} sessions, ${c.maxes} max entries, ` +
+            `${c.exercises} exercises of your own). Re-run with --force to replace all of it with the export.`,
         );
     }
 
@@ -224,11 +245,13 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
       );
 
     // Sign every device out: a restore can roll back sign-outs (and the data a device holds
-    // offline no longer matches), so no cookie issued before it stays valid.
+    // offline no longer matches), so no cookie issued before it stays valid. The epoch alone
+    // isn't enough — a fresh database starts counting again — so the signing-key salt changes too.
+    const keySalt = newKeySalt();
     const [epoch] = await tx
       .insert(authState)
-      .values({ id: 1, sessionEpoch: 1 })
-      .onConflictDoUpdate({ target: authState.id, set: { sessionEpoch: sql`${authState.sessionEpoch} + 1`, updatedAt: now } })
+      .values({ id: 1, sessionEpoch: 1, keySalt })
+      .onConflictDoUpdate({ target: authState.id, set: { sessionEpoch: sql`${authState.sessionEpoch} + 1`, keySalt, updatedAt: now } })
       .returning({ epoch: authState.sessionEpoch });
     sessionEpoch = epoch!.epoch;
   });

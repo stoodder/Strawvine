@@ -3,6 +3,7 @@ import { localToday } from "../shared/dates";
 import { defaultSettings, SEED_ACCESSORIES, SEED_EXERCISES, type SeedIds } from "../shared/defaults";
 import { runMigrations, withMigrationLock, type Db, type Sql } from "./db/client";
 import { exercises, settings } from "./db/schema";
+import { pruneIdempotencyKeys } from "./idempotency";
 
 /** First boot: create the tracked lifts and the default program. Idempotent. */
 export async function ensureSeeded(db: Db, today: string = localToday()) {
@@ -26,10 +27,18 @@ export async function ensureSeeded(db: Db, today: string = localToday()) {
   });
 }
 
-/** Apply pending migrations and seed a fresh database, under the migration advisory lock. */
-export async function prepareDatabase(db: Db, sql: Sql) {
-  await withMigrationLock(sql, async () => {
-    await runMigrations(db);
-    await ensureSeeded(db);
-  });
+/**
+ * Apply pending migrations, seed a fresh database and prune expired idempotency keys, under the
+ * migration advisory lock (waiting at most `lockTimeoutMs` for it).
+ */
+export async function prepareDatabase(db: Db, sql: Sql, { lockTimeoutMs }: { lockTimeoutMs?: number } = {}) {
+  await withMigrationLock(
+    sql,
+    async () => {
+      await runMigrations(db);
+      await ensureSeeded(db);
+      await pruneIdempotencyKeys(db);
+    },
+    { timeoutMs: lockTimeoutMs },
+  );
 }

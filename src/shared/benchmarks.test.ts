@@ -95,4 +95,37 @@ describe("benchmark history", () => {
     const [pr] = benchmarkPrs([metcon("2026-11-02", long, "10"), metcon("2026-11-09", long, "11")]);
     expect(pr!.key.length).toBeLessThanOrEqual(120);
   });
+
+  it("keeps a best per comparable kind, so one odd score doesn't block later PRs", () => {
+    const fran = (date: string, score: string) => metcon(date, "Fran", score);
+    const days = [
+      fran("2026-11-02", "4:02"),
+      fran("2026-11-09", "95 lb"), // logged the load by mistake
+      fran("2026-11-16", "3:50"),
+      fran("2026-11-23", "100 lb"),
+      fran("2026-11-30", "3:55"),
+    ];
+    expect(benchmarkPrs(days).map((p) => [p.entry.score, p.previous.score])).toEqual([
+      ["3:50", "4:02"],
+      ["100 lb", "95 lb"],
+    ]);
+    // The editor's "previous best": the kind of the score being entered, else the latest kind used.
+    expect(benchmarkBest(days, "fran")?.score).toBe("3:50");
+    expect(benchmarkBest(days, "fran", undefined, parseScore("90 lb"))?.score).toBe("100 lb");
+    expect(benchmarkBest(days, "fran", "2026-11-23", parseScore("3:30"))?.score).toBe("3:50");
+  });
+
+  it("measures a capped score against earlier finishes, and a finish against the best time", () => {
+    const fran = (date: string, score: string) => metcon(date, "Fran", score);
+    const prs = benchmarkPrs([
+      fran("2026-11-02", "20 rounds"),
+      fran("2026-11-09", "9:30"), // first finish beats a capped score
+      fran("2026-11-16", "25 rounds"), // capped again: not a PR after finishing
+      fran("2026-11-23", "9:00"),
+    ]);
+    expect(prs.map((p) => [p.entry.score, p.previous.score])).toEqual([
+      ["9:30", "20 rounds"],
+      ["9:00", "9:30"],
+    ]);
+  });
 });

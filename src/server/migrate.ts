@@ -14,7 +14,8 @@ if (!url) {
 
 const { db, sql } = createDb(url);
 try {
-  await prepareDatabase(db, sql);
+  // The release phase may wait longer for the lock than a booting dyno (see index.ts).
+  await prepareDatabase(db, sql, { lockTimeoutMs: 15 * 60_000 });
   console.log("Database is up to date.");
 } catch (err) {
   console.error("Migration failed:", err instanceof Error ? err.message : err);

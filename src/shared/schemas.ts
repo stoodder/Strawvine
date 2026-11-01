@@ -111,6 +111,11 @@ export const maxEntryCreateSchema = z
     valueLb: z.number().min(0).max(2000),
     source: maxSource.default("manual"),
     note: safeString().max(500).nullable().default(null),
+    /**
+     * When the entry was made on the device (an offline edit is sent later). The server clamps it
+     * to a sane range; it orders entries for the correction window (gamify.ts).
+     */
+    createdAt: z.iso.datetime({ offset: true }).optional(),
   })
   .strict();
 
@@ -285,6 +290,11 @@ export const sessionSchema = z.object({
   blocks: z.array(blockSchema).max(30),
   notes: safeString().max(20_000),
   completedAt: safeString().nullable(),
+  /**
+   * What the program prescribed for the main lift when the session was built (`planSignature`),
+   * null when nothing was. Absent on sessions saved before it existed.
+   */
+  planSig: safeString().max(2000).nullable().optional(),
 });
 export type Session = z.infer<typeof sessionSchema>;
 

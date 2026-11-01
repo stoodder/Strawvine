@@ -23,6 +23,18 @@ if (!file || !url) {
   process.exit(2);
 }
 
+/**
+ * What went wrong, without echoing data: an error's name, code and (Postgres) detail, never its
+ * message — driver and parser messages can quote the values being written.
+ */
+function describe(err: unknown): string {
+  if (!(err instanceof Error)) return "unknown error";
+  const e = err as Error & { code?: unknown; detail?: unknown; cause?: { code?: unknown; detail?: unknown } };
+  const code = e.code ?? e.cause?.code;
+  const detail = e.detail ?? e.cause?.detail;
+  return [e.name, code !== undefined && `code ${String(code)}`, typeof detail === "string" && detail].filter(Boolean).join(", ");
+}
+
 async function readInput(path: string): Promise<string> {
   if (path !== "-") return readFile(path, "utf8");
   const chunks: Buffer[] = [];
@@ -33,10 +45,15 @@ async function readInput(path: string): Promise<string> {
 const { db, sql } = createDb(url);
 try {
   let json: unknown;
+  const source = file === "-" ? "stdin" : file;
+  const text = await readInput(file).catch((err: unknown) => {
+    throw new RestoreError(`Couldn't read ${source}: ${describe(err)}`);
+  });
   try {
-    json = JSON.parse(await readInput(file));
-  } catch (err) {
-    throw new RestoreError(`Couldn't read ${file === "-" ? "stdin" : file} as JSON: ${err instanceof Error ? err.message : err}`);
+    json = JSON.parse(text);
+  } catch {
+    // The parser's message quotes the input around the error — health data — so it isn't shown.
+    throw new RestoreError(`Couldn't read ${source} as JSON (is it a Strawvine export?).`);
   }
   await prepareDatabase(db, sql);
   const summary = await restoreExport(db, json, { force });
@@ -46,7 +63,7 @@ try {
       "Every device has been signed out.",
   );
 } catch (err) {
-  console.error(err instanceof RestoreError ? err.message : `Restore failed: ${err instanceof Error ? err.message : err}`);
+  console.error(err instanceof RestoreError ? err.message : `Restore failed: ${describe(err)}`);
   process.exitCode = 1;
 } finally {
   await sql.end({ timeout: 5 });

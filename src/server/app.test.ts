@@ -5,14 +5,18 @@ import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Bootstrap } from "../shared/schemas";
 import { buildSession } from "../shared/session";
-import { createApp, LOGIN_BODY_LIMIT_BYTES } from "./app";
+import { maxPrs, effectiveMaxHistory } from "../shared/gamify";
+import { clampCreatedAt, createApp, LOGIN_BODY_LIMIT_BYTES } from "./app";
 import { deriveSessionKey, makeToken, MAX_AGE_S, RENEW_BELOW_S } from "./auth";
 import { buildExport, restoreExport, RestoreError } from "./backup";
-import { createDb, runMigrations, withMigrationLock } from "./db/client";
+import { createDb, MigrationLockTimeout, runMigrations, withMigrationLock } from "./db/client";
 import { pruneIdempotencyKeys } from "./idempotency";
 import { ensureSeeded, prepareDatabase } from "./seed";
+import { assertDisposableDatabase } from "./testDb";
 
 const url = process.env.TEST_DATABASE_URL ?? "postgres://postgres@localhost:5432/strawvine_test";
+// These tests drop and recreate the schema: never against anything but a local throwaway database.
+assertDisposableDatabase(url);
 const { db, sql: client } = createDb(url);
 const secret = "x".repeat(40);
 const app = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false, buildId: "test-build" });
@@ -24,6 +28,11 @@ const req = (path: string, init: RequestInit = {}) =>
     headers: { "content-type": "application/json", cookie, ...(init.headers as Record<string, string>) },
   });
 const json = (method: string, body: unknown) => ({ method, body: JSON.stringify(body) });
+/** The cookie-signing key for this database's current salt. */
+const dbKey = async () => {
+  const [row] = await db.execute<{ salt: string | null }>(sql`select key_salt as salt from auth_state where id = 1`);
+  return deriveSessionKey(secret, "hunter2", row?.salt ?? "");
+};
 
 beforeAll(async () => {
   await db.execute(sql`drop schema if exists public cascade; drop schema if exists drizzle cascade; create schema public;`);
@@ -204,6 +213,27 @@ describe("idempotent creates", () => {
       expect((await req("/api/exercises", withKey(key, { name: "Face pull" }))).status, key).toBe(400);
   });
 
+  it("refuses a key reused with a different body instead of replaying the old response", async () => {
+    const first = await req("/api/exercises", withKey("key-body-0001", { name: "Lat pulldown" }));
+    expect(first.status).toBe(201);
+    // Same body, keys in another order: a genuine retry.
+    const retry = await req("/api/exercises", withKey("key-body-0001", { measure: "reps", name: "Lat pulldown" }));
+    expect(retry.status).toBe(201);
+    expect(retry.headers.get("idempotent-replayed")).toBe("true");
+    const other = await req("/api/exercises", withKey("key-body-0001", { name: "Seated row" }));
+    expect(other.status).toBe(422);
+  });
+
+  it("forgets the stored create when that max is deleted", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const press = b.exercises.find((e) => e.name === "Strict press")!;
+    const body = { date: "2026-11-04", valueLb: 140 };
+    const created = await (await req(`/api/exercises/${press.id}/maxes`, withKey("key-max-delete-1", body))).json();
+    expect((await req(`/api/maxes/${created.id}`, { method: "DELETE" })).status).toBe(200);
+    const rows = await db.execute(sql`select key from idempotency_keys where key = 'key-max-delete-1'`);
+    expect(rows).toHaveLength(0);
+  });
+
   it("doesn't store failures, so the key still works once the request can succeed", async () => {
     expect((await req("/api/exercises/999999/maxes", withKey("key-missing-0001", { date: "2026-11-04", valueLb: 1 }))).status).toBe(404);
     expect((await req("/api/exercises", withKey("key-invalid-0001", { name: "" }))).status).toBe(400);
@@ -220,13 +250,98 @@ describe("idempotent creates", () => {
   });
 });
 
+describe("max entries made offline", () => {
+  const MIN = 60_000;
+  const DAY = 24 * 60 * MIN;
+  const isoDay = (t: number) => new Date(t).toISOString().slice(0, 10);
+
+  it("clamps the device's createdAt to the last 30 days and 5 minutes ahead", () => {
+    const now = Date.parse("2026-11-01T12:00:00Z");
+    expect(clampCreatedAt(undefined, now).toISOString()).toBe("2026-11-01T12:00:00.000Z");
+    expect(clampCreatedAt("2026-10-30T08:00:00Z", now).toISOString()).toBe("2026-10-30T08:00:00.000Z");
+    expect(clampCreatedAt("2025-01-01T00:00:00Z", now).getTime()).toBe(now - 30 * DAY);
+    expect(clampCreatedAt("2027-01-01T00:00:00Z", now).getTime()).toBe(now + 5 * MIN);
+  });
+
+  it("stores createdAt sent as an ISO string, and the server time without one", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const squat = b.exercises.find((e) => e.name === "Front squat")!;
+    const at = new Date(Date.now() - 3 * DAY);
+    const sent = await req(
+      `/api/exercises/${squat.id}/maxes`,
+      json("POST", { date: isoDay(at.getTime()), valueLb: 250, createdAt: at.toISOString() }),
+    );
+    expect(sent.status).toBe(201);
+    expect((await sent.json()).createdAt).toBe(at.toISOString());
+    // With an offset, too.
+    const offset = await req(
+      `/api/exercises/${squat.id}/maxes`,
+      json("POST", { date: "2026-11-01", valueLb: 251, createdAt: "2026-10-31T20:00:00-04:00" }),
+    );
+    expect(offset.status).toBe(201);
+    const before = Date.now();
+    const plain = await req(`/api/exercises/${squat.id}/maxes`, json("POST", { date: "2026-11-01", valueLb: 252 }));
+    expect(plain.status).toBe(201);
+    expect(Math.abs(Date.parse((await plain.json()).createdAt) - before)).toBeLessThan(60_000);
+  });
+
+  /** Creates a lift with a baseline, then posts `entries` back to back (an outbox flush). */
+  async function flush(name: string, entries: Array<{ date: string; valueLb: number; source: string; createdAt?: string }>) {
+    const ex = await (await req("/api/exercises", json("POST", { name, category: "primary", tracksMax: true }))).json();
+    const baseline = Date.now() - 20 * DAY;
+    await req(
+      `/api/exercises/${ex.id}/maxes`,
+      json("POST", { date: isoDay(baseline), valueLb: 300, source: "initial", createdAt: new Date(baseline).toISOString() }),
+    );
+    for (const e of entries) expect((await req(`/api/exercises/${ex.id}/maxes`, json("POST", e))).status).toBe(201);
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const mine = b.maxEntries.filter((m) => m.exerciseId === ex.id);
+    return { mine, prs: maxPrs(effectiveMaxHistory(mine)) };
+  }
+
+  it("keeps an AMRAP bump and a later manual max from merging into one correction", async () => {
+    const amrapAt = Date.now() - 6 * DAY; // "Oct 26"
+    const manualAt = Date.now() - 4 * DAY; // "Oct 28"
+    const { mine, prs } = await flush("Offline press A", [
+      { date: isoDay(amrapAt), valueLb: 303, source: "amrap", createdAt: new Date(amrapAt).toISOString() },
+      { date: isoDay(manualAt), valueLb: 310, source: "manual", createdAt: new Date(manualAt).toISOString() },
+    ]);
+    expect(mine.map((m) => m.createdAt)).toContain(new Date(amrapAt).toISOString());
+    expect(prs.map((p) => p.entry.valueLb)).toEqual([303, 310]);
+  });
+
+  it("doesn't let a lower manual max a week later erase a PR", async () => {
+    const prAt = Date.now() - 12 * DAY; // "Oct 20"
+    const laterAt = Date.now() - 5 * DAY; // "Oct 27"
+    const { prs } = await flush("Offline press B", [
+      { date: isoDay(prAt), valueLb: 320, source: "manual", createdAt: new Date(prAt).toISOString() },
+      { date: isoDay(laterAt), valueLb: 290, source: "manual", createdAt: new Date(laterAt).toISOString() },
+    ]);
+    expect(prs.map((p) => p.entry.valueLb)).toEqual([320]);
+  });
+
+  it("still treats a quick re-entry as a correction, and rejects malformed timestamps", async () => {
+    const at = Date.now() - 2 * DAY;
+    const { prs } = await flush("Offline press C", [
+      { date: isoDay(at), valueLb: 1320, source: "manual", createdAt: new Date(at).toISOString() },
+      { date: isoDay(at), valueLb: 320, source: "manual", createdAt: new Date(at + 2 * MIN).toISOString() },
+    ]);
+    expect(prs.map((p) => p.entry.valueLb)).toEqual([320]);
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const bench = b.exercises.find((e) => e.name === "Bench press")!;
+    expect(
+      (await req(`/api/exercises/${bench.id}/maxes`, json("POST", { date: "2026-11-01", valueLb: 1, createdAt: "yesterday" }))).status,
+    ).toBe(400);
+  });
+});
+
 describe("path parameters", () => {
   const patch = (id: string) => req(`/api/exercises/${id}`, json("PATCH", { archived: true }));
   const addMax = (id: string) => req(`/api/exercises/${id}/maxes`, json("POST", { date: "2026-11-01", valueLb: 300 }));
   const deleteMax = (id: string) => req(`/api/maxes/${id}`, { method: "DELETE" });
 
   it("rejects ids that aren't positive integers with 400", async () => {
-    for (const id of ["abc", "0", "-1", "1.5", "1e3", "0x1", "99999999999"]) {
+    for (const id of ["abc", "0", "-1", "1.5", "1e3", "0x1", "99999999999", "01", "007", "+5", " 5"]) {
       expect((await patch(id)).status, `PATCH /exercises/${id}`).toBe(400);
       expect((await addMax(id)).status, `POST /exercises/${id}/maxes`).toBe(400);
       expect((await deleteMax(id)).status, `DELETE /maxes/${id}`).toBe(400);
@@ -334,18 +449,54 @@ describe("request hardening", () => {
     expect(res.headers.get("permissions-policy")).toContain("camera=()");
   });
 
-  it("revalidates the bootstrap with an ETag and compresses it", async () => {
+  it("keeps the bootstrap out of the HTTP cache, revalidates it by ETag and compresses it", async () => {
     const first = await req("/api/bootstrap", { headers: { "accept-encoding": "gzip" } });
     expect(first.status).toBe(200);
     expect(first.headers.get("content-encoding")).toBe("gzip");
-    expect(first.headers.get("cache-control")).toBe("private, no-cache");
+    expect(first.headers.get("cache-control")).toBe("no-store");
     const tag = first.headers.get("etag")!;
-    expect(tag).toBeTruthy();
+    expect(tag).toMatch(/^W\/".+"$/);
     const again = await req("/api/bootstrap", { headers: { "if-none-match": tag } });
     expect(again.status).toBe(304);
+    expect(again.headers.get("etag")).toBe(tag);
+    expect(again.headers.get("cache-control")).toBe("no-store");
     expect(again.headers.get("x-strawvine-build")).toBe("test-build");
-    await req("/api/days/2026-11-07", json("PUT", { steps: 1234 }));
-    expect((await req("/api/bootstrap", { headers: { "if-none-match": tag } })).status).toBe(200);
+    expect((await req("/api/bootstrap", { headers: { "if-none-match": `W/"other", ${tag}` } })).status).toBe(304);
+
+    // Every kind of write moves the tag on.
+    let current = tag;
+    const changes = async (write: () => Response | Promise<Response>) => {
+      expect((await write()).ok).toBe(true);
+      const res = await req("/api/bootstrap", { headers: { "if-none-match": current } });
+      expect(res.status).toBe(200);
+      current = res.headers.get("etag")!;
+    };
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    await changes(() => req("/api/days/2026-11-07", json("PUT", { steps: 1234 })));
+    await changes(() => req("/api/days/2026-11-07", json("PUT", { steps: 1235 })));
+    await changes(() => req(`/api/exercises/${b.exercises[0]!.id}`, json("PATCH", { name: "Bench press" })));
+    await changes(() => req("/api/achievements/seen", json("POST", { keys: ["etag-test"] })));
+    await changes(() => req("/api/settings", json("PUT", b.settings)));
+    let id = 0;
+    await changes(async () => {
+      const res = await req(`/api/exercises/${b.exercises[0]!.id}/maxes`, json("POST", { date: "2026-11-07", valueLb: 300 }));
+      id = (await res.clone().json()).id;
+      return res;
+    });
+    await changes(() => req(`/api/maxes/${id}`, { method: "DELETE" }));
+  });
+
+  it("compresses JSON with Brotli when the client accepts it", async () => {
+    const res = await req("/api/bootstrap", { headers: { "accept-encoding": "gzip, deflate, br" } });
+    expect(res.headers.get("content-encoding")).toBe("br");
+    expect(res.headers.get("vary")).toContain("Accept-Encoding");
+    // `app.request` hands back the encoded bytes; decode them to be sure they're real Brotli.
+    const { brotliDecompressSync } = await import("node:zlib");
+    const body = JSON.parse(brotliDecompressSync(Buffer.from(await res.arrayBuffer())).toString()) as Bootstrap;
+    expect(body.exercises.length).toBeGreaterThan(0);
+    // Not when refused, and not for tiny bodies.
+    expect((await req("/api/bootstrap", { headers: { "accept-encoding": "br;q=0, gzip" } })).headers.get("content-encoding")).toBe("gzip");
+    expect((await req("/api/auth/me", { headers: { "accept-encoding": "br" } })).headers.get("content-encoding")).toBeNull();
   });
 
   it("checks the database in /api/health", async () => {
@@ -374,7 +525,7 @@ describe("request hardening", () => {
       password: "hunter2",
       sessionSecret: secret,
       secureCookies: false,
-      epochs: { current: async () => 0, bump: async () => 1 },
+      epochs: { current: async () => ({ epoch: 0, salt: "" }), bump: async () => ({ epoch: 1, salt: "" }) },
       log: (_m, details) => logged.push(details),
     });
     const res = await broken.request("/api/days/2026-11-02", {
@@ -390,10 +541,10 @@ describe("request hardening", () => {
 });
 
 describe("sessions", () => {
-  const key = deriveSessionKey(secret, "hunter2");
   const DAY = 86_400_000;
 
   it("re-issues the cookie when it gets old, but not on every request", async () => {
+    const key = await dbKey();
     const epoch = Number(cookie.split(".")[1]);
     const fresh = await app.request("/api/auth/me", { headers: { cookie } });
     expect(fresh.headers.get("set-cookie")).toBeNull();
@@ -418,6 +569,7 @@ describe("sessions", () => {
     const out = await app.request("/api/auth/logout", { method: "POST", headers: { cookie: phone } });
     expect(out.status).toBe(200);
     expect(out.headers.get("set-cookie")).toMatch(/^sv_session=;/);
+    expect(out.headers.get("clear-site-data")).toBe('"cache"');
     expect((await app.request("/api/auth/me", { headers: { cookie: phone } })).status).toBe(401);
     expect((await app.request("/api/auth/me", { headers: { cookie: laptop } })).status).toBe(401);
     cookie = await login();
@@ -462,8 +614,56 @@ describe("sessions", () => {
     for (let i = 0; i < 5; i++) expect((await attempt("hunter2")).status).toBe(200);
     expect((await attempt("nope")).status).toBe(401);
     expect((await attempt("nope")).status).toBe(401);
-    expect((await attempt("nope")).status).toBe(429);
+    const blocked = await attempt("nope");
+    expect(blocked.status).toBe(429);
+    expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
     expect((await attempt("hunter2")).status).toBe(429);
+  });
+
+  it("lets a known device sign in while others are slowed down by a distributed attack", async () => {
+    const limited = createApp({
+      db,
+      password: "hunter2",
+      sessionSecret: secret,
+      secureCookies: false,
+      trustProxy: true,
+      loginLimits: { perClient: 3, global: 4, baseDelayMs: 20, maxDelayMs: 60 },
+    });
+    const attempt = (password: string, ip: string, cookie = "") =>
+      limited.request("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": ip, cookie },
+        body: JSON.stringify({ password }),
+      });
+    // The owner's phone signs in once and is remembered.
+    const ok = await attempt("hunter2", "198.51.100.7");
+    const device = ok.headers
+      .getSetCookie()
+      .find((c) => c.startsWith("sv_device="))!
+      .split(";")[0]!;
+    expect(ok.headers.getSetCookie().find((c) => c.startsWith("sv_device="))).toMatch(/HttpOnly/i);
+    // Guessing from many networks…
+    for (let i = 0; i < 6; i++) expect((await attempt("nope", `203.0.${i}.9`)).status).toBe(401);
+    // …is now tarpitted (and refused when the queue is full) for unknown clients…
+    const slowed = await Promise.all([attempt("nope", "192.0.2.1"), attempt("nope", "192.0.2.77"), attempt("nope", "192.0.3.1")]);
+    expect(slowed.map((r) => r.status)).toContain(429);
+    // …but the known device signs straight in, from anywhere.
+    const started = Date.now();
+    expect((await attempt("hunter2", "100.64.0.1", device)).status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(50);
+    // A forged device cookie is just an unknown client.
+    expect(
+      (
+        await attempt(
+          "hunter2",
+          "192.0.2.200",
+          device.replace(/.$/, (c) => (c === "A" ? "B" : "A")),
+        )
+      ).status,
+    ).not.toBe(500);
+    // Addresses in one /24 share a budget.
+    for (let i = 0; i < 3; i++) await attempt("nope", `198.18.0.${i + 1}`, device.replace("sv_device=", "x="));
+    expect((await attempt("hunter2", "198.18.0.200")).status).toBe(429);
   });
 });
 
@@ -510,7 +710,7 @@ describe("export & restore", () => {
     expect(res.headers.get("content-disposition")).toMatch(/^attachment; filename="strawvine-export-\d{4}-\d{2}-\d{2}\.json"$/);
     const exported = await res.json();
     expect(exported).toMatchObject({ format: "strawvine-export", version: 2 });
-    expect(exported.seenAchievements.map((s: { key: string }) => s.key)).toEqual(["calib-1", "streak-3"]);
+    expect(exported.seenAchievements.map((s: { key: string }) => s.key)).toEqual(["calib-1", "etag-test", "streak-3"]);
     expect(exported.exercises[0].createdAt).toMatch(/Z$/);
     expect(exported.maxEntries.length).toBeGreaterThan(0);
     expect(exported.days.length).toBeGreaterThan(0);
@@ -566,15 +766,55 @@ describe("export & restore", () => {
       sql`insert into idempotency_keys (key, method, path, status, body) values ('key-before-restore', 'POST', '/api/exercises', 201, '{}')`,
     );
     const before = await epoch();
+    const oldKey = await dbKey();
     const summary = await restoreExport(db, await buildExport(db), { force: true });
     expect(summary.sessionEpoch).toBe(before + 1);
     expect(await epoch()).toBe(before + 1);
     expect(await db.execute(sql`select key from idempotency_keys`)).toHaveLength(0);
     // A cookie from before the restore no longer works; a new sign-in does.
     const fresh = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false });
-    const stale = `sv_session=${makeToken(deriveSessionKey(secret, "hunter2"), before)}`;
+    const stale = `sv_session=${makeToken(oldKey, before)}`;
+    // Not even at the new epoch: the restore also changed the signing-key salt.
+    const sameEpoch = `sv_session=${makeToken(oldKey, before + 1)}`;
+    expect((await fresh.request("/api/auth/me", { headers: { cookie: sameEpoch } })).status).toBe(401);
     expect((await fresh.request("/api/auth/me", { headers: { cookie: stale } })).status).toBe(401);
     expect((await fresh.request("/api/auth/me", { headers: { cookie: await login(fresh) } })).status).toBe(200);
+  });
+
+  it("refuses to restore over exercises the athlete created, unless forced", async () => {
+    const exported = await buildExport(db);
+    await db.execute(sql`truncate day_logs, sessions, max_entries, seen_achievements, exercises, settings restart identity cascade`);
+    await ensureSeeded(db, "2026-11-01");
+    await db.execute(sql`insert into exercises (name, created_at) values ('My own lift', now() + interval '1 second')`);
+    await expect(restoreExport(db, exported)).rejects.toThrow(/1 exercises of your own/);
+    await db.execute(sql`delete from exercises where name = 'My own lift'`);
+    await db.execute(sql`update exercises set archived = true where name = 'Pull-up'`);
+    await expect(restoreExport(db, exported)).rejects.toThrow(RestoreError);
+    await restoreExport(db, exported, { force: true });
+  });
+
+  it("prunes expired idempotency keys when preparing the database", async () => {
+    await db.execute(
+      sql`insert into idempotency_keys (key, method, path, status, body, created_at) values ('key-expired-boot', 'POST', '/api/exercises', 201, '{}', now() - interval '8 days')`,
+    );
+    const { sql: other } = createDb(url);
+    await prepareDatabase(db, other);
+    await other.end();
+    expect(await db.execute(sql`select key from idempotency_keys where key = 'key-expired-boot'`)).toHaveLength(0);
+  });
+
+  it("gives up waiting for the migration lock after the timeout", async () => {
+    const { sql: a } = createDb(url);
+    const { sql: b } = createDb(url);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const first = withMigrationLock(a, () => held);
+    await new Promise((r) => setTimeout(r, 50));
+    await expect(withMigrationLock(b, async () => "ran", { timeoutMs: 300 })).rejects.toThrow(MigrationLockTimeout);
+    release();
+    await first;
+    await expect(withMigrationLock(b, async () => "ran", { timeoutMs: 300 })).resolves.toBe("ran");
+    await Promise.all([a.end(), b.end()]);
   });
 
   it("serialises migrations behind an advisory lock", async () => {
@@ -597,5 +837,24 @@ describe("export & restore", () => {
     await Promise.all([first, second]);
     expect(order).toEqual(["first:start", "first:end", "second"]);
     await Promise.all([a.end(), b.end()]);
+  });
+});
+
+describe("restoring into a fresh database", () => {
+  it("doesn't revive a revoked cookie whose epoch the fresh database reaches again", async () => {
+    const exported = await buildExport(db);
+    // A cookie minted at epoch 1 on the old database (say, before its owner signed out everywhere).
+    const oldCookie = `sv_session=${makeToken(await dbKey(), 1)}`;
+
+    await db.execute(sql`drop schema if exists public cascade; drop schema if exists drizzle cascade; create schema public;`);
+    const { sql: other } = createDb(url);
+    await prepareDatabase(db, other);
+    await other.end();
+    const summary = await restoreExport(db, exported);
+    expect(summary.sessionEpoch).toBe(1); // the same epoch number the old cookie carries…
+
+    const restored = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false });
+    expect((await restored.request("/api/auth/me", { headers: { cookie: oldCookie } })).status).toBe(401); // …but a new key
+    expect((await restored.request("/api/auth/me", { headers: { cookie: await login(restored) } })).status).toBe(200);
   });
 });

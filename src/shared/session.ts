@@ -62,6 +62,11 @@ function scaleLoad(weightLb: number, factor: number, roundToLb: number): number 
   return Math.max(0, weightLb - step);
 }
 
+/**
+ * The next session's prescription for an exercise. Reps carry over as *targets* — a missed rep
+ * must not become next week's target — except for sets the athlete added without one, which
+ * carry what was done. Loads carry what was actually lifted, scaled by `loadFactor`.
+ */
 function carryOverExercise(ex: BlockExercise, loadFactor: number, roundToLb: number): BlockExercise {
   return {
     exerciseId: ex.exerciseId,
@@ -69,7 +74,7 @@ function carryOverExercise(ex: BlockExercise, loadFactor: number, roundToLb: num
     sets: ex.sets.map((s) => {
       const weight = s.weight ?? s.targetWeight;
       const scaled = weight !== null && weight > 0 && loadFactor !== 1 ? scaleLoad(weight, loadFactor, roundToLb) : weight;
-      return blankSet({ targetReps: s.reps ?? s.targetReps, targetWeight: scaled });
+      return blankSet({ targetReps: s.targetReps ?? s.reps, targetWeight: scaled });
     }),
   };
 }
@@ -77,8 +82,9 @@ function carryOverExercise(ex: BlockExercise, loadFactor: number, roundToLb: num
 const byDateDesc = (a: Session, b: Session) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
 
 /**
- * The most recent time `exerciseId` was actually done (not skipped) before `date`, preferring
- * sessions on the same weekday. Used to carry a skipped exercise forward from real numbers.
+ * The most recent time `exerciseId` was actually done (not skipped) before `date`. Normal weeks
+ * win over deload weeks (a deload's lighter loads must not become the new normal), then the same
+ * weekday over others. Used to carry a skipped exercise forward from real numbers.
  */
 function lastPerformance(
   exerciseId: number,
@@ -89,12 +95,13 @@ function lastPerformance(
   const prior = sessions.filter((s) => s.date < date).sort(byDateDesc);
   const find = (s: Session) =>
     s.blocks.flatMap((b) => (b.kind === "accessory" ? b.exercises : [])).find((e) => e.exerciseId === exerciseId && !e.skipped);
-  for (const sameDay of [true, false])
-    for (const s of prior) {
-      if ((weekdayOf(s.date) === wd) !== sameDay) continue;
-      const exercise = find(s);
-      if (exercise) return { session: s, exercise };
-    }
+  for (const deload of [false, true])
+    for (const sameDay of [true, false])
+      for (const s of prior) {
+        if (s.deload !== deload || (weekdayOf(s.date) === wd) !== sameDay) continue;
+        const exercise = find(s);
+        if (exercise) return { session: s, exercise };
+      }
   return null;
 }
 
@@ -138,7 +145,10 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
 
   const source = templateSource(date, ctx.sessions);
   if (source) {
-    const factorFrom = (from: Session) => (pos?.week.deload && !from.deload ? program.deloadAccessoryLoad : 1);
+    // Loads are scaled from the week they come from to this one: down into a deload, and back up
+    // when only a deload performance exists, so deload loads never carry into a normal week.
+    const deloadFactor = (deload: boolean) => (deload ? program.deloadAccessoryLoad : 1);
+    const factorFrom = (from: Session) => deloadFactor(pos?.week.deload ?? false) / deloadFactor(from.deload);
     for (const b of source.blocks) {
       if (b.kind !== "accessory") continue;
       const exercises = b.exercises
@@ -164,7 +174,55 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
     blocks,
     notes: "",
     completedAt: null,
+    planSig: signatureOf(primary, pos),
   };
+}
+
+type PlannedPrimary = ReturnType<typeof plannedPrimary>;
+
+function signatureOf(block: Block | null, pos: PlannedPrimary["pos"]): string | null {
+  const ex = block?.exercises[0];
+  if (!ex || !pos) return null;
+  return JSON.stringify({
+    exerciseId: ex.exerciseId,
+    week: pos.weekIndex,
+    deload: pos.week.deload,
+    sets: ex.sets.map((s) => [s.targetReps, s.targetWeight, s.amrap]),
+  });
+}
+
+/**
+ * A stable string of what the program prescribes for `date`'s main lift — lift, week, deload
+ * flag and each set's reps, target weight and AMRAP flag — or null when no main lift is planned.
+ * `buildSession` stores it as `planSig`, so a later program or max change can be told apart from
+ * the athlete editing their own targets.
+ */
+export function planSignature(date: ISODate, ctx: Omit<BuildContext, "sessions">): string | null {
+  const { block, pos } = plannedPrimary(date, ctx);
+  return signatureOf(block, pos);
+}
+
+/**
+ * Whether the program now prescribes something different for a saved session's main lift than
+ * when the session was built. Sessions saved before `planSig` existed fall back to comparing the
+ * saved sets with a fresh plan (`planMatches`).
+ */
+export function planChanged(session: Session, ctx: Omit<BuildContext, "sessions">): boolean {
+  if (session.planSig !== undefined) return planSignature(session.date, ctx) !== session.planSig;
+  return !planMatches(session, ctx);
+}
+
+/** Logged and total sets of a session, leaving out exercises skipped today. */
+export function sessionCounts(session: Session): { done: number; total: number } {
+  let done = 0;
+  let total = 0;
+  for (const b of session.blocks)
+    for (const e of b.exercises) {
+      if (e.skipped) continue;
+      total += e.sets.length;
+      for (const s of e.sets) if (s.done) done++;
+    }
+  return { done, total };
 }
 
 const sameNum = (a: number | null, b: number | null) => (a === null || b === null ? a === b : Math.abs(a - b) < 1e-6);
@@ -175,7 +233,7 @@ const sameNum = (a: number | null, b: number | null) => (a === null || b === nul
  * weight. Ids are ignored, and so are back-off sets added after the prescribed ones. A session
  * with no main lift matches when none is planned either.
  */
-export function planMatches(session: Session, ctx: BuildContext): boolean {
+export function planMatches(session: Session, ctx: Omit<BuildContext, "sessions">): boolean {
   const { block, pos } = plannedPrimary(session.date, ctx);
   const deload = pos?.week.deload ?? false;
   const saved = session.blocks.find((b) => b.kind === "primary")?.exercises[0];
@@ -199,8 +257,9 @@ export interface AccessoryHint {
 
 /**
  * Progression hint for an accessory: when every logged set of its most recent (non-skipped,
- * started) performance before `beforeDate` met its target reps with a load, suggest the
- * heaviest of those loads + `incrementLb`. Null otherwise, or when the increment is 0.
+ * started, non-deload) performance before `beforeDate` met that session's target reps with a
+ * load, suggest the heaviest of those loads + `incrementLb`. Deload weeks are ignored: their
+ * light loads say nothing about progress. Null otherwise, or when the increment is 0.
  */
 export function accessoryHint(
   exerciseId: number,
@@ -209,7 +268,7 @@ export function accessoryHint(
   incrementLb: number,
 ): AccessoryHint | null {
   if (!(incrementLb > 0)) return null;
-  const prior = sessions.filter((s) => s.date < beforeDate).sort(byDateDesc);
+  const prior = sessions.filter((s) => s.date < beforeDate && !s.deload).sort(byDateDesc);
   for (const s of prior) {
     const logged = s.blocks
       .filter((b) => b.kind === "accessory")

@@ -87,10 +87,14 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
 
   const tdee = end ? effectiveTdee(end, data.settings.nutrition.initialTdee) : null;
   const next = tdee && end?.avgWeight != null ? recommend(data.settings, tdee.value, end.avgWeight) : null;
-  const target = next?.calories ?? null;
 
+  // Adherence: each day against the target that day actually showed (built from the day before),
+  // not next week's recommendation.
   const withCals = days.filter((d) => d.calories !== null);
-  const adherent = target ? withCals.filter((d) => Math.abs(d.calories! - target) <= target * 0.1).length : 0;
+  const judged = withCals
+    .map((d) => ({ calories: d.calories!, target: targetsFor(d.date, series, data).recommendation?.calories ?? null }))
+    .filter((x): x is { calories: number; target: number } => x.target !== null && x.target > 0);
+  const adherent = judged.filter((x) => Math.abs(x.calories - x.target) <= x.target * 0.1).length;
 
   const count = (pred: (date: ISODate) => boolean, done: (date: ISODate) => boolean) => {
     const planned = dates.filter(pred);
@@ -111,7 +115,7 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     }).length,
     avgCalories: mean(withCals.map((d) => d.calories!)),
     avgProtein: mean(days.filter((d) => d.proteinG !== null).map((d) => d.proteinG!)),
-    calorieAdherence: target && withCals.length ? adherent / withCals.length : null,
+    calorieAdherence: judged.length ? adherent / judged.length : null,
     avgSteps: mean(days.filter((d) => d.steps !== null).map((d) => d.steps!)),
     zone2: count(
       (d) => !!settings.schedule.zone2[weekdayOf(d)],

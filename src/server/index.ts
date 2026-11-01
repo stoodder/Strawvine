@@ -16,7 +16,15 @@ try {
 
 const { db, sql } = createDb(config.databaseUrl);
 // Normally done by the Heroku release phase already; cheap and idempotent (and locked) here.
-await prepareDatabase(db, sql);
+// Heroku kills a web dyno that hasn't bound its port within 60 s, so don't wait long for the lock
+// (the release phase may be holding it for a long migration): fail fast and let the dyno restart.
+try {
+  await prepareDatabase(db, sql, { lockTimeoutMs: 30_000 });
+} catch (err) {
+  console.error("Database preparation failed:", err instanceof Error ? err.name : "error", err instanceof Error ? err.message : "");
+  await sql.end({ timeout: 5 }).catch(() => {});
+  process.exit(1);
+}
 
 const staticDir = path.resolve(process.cwd(), "dist/web");
 const app = createApp({

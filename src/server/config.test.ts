@@ -27,6 +27,11 @@ describe("secret checks", () => {
     expect(prod(HEX, "change-me")[0]).toMatch(/placeholder/);
     expect(prod(HEX, "Strawvine")[0]).toMatch(/placeholder/);
     expect(prod(HEX, "short-pass")[0]).toMatch(/at least 12/);
+    expect(prod(HEX, "   short-pass   ")[0]).toMatch(/at least 12/);
+    expect(prod(HEX, " ".repeat(20))[0]).toMatch(/at least 12/);
+    expect(prod(HEX, "aaaaaaaaaaaaaaaa")[0]).toMatch(/too repetitive/);
+    expect(prod(HEX, "abcabcabcabcABC")[0]).toMatch(/too repetitive/);
+    expect(prod(HEX, "abcdefabcdef")).toEqual([]);
     expect(prod(HEX, HEX)).toContain("APP_PASSWORD and SESSION_SECRET must differ.");
   });
 
@@ -65,14 +70,17 @@ describe("environment helpers", () => {
     expect(trustProxyFrom({ TRUST_PROXY: "1" })).toBe(true);
   });
 
-  it("reads the build id from the env or dist/build-id.txt", () => {
+  it("reads the build id only from dist/build-id.txt (what the client was compiled with)", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "strawvine-dist-"));
     try {
-      expect(readBuildId({}, dir)).toBeUndefined();
+      expect(readBuildId(dir)).toBeUndefined();
       writeFileSync(path.join(dir, "build-id.txt"), "1793561420\n");
-      expect(readBuildId({}, dir)).toBe("1793561420");
-      expect(readBuildId({ BUILD_ID: "abc123" }, dir)).toBe("abc123");
-      expect(readBuildId({ BUILD_ID: "bad id\r\nx: y" }, dir)).toBeUndefined();
+      expect(readBuildId(dir)).toBe("1793561420");
+      writeFileSync(path.join(dir, "build-id.txt"), "bad id\r\nx: y");
+      expect(readBuildId(dir)).toBeUndefined();
+      // A runtime BUILD_ID is ignored.
+      const env = { DATABASE_URL: "postgres://x", APP_PASSWORD: "pw", SESSION_SECRET: "s".repeat(40), BUILD_ID: "runtime" };
+      expect(loadConfig(env).buildId).not.toBe("runtime");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
