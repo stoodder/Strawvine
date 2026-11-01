@@ -10,6 +10,7 @@
  * until retried or discarded). Acked entries keep the server's response until the base that
  * includes it has been written to disk, so a crash between the two can't lose it.
  */
+import { formatShortDate } from "../../shared/dates";
 import { emptyDayLog } from "../../shared/empty";
 import type {
   Bootstrap,
@@ -40,9 +41,20 @@ export type Op =
       source: MaxSource;
       note: string | null;
       createdAt: string;
+      /** Sent as `Idempotency-Key`; assigned by `addOp` when missing (see `ensureIdempotencyKeys`). */
+      idemKey?: string;
     }
   | { kind: "deleteMax"; id: number }
-  | { kind: "createExercise"; tempId: number; name: string; category: ExerciseCategory; measure: Measure; tracksMax: boolean }
+  | {
+      kind: "createExercise";
+      tempId: number;
+      name: string;
+      category: ExerciseCategory;
+      measure: Measure;
+      tracksMax: boolean;
+      /** Sent as `Idempotency-Key`; assigned by `addOp` when missing. */
+      idemKey?: string;
+    }
   | { kind: "updateExercise"; id: number; patch: ExercisePatch }
   | { kind: "seen"; keys: string[] };
 
@@ -119,6 +131,32 @@ function merge(a: Op, b: Op): Op {
 }
 
 const isCreator = (op: Op): op is Extract<Op, { tempId: number }> => op.kind === "addMax" || op.kind === "createExercise";
+
+// ---------------------------------------------------------------------------
+// Idempotency keys
+// ---------------------------------------------------------------------------
+
+/** A fresh idempotency key (a UUID where available). */
+export function newIdempotencyKey(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  const rand = () => Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+  return `k-${Date.now().toString(36)}-${rand()}${rand()}${rand()}`;
+}
+
+/** The op with an idempotency key if it creates a row and has none yet (same op otherwise). */
+function withIdempotencyKey(op: Op): Op {
+  return isCreator(op) && !op.idemKey ? { ...op, idemKey: newIdempotencyKey() } : op;
+}
+
+/**
+ * Gives every unacked create an idempotency key — for outboxes persisted before keys existed.
+ * Returns the same state when nothing changed.
+ */
+export function ensureIdempotencyKeys(s: OutboxState): OutboxState {
+  if (!s.entries.some((e) => e.state !== "acked" && isCreator(e.op) && !e.op.idemKey)) return s;
+  return { ...s, entries: s.entries.map((e) => (e.state === "acked" ? e : { ...e, op: withIdempotencyKey(e.op) })) };
+}
 
 // ---------------------------------------------------------------------------
 // Temporary ids
@@ -201,7 +239,7 @@ export function tempRefs(op: Op): number[] {
  * moves to the end, after anything it may depend on). An entry that is in flight is never touched.
  */
 export function addOp(s: OutboxState, input: Op, inflight: number | null): OutboxState {
-  let op = remapOp(input, s.tempMap);
+  let op = withIdempotencyKey(remapOp(input, s.tempMap));
   const entries = [...s.entries];
 
   // Deleting something that was never sent: drop both.
@@ -280,6 +318,13 @@ export function pruneAcked(s: OutboxState, seqs: ReadonlySet<number>): OutboxSta
 
 export const unsynced = (s: OutboxState) => s.entries.filter((e) => e.state !== "acked");
 
+/** Dates with an unsynced day-log or workout edit (pending or failed). */
+export function pendingDates(entries: readonly Entry[]): Set<string> {
+  const out = new Set<string>();
+  for (const e of entries) if (e.state !== "acked" && (e.op.kind === "day" || e.op.kind === "session")) out.add(e.op.date);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Applying ops and results
 // ---------------------------------------------------------------------------
@@ -324,14 +369,14 @@ export function applyOp(b: Bootstrap, op: Op): Bootstrap {
       return { ...b, settings: op.settings };
     case "addMax": {
       if (b.maxEntries.some((e) => e.id === op.tempId)) return b;
-      const { tempId, kind: _k, ...rest } = op;
+      const { tempId, kind: _k, idemKey: _i, ...rest } = op;
       return { ...b, maxEntries: [...b.maxEntries, { id: tempId, ...rest }] };
     }
     case "deleteMax":
       return { ...b, maxEntries: b.maxEntries.filter((e) => e.id !== op.id) };
     case "createExercise": {
       if (b.exercises.some((e) => e.id === op.tempId)) return b;
-      const { tempId, kind: _k, ...rest } = op;
+      const { tempId, kind: _k, idemKey: _i, ...rest } = op;
       return { ...b, exercises: [...b.exercises, { id: tempId, archived: false, ...rest }] };
     }
     case "updateExercise":
@@ -438,7 +483,38 @@ export function describe(op: Op): string {
   }
 }
 
-export function request(op: Op): { method: string; path: string; body?: unknown } {
+/** Title-style label for a list of unsynced changes ("Log · Nov 2", "Workout · Nov 3", "New max"). */
+export function opLabel(op: Op): string {
+  switch (op.kind) {
+    case "day":
+      return `Log · ${formatShortDate(op.date)}`;
+    case "session":
+      return op.doc ? `Workout · ${formatShortDate(op.date)}` : `Deleted workout · ${formatShortDate(op.date)}`;
+    case "settings":
+      return "Settings";
+    case "addMax":
+      return `New max · ${op.valueLb} lb`;
+    case "deleteMax":
+      return "Deleted max";
+    case "createExercise":
+      return `New exercise · ${op.name}`;
+    case "updateExercise":
+      return "Exercise change";
+    case "seen":
+      return "Achievements seen";
+  }
+}
+
+export interface OpRequest {
+  method: string;
+  path: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
+const idemHeaders = (op: { idemKey?: string }) => (op.idemKey ? { "Idempotency-Key": op.idemKey } : undefined);
+
+export function request(op: Op): OpRequest {
   switch (op.kind) {
     case "day":
       return { method: "PUT", path: `/days/${op.date}`, body: op.patch };
@@ -451,6 +527,7 @@ export function request(op: Op): { method: string; path: string; body?: unknown 
         method: "POST",
         path: `/exercises/${op.exerciseId}/maxes`,
         body: { date: op.date, valueLb: op.valueLb, source: op.source, note: op.note },
+        headers: idemHeaders(op),
       };
     case "deleteMax":
       return { method: "DELETE", path: `/maxes/${op.id}` };
@@ -459,6 +536,7 @@ export function request(op: Op): { method: string; path: string; body?: unknown 
         method: "POST",
         path: "/exercises",
         body: { name: op.name, category: op.category, measure: op.measure, tracksMax: op.tracksMax },
+        headers: idemHeaders(op),
       };
     case "updateExercise":
       return { method: "PATCH", path: `/exercises/${op.id}`, body: op.patch };

@@ -41,7 +41,7 @@ All fields are optional and can be edited at any time during the day (or later).
 | Nutrition | calories, protein, carbs, fat; optional micronutrients |
 | Steps | daily count |
 | Zone 2 | done + duration (default 30 min) |
-| Metcon | done, optional notes, optional benchmark name + score |
+| Metcon | done, optional notes, optional benchmark name (autocompleted from past ones) + score |
 | Lifting | the session (see §6) |
 | Journal | free-form text for the day |
 
@@ -99,12 +99,33 @@ Smoothed TDEE, actual vs target rate, adherence, and next week's recommended cal
 ## 5. Goals
 
 - Goal weight with projected date range.
-- Strength targets per lift (e.g. Deadlift 600).
+- Strength targets per lift (e.g. Deadlift 600). A target is hit by a max entry at or above it dated on/after the day
+  the target was set — never by a *correction* alone.
 - PR tracking (max increases, AMRAP rep PRs, benchmark metcon bests).
 - A **max PR** is a manual or AMRAP max at least **1 lb** above every earlier max of that lift (initial entries only
   set the baseline). Re-entering a lift's max within **10 minutes** of the previous entry is a *correction*: it
   replaces that entry (a typo never becomes a PR or a high-water mark), is compared against the history before it, and
   keeps the corrected entry's achievement so a fix is never celebrated twice.
+- A max can also be recorded explicitly as a **correction** (source `correction`, e.g. fixing a typo days later). It
+  becomes the lift's current max like any newer entry, is **never** celebrated as a PR, and *resets* the high-water mark:
+  later PRs are measured against the corrected value, not the mistake it fixes. (A correction entered within 10
+  minutes of the previous entry replaces that entry, as above, and stays a correction.)
+- An **AMRAP rep PR** is a completed AMRAP set with more reps than every earlier AMRAP set of the same lift at the same
+  or a heavier load. The first AMRAP at a load only sets the baseline; one per lift per session (its best set). Shown
+  as "Bench press rep PR · 11 @ 200 lb".
+- **Benchmark metcons** are matched by name ignoring case and spacing ("fran" = "Fran "). Scores are free text and
+  parsed where possible:
+
+  | Score | Kind | Better |
+  |---|---|---|
+  | `3:45`, `1:02:03` | time | lower |
+  | `12+4`, `12 rounds` | rounds + reps | higher |
+  | `225 lb`, `100 kg` | load (kg converted to lb) | higher |
+  | `150`, `150 reps` | reps | higher |
+
+  A finished time beats a rounds or reps score (capped); other mixed kinds aren't compared. A parseable score that
+  beats the previous best for that benchmark is a **benchmark PR** ("Fran PR · 3:45 · previous 4:02"); a first-ever
+  result only sets the baseline. The metcon editor shows the previous best.
 
 ## 6. Lifting
 
@@ -154,7 +175,15 @@ optional note.
 - Sets measure reps, seconds or distance.
 - Sessions pre-fill from the last session of the same day type (exercises, sets, last weights). On deload
   weeks accessory loads pre-fill at 80%.
-- Rest timer; plate calculator.
+- **Skip today:** an accessory can be marked skipped for one session. It stays in the session (and in next week's
+  pre-fill, un-skipped, with the numbers from the last time it was actually done), but its sets don't count toward
+  volume, PRs or hints.
+- **Plan changed:** a saved session nothing has been logged in yet is flagged when its main lift no longer matches what
+  the program would plan today (lift, deload, reps, AMRAP flags, target weights; added back-off sets are ignored), with
+  a one-tap recalculation.
+- **Progression hint:** when every logged set of an accessory's last (non-skipped) performance met its target reps with
+  a load, the next session suggests that load + **5 lb** (editable; 0 turns hints off).
+- Rest timer (targets editable: **180 s** after main-lift sets, **90 s** after accessories); plate calculator.
 
 ## 7. Gamification & feedback
 
@@ -163,6 +192,7 @@ optional note.
 - Streaks, PR moments, cycle completions, calibration milestones, strength-target hits, goal weight.
 - Rule-based insights (protein adherence, sleep, HRV trend, steps, rate-of-change safety).
 - Tasteful motion: smooth fills, a satisfying check, a restrained glow for PRs. Haptics where available.
+- Optional **high-contrast "outdoor" mode** (brighter secondary text, thicker chart lines) for gym glare.
 
 ## 8. Platform
 
@@ -170,5 +200,10 @@ optional note.
 - Postgres (Heroku Postgres in production).
 - One Docker image (API + static frontend), deployed to Heroku's container stack.
 - Single-user password auth with a long-lived signed session cookie that renews while in use. Signing out signs
-  every device out; changing the password does too.
+  every device out; changing the password does too, and so does restoring an export.
+- Offline-first: every edit is stored on the device and replayed in order until the server confirms it. Creates carry
+  an `Idempotency-Key`, so a retry after a lost response never duplicates a row (keys are kept 7 days). Settings shows
+  when the device last synced, what is still unsynced, and "Sync now"; Today marks rows with unsynced edits and ticks
+  "saved" when the server confirms one. After onboarding the app asks the browser for persistent storage so the
+  offline copy isn't evicted.
 - Pure, unit-tested domain modules for all calculations.

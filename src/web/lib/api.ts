@@ -20,6 +20,8 @@ export interface ApiInit {
   method?: string;
   body?: unknown;
   signal?: AbortSignal;
+  /** Extra request headers (e.g. `Idempotency-Key`). */
+  headers?: Record<string, string>;
   /** Max wait for the response headers (default 8 s for reads, 15 s for writes). */
   timeoutMs?: number;
   /** Max wait for the whole body once headers arrived (default 60 s). */
@@ -50,7 +52,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     const res = await fetch(`/api${path}`, {
       method,
       credentials: "same-origin",
-      headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+      headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...init.headers },
       body,
       signal: ctrl.signal,
       // No `keepalive`: in testing, Chromium re-sent keepalive POSTs on a reused socket and

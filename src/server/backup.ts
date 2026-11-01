@@ -20,7 +20,7 @@ import {
   type Settings,
 } from "../shared/schemas";
 import type { Db } from "./db/client";
-import { dayLogs, exercises, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
+import { authState, dayLogs, exercises, idempotencyKeys, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
 
 export const EXPORT_FORMAT = "strawvine-export";
 /** v1: unversioned exports without seen achievements or exercise timestamps. v2: complete. */
@@ -113,6 +113,8 @@ export class RestoreError extends Error {
 }
 
 export interface RestoreSummary {
+  /** The new session epoch: every session cookie issued before the restore is revoked. */
+  sessionEpoch: number;
   days: number;
   exercises: number;
   maxEntries: number;
@@ -128,7 +130,8 @@ async function insertChunked<T>(rows: T[], insert: (chunk: T[]) => Promise<unkno
 /**
  * Replace the database contents with an export, in one transaction. Refuses when the database
  * already holds the athlete's data (anything beyond the untouched first-boot seed) unless
- * `force` is set. Rows keep their ids; id sequences are moved past them.
+ * `force` is set. Rows keep their ids; id sequences are moved past them. Ends by bumping the
+ * session epoch, which signs every device out.
  */
 export async function restoreExport(db: Db, input: unknown, { force = false } = {}): Promise<RestoreSummary> {
   const parsed = exportFileSchema.safeParse(input);
@@ -154,8 +157,11 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
   );
   const uniqueSeen = [...new Map(seen.map((s) => [s.key, s])).values()];
 
+  let sessionEpoch = 0;
   await db.transaction(async (tx) => {
-    await tx.execute(sql`lock table day_logs, sessions, max_entries, exercises, settings, seen_achievements in access exclusive mode`);
+    await tx.execute(
+      sql`lock table day_logs, sessions, max_entries, exercises, settings, seen_achievements, idempotency_keys in access exclusive mode`,
+    );
     if (!force) {
       const [counts] = await tx.execute<{ days: number; sessions: number; maxes: number; seen: number; onboarded: boolean | null }>(sql`
         select (select count(*)::int from day_logs) as days,
@@ -171,6 +177,7 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
         );
     }
 
+    await tx.delete(idempotencyKeys); // stored responses refer to rows being replaced
     await tx.delete(maxEntries);
     await tx.delete(sessions);
     await tx.delete(dayLogs);
@@ -215,9 +222,19 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
       await tx.execute(
         sql`select setval(pg_get_serial_sequence(${table}, 'id'), coalesce((select max(id) from ${sql.identifier(table)}), 0) + 1, false)`,
       );
+
+    // Sign every device out: a restore can roll back sign-outs (and the data a device holds
+    // offline no longer matches), so no cookie issued before it stays valid.
+    const [epoch] = await tx
+      .insert(authState)
+      .values({ id: 1, sessionEpoch: 1 })
+      .onConflictDoUpdate({ target: authState.id, set: { sessionEpoch: sql`${authState.sessionEpoch} + 1`, updatedAt: now } })
+      .returning({ epoch: authState.sessionEpoch });
+    sessionEpoch = epoch!.epoch;
   });
 
   return {
+    sessionEpoch,
     days: data.days.length,
     exercises: data.exercises.length,
     maxEntries: data.maxEntries.length,

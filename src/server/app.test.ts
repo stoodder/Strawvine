@@ -9,6 +9,7 @@ import { createApp, LOGIN_BODY_LIMIT_BYTES } from "./app";
 import { deriveSessionKey, makeToken, MAX_AGE_S, RENEW_BELOW_S } from "./auth";
 import { buildExport, restoreExport, RestoreError } from "./backup";
 import { createDb, runMigrations, withMigrationLock } from "./db/client";
+import { pruneIdempotencyKeys } from "./idempotency";
 import { ensureSeeded, prepareDatabase } from "./seed";
 
 const url = process.env.TEST_DATABASE_URL ?? "postgres://postgres@localhost:5432/strawvine_test";
@@ -120,6 +121,102 @@ describe("api", () => {
     const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
     expect(b.seenAchievements).toEqual(["calib-1"]);
     expect(b.exercises.at(-1)).toMatchObject({ name: "Hollow hold", measure: "seconds" });
+  });
+});
+
+describe("settings preferences", () => {
+  it("round-trips settings with and without the optional training/display fields", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const { training: _t, display: _d, ...legacy } = b.settings;
+    let res = await req("/api/settings", json("PUT", legacy));
+    expect(res.status).toBe(200);
+    let after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.settings).not.toHaveProperty("training");
+    expect(after.settings).not.toHaveProperty("display");
+
+    const prefs = {
+      ...legacy,
+      training: { restSecondsMain: 150, restSecondsAccessory: 75, accessoryIncrementLb: 2.5 },
+      display: { highContrast: true },
+    };
+    res = await req("/api/settings", json("PUT", prefs));
+    expect(res.status).toBe(200);
+    after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.settings.training).toEqual(prefs.training);
+    expect(after.settings.display).toEqual({ highContrast: true });
+
+    expect((await req("/api/settings", json("PUT", { ...prefs, training: { ...prefs.training, restSecondsMain: 5 } }))).status).toBe(400);
+    expect((await req("/api/settings", json("PUT", { ...prefs, display: { highContrast: "yes" } }))).status).toBe(400);
+  });
+
+  it("stores correction max entries", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const bench = b.exercises.find((e) => e.name === "Bench press")!;
+    const res = await req(`/api/exercises/${bench.id}/maxes`, json("POST", { date: "2026-11-03", valueLb: 310, source: "correction" }));
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ source: "correction", valueLb: 310 });
+    const after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.maxEntries.at(-1)).toMatchObject({ source: "correction" });
+  });
+});
+
+describe("idempotent creates", () => {
+  const withKey = (key: string, body: unknown) => ({ ...json("POST", body), headers: { "idempotency-key": key } });
+  const count = async (table: "exercises" | "max_entries") =>
+    (await db.execute<{ n: number }>(sql`select count(*)::int as n from ${sql.identifier(table)}`))[0]!.n;
+
+  it("creates an exercise once per key and replays the first response", async () => {
+    const before = await count("exercises");
+    const first = await req("/api/exercises", withKey("key-exercise-0001", { name: "Cable row" }));
+    expect(first.status).toBe(201);
+    const created = await first.json();
+    const again = await req("/api/exercises", withKey("key-exercise-0001", { name: "Cable row" }));
+    expect(again.status).toBe(201);
+    expect(again.headers.get("idempotent-replayed")).toBe("true");
+    expect(await again.json()).toEqual(created);
+    expect(await count("exercises")).toBe(before + 1);
+    // Without a key, every POST creates.
+    await req("/api/exercises", json("POST", { name: "Cable row" }));
+    expect(await count("exercises")).toBe(before + 2);
+  });
+
+  it("creates a max once per key, even for concurrent retries", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const squat = b.exercises.find((e) => e.name === "Back squat")!;
+    const before = await count("max_entries");
+    const body = { date: "2026-11-04", valueLb: 405, source: "manual" };
+    const responses = await Promise.all(
+      Array.from({ length: 4 }, () => req(`/api/exercises/${squat.id}/maxes`, withKey("key-max-concurrent-1", body))),
+    );
+    expect(responses.map((r) => r.status)).toEqual([201, 201, 201, 201]);
+    const ids = new Set(await Promise.all(responses.map(async (r) => (await r.json()).id)));
+    expect(ids.size).toBe(1);
+    expect(await count("max_entries")).toBe(before + 1);
+  });
+
+  it("refuses a key reused for another request, and malformed keys", async () => {
+    await req("/api/exercises", withKey("key-reused-0001", { name: "Face pull" }));
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const bench = b.exercises.find((e) => e.name === "Bench press")!;
+    const res = await req(`/api/exercises/${bench.id}/maxes`, withKey("key-reused-0001", { date: "2026-11-04", valueLb: 320 }));
+    expect(res.status).toBe(422);
+    for (const key of ["short", "x".repeat(81), "has space!"])
+      expect((await req("/api/exercises", withKey(key, { name: "Face pull" }))).status, key).toBe(400);
+  });
+
+  it("doesn't store failures, so the key still works once the request can succeed", async () => {
+    expect((await req("/api/exercises/999999/maxes", withKey("key-missing-0001", { date: "2026-11-04", valueLb: 1 }))).status).toBe(404);
+    expect((await req("/api/exercises", withKey("key-invalid-0001", { name: "" }))).status).toBe(400);
+    const ok = await req("/api/exercises", withKey("key-invalid-0001", { name: "Shrug" }));
+    expect(ok.status).toBe(201);
+    expect((await ok.json()).name).toBe("Shrug");
+  });
+
+  it("prunes keys older than a week", async () => {
+    await db.execute(sql`update idempotency_keys set created_at = now() - interval '8 days' where key = 'key-exercise-0001'`);
+    expect(await pruneIdempotencyKeys(db)).toBe(1);
+    const rows = await db.execute<{ key: string }>(sql`select key from idempotency_keys where key = 'key-max-concurrent-1'`);
+    expect(rows).toHaveLength(1);
   });
 });
 
@@ -433,8 +530,18 @@ describe("export & restore", () => {
     const { exportedAt: _b, ...after } = await buildExport(db);
     expect(after).toEqual(before);
 
+    // The restore signed every device out (a fresh app: no cached epoch).
+    const restored = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false });
+    expect((await restored.request("/api/auth/me", { headers: { cookie } })).status).toBe(401);
+    cookie = await login(restored);
+
     // Sequences moved past the restored ids.
-    const created = await (await req("/api/exercises", json("POST", { name: "Ring dip" }))).json();
+    const created = await (
+      await restored.request("/api/exercises", {
+        ...json("POST", { name: "Ring dip" }),
+        headers: { "content-type": "application/json", cookie },
+      })
+    ).json();
     expect(created.id).toBe(Math.max(...exported.exercises.map((e: { id: number }) => e.id)) + 1);
   });
 
@@ -451,6 +558,23 @@ describe("export & restore", () => {
     const summary = await restoreExport(db, legacy, { force: true });
     expect(summary).toMatchObject({ seenAchievements: 0, exercises: current.exercises.length });
     expect((await buildExport(db)).seenAchievements).toEqual([]);
+  });
+
+  it("bumps the session epoch and clears idempotency keys on every restore", async () => {
+    const epoch = async () => (await db.execute<{ e: number }>(sql`select session_epoch as e from auth_state where id = 1`))[0]?.e ?? 0;
+    await db.execute(
+      sql`insert into idempotency_keys (key, method, path, status, body) values ('key-before-restore', 'POST', '/api/exercises', 201, '{}')`,
+    );
+    const before = await epoch();
+    const summary = await restoreExport(db, await buildExport(db), { force: true });
+    expect(summary.sessionEpoch).toBe(before + 1);
+    expect(await epoch()).toBe(before + 1);
+    expect(await db.execute(sql`select key from idempotency_keys`)).toHaveLength(0);
+    // A cookie from before the restore no longer works; a new sign-in does.
+    const fresh = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false });
+    const stale = `sv_session=${makeToken(deriveSessionKey(secret, "hunter2"), before)}`;
+    expect((await fresh.request("/api/auth/me", { headers: { cookie: stale } })).status).toBe(401);
+    expect((await fresh.request("/api/auth/me", { headers: { cookie: await login(fresh) } })).status).toBe(200);
   });
 
   it("serialises migrations behind an advisory lock", async () => {

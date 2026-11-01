@@ -87,7 +87,11 @@ export const exercisePatchSchema = z
   .partial()
   .strict();
 
-export const maxSource = z.enum(["initial", "manual", "amrap"]);
+/**
+ * Where a max entry came from. `correction` restates the lift's current max (e.g. fixing an old
+ * typo): it becomes the current value but is never celebrated as a PR or a strength-target hit.
+ */
+export const maxSource = z.enum(["initial", "manual", "amrap", "correction"]);
 export type MaxSource = z.infer<typeof maxSource>;
 
 export const maxEntrySchema = z.object({
@@ -208,6 +212,27 @@ export const settingsSchema = z.object({
     }),
   ),
   program: programSchema,
+  /**
+   * Training preferences. Optional so settings stored before it existed still validate; read it
+   * through `trainingPrefs()` (defaults.ts), never directly.
+   */
+  training: z
+    .object({
+      /** Rest timer target after a main-lift set, in seconds. */
+      restSecondsMain: z.number().min(10).max(900),
+      /** Rest timer target after an accessory set, in seconds. */
+      restSecondsAccessory: z.number().min(10).max(900),
+      /** Load added by an accessory progression hint ("hit all reps last time → +5"). 0 turns hints off. */
+      accessoryIncrementLb: z.number().min(0).max(50),
+    })
+    .optional(),
+  /** Display preferences (read through `displayPrefs()`). Optional, like `training`. */
+  display: z
+    .object({
+      /** "Outdoor" mode: brighter muted text, thicker chart lines. */
+      highContrast: z.boolean(),
+    })
+    .optional(),
 });
 export type Settings = z.infer<typeof settingsSchema>;
 
@@ -233,6 +258,11 @@ export const blockExerciseSchema = z.object({
   exerciseId: z.number().int(),
   measure,
   sets: z.array(setEntrySchema).max(30),
+  /**
+   * Skipped today only: excluded from volume and hints, but still carried into the next
+   * same-weekday session (from its last non-skipped performance). Absent = not skipped.
+   */
+  skipped: z.boolean().optional(),
 });
 export type BlockExercise = z.infer<typeof blockExerciseSchema>;
 

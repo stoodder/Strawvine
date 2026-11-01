@@ -4,8 +4,9 @@
  *   npm run restore -- strawvine-export-2026-11-01.json [--force]
  *   node dist/server/restore.js - < export.json          (read from stdin, e.g. via `heroku run`)
  *
- * Applies migrations first, then replaces everything in one transaction. Refuses to touch a
- * database that already holds data unless --force is given.
+ * Applies migrations first, then replaces everything in one transaction and signs every device
+ * out (bumps the session epoch). Refuses to touch a database that already holds data unless
+ * --force is given.
  */
 import { readFile } from "node:fs/promises";
 import { RestoreError, restoreExport } from "./backup";
@@ -41,7 +42,8 @@ try {
   const summary = await restoreExport(db, json, { force });
   console.log(
     `Restored ${summary.days} days, ${summary.sessions} sessions, ${summary.exercises} exercises, ` +
-      `${summary.maxEntries} max entries and ${summary.seenAchievements} seen achievements.`,
+      `${summary.maxEntries} max entries and ${summary.seenAchievements} seen achievements. ` +
+      "Every device has been signed out.",
   );
 } catch (err) {
   console.error(err instanceof RestoreError ? err.message : `Restore failed: ${err instanceof Error ? err.message : err}`);

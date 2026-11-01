@@ -38,6 +38,7 @@ import {
 import { buildExport, toDay, toExercise, toMax } from "./backup";
 import type { Db } from "./db/client";
 import { dayLogs, exercises, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
+import { idempotency } from "./idempotency";
 
 export interface AppOptions {
   db: Db;
@@ -115,6 +116,7 @@ export function createApp(opts: AppOptions) {
     epochs: opts.epochs ?? dbEpochStore(db),
   };
   const log = opts.log ?? ((message, details) => console.error(message, JSON.stringify(details)));
+  const idempotent = idempotency(db, (err) => log("Pruning idempotency keys failed", { name: (err as Error)?.name }));
 
   // Errors: log what failed and where — never request bodies, values or SQL parameters (health data).
   app.onError((err, c) => {
@@ -267,11 +269,14 @@ export function createApp(opts: AppOptions) {
   });
 
   // ---- exercises & maxes ----------------------------------------------------
+  // Creates accept an `Idempotency-Key` header (see ./idempotency): a retry returns the first response.
   api.post("/exercises", async (c) => {
     const parsed = exerciseCreateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
-    const [row] = await db.insert(exercises).values(parsed.data).returning();
-    return c.json(toExercise(row!), 201);
+    return idempotent(c, async (tx) => {
+      const [row] = await tx.insert(exercises).values(parsed.data).returning();
+      return { status: 201, body: toExercise(row!) };
+    });
   });
 
   api.patch("/exercises/:id", async (c) => {
@@ -291,11 +296,13 @@ export function createApp(opts: AppOptions) {
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
     const [ex] = await db.select().from(exercises).where(eq(exercises.id, exerciseId));
     if (!ex) return c.json({ error: "not found" }, 404);
-    const [row] = await db
-      .insert(maxEntries)
-      .values({ exerciseId, ...parsed.data })
-      .returning();
-    return c.json(toMax(row!), 201);
+    return idempotent(c, async (tx) => {
+      const [row] = await tx
+        .insert(maxEntries)
+        .values({ exerciseId, ...parsed.data })
+        .returning();
+      return { status: 201, body: toMax(row!) };
+    });
   });
 
   api.delete("/maxes/:id", async (c) => {

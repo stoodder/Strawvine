@@ -10,7 +10,7 @@
  * an edit the server hasn't applied yet.
  */
 import { useQuery } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { localToday } from "../../shared/dates";
 import { buildModel, type Model } from "../../shared/insights";
 import {
@@ -21,7 +21,22 @@ import {
   type StreakInfo,
 } from "../../shared/gamify";
 import type { Bootstrap, DayLogPatch, Exercise, MaxEntry, MaxSource, Session, Settings } from "../../shared/schemas";
-import { currentData, enqueue, fetchBootstrap, takeTempId, waitForAck } from "./sync";
+import {
+  currentData,
+  discardFailed,
+  enqueue,
+  fetchBootstrap,
+  getPendingDates,
+  getSavedPulse,
+  getSyncInfo,
+  retryFailed,
+  subscribeSavedPulse,
+  subscribeSync,
+  syncNow,
+  takeTempId,
+  waitForAck,
+  type SyncInfoState,
+} from "./sync";
 
 export { BOOT_KEY, clearCache, queryClient } from "./sync";
 import { BOOT_KEY } from "./sync";
@@ -199,4 +214,36 @@ export function useMarkSeen() {
     const fresh = keys.filter((k) => !seen.has(k));
     if (fresh.length) enqueue({ kind: "seen", keys: fresh });
   }, []);
+}
+
+// ---------------------------------------------------------------------------
+// Sync status
+// ---------------------------------------------------------------------------
+
+export type { SyncItem } from "./sync";
+
+export interface SyncInfo extends SyncInfoState {
+  /** Send everything queued now and re-read the server's copy; resolves when done (never rejects). */
+  syncNow(): Promise<void>;
+  /** Re-send the changes the server rejected. */
+  retryFailed(): void;
+  /** Drop the rejected changes and re-read the server's copy. */
+  discardFailed(): void;
+}
+
+/** Online state, unsynced changes (and which failed), and when everything was last on the server. */
+export function useSyncInfo(): SyncInfo {
+  const info = useSyncExternalStore(subscribeSync, getSyncInfo, getSyncInfo);
+  return useMemo(() => ({ ...info, syncNow, retryFailed, discardFailed }), [info]);
+}
+
+/** Dates whose day log or workout has edits not yet confirmed by the server. */
+export function usePendingDates(): Set<string> {
+  return useSyncExternalStore(subscribeSync, getPendingDates, getPendingDates);
+}
+
+/** Increments each time the server confirms a day-log write for `date` (0 until the first one). */
+export function useSavedPulse(date: string): number {
+  const get = useCallback(() => getSavedPulse(date), [date]);
+  return useSyncExternalStore(subscribeSavedPulse, get, get);
 }

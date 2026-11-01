@@ -41,6 +41,22 @@ export const DEFAULT_REP_MAX_PCT: Record<string, number> = {
   "12": 0.7,
 };
 
+export type TrainingPrefs = NonNullable<Settings["training"]>;
+export type DisplayPrefs = NonNullable<Settings["display"]>;
+
+export const DEFAULT_TRAINING: Readonly<TrainingPrefs> = { restSecondsMain: 180, restSecondsAccessory: 90, accessoryIncrementLb: 5 };
+export const DEFAULT_DISPLAY: Readonly<DisplayPrefs> = { highContrast: false };
+
+/** Training preferences with defaults filled in (settings stored before they existed have none). */
+export function trainingPrefs(settings: Settings | null | undefined): TrainingPrefs {
+  return { ...DEFAULT_TRAINING, ...settings?.training };
+}
+
+/** Display preferences with defaults filled in. */
+export function displayPrefs(settings: Settings | null | undefined): DisplayPrefs {
+  return { ...DEFAULT_DISPLAY, ...settings?.display };
+}
+
 export function defaultSettings(ids: SeedIds, today: ISODate): Settings {
   return {
     onboarded: false,
@@ -78,5 +94,7 @@ export function defaultSettings(ids: SeedIds, today: ISODate): Settings {
         "5": { label: "Carries & pull", primaryExerciseId: null, progression: false },
       },
     },
+    training: { ...DEFAULT_TRAINING },
+    display: { ...DEFAULT_DISPLAY },
   };
 }

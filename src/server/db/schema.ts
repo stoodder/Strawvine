@@ -78,3 +78,17 @@ export const authState = pgTable("auth_state", {
   sessionEpoch: integer("session_epoch").notNull().default(0),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Responses to creates sent with an `Idempotency-Key` header, so a retried POST (the response
+ * was lost, the client timed out) returns the original row instead of creating a duplicate.
+ * Pruned after IDEMPOTENCY_TTL_MS.
+ */
+export const idempotencyKeys = pgTable("idempotency_keys", {
+  key: varchar("key", { length: 80 }).primaryKey(),
+  method: varchar("method", { length: 10 }).notNull(),
+  path: varchar("path", { length: 200 }).notNull(),
+  status: integer("status").notNull(),
+  body: jsonb("body"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

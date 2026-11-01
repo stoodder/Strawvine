@@ -1,6 +1,7 @@
 /**
  * Closing the day, streaks and achievements — all derived from raw data.
  */
+import { benchmarkPrs } from "./benchmarks";
 import { addDays, dateRange, formatShortDate, weekdayOf, type ISODate } from "./dates";
 import { CALIBRATION_DAYS, firstTdeeDate, isLogged } from "./energy";
 import { cyclePosition, scheduledProgramDay } from "./program";
@@ -140,9 +141,10 @@ export interface EffectiveMaxEntry extends MaxEntry {
 }
 
 /**
- * Each lift's max history as the athlete meant it, sorted by date: a manual entry made within
- * MAX_CORRECTION_WINDOW_MS of the previous entry for the same lift *replaces* it, so a typo
- * (315 → 3150 → 315) is neither a PR nor a high-water mark later maxes have to beat.
+ * Each lift's max history as the athlete meant it, sorted by date: a manual (or explicit
+ * correction) entry made within MAX_CORRECTION_WINDOW_MS of the previous entry for the same lift
+ * *replaces* it, so a typo (315 → 3150 → 315) is neither a PR nor a high-water mark later maxes
+ * have to beat. Explicit `correction` entries outside the window stay in the history (see `maxPrs`).
  * Negative ids are the client's optimistic placeholders and are skipped: a PR is keyed (and
  * celebrated) once, by the saved row that replaces the placeholder.
  */
@@ -162,8 +164,10 @@ export function effectiveMaxHistory(entries: ReadonlyArray<MaxEntry>): Map<numbe
     for (const e of byCreation) {
       const prev = kept.at(-1);
       const gap = prev ? created(e) - created(prev) : NaN;
-      if (prev && e.source === "manual" && gap >= 0 && gap <= MAX_CORRECTION_WINDOW_MS) {
-        kept[kept.length - 1] = { ...e, rootId: prev.rootId, correction: true };
+      if (prev && (e.source === "manual" || e.source === "correction") && gap >= 0 && gap <= MAX_CORRECTION_WINDOW_MS) {
+        // Re-typing an explicit correction is still a correction.
+        const source = prev.source === "correction" ? "correction" : e.source;
+        kept[kept.length - 1] = { ...e, source, rootId: prev.rootId, correction: true };
       } else kept.push({ ...e, rootId: e.id, correction: false });
     }
     kept.sort((a, b) => (a.date === b.date ? (a.createdAt < b.createdAt ? -1 : 1) : a.date < b.date ? -1 : 1));
@@ -184,17 +188,71 @@ export interface MaxPr {
  * Initial entries only set the baseline. A quick correction counts against the history before
  * the entry it fixes and keeps that entry's key, so fixing an already-celebrated PR doesn't
  * celebrate again — and fixing a typo'd *low* entry doesn't celebrate the "gain" from the typo.
+ * An explicit `correction` entry is never a PR and *resets* the high-water mark to its value,
+ * so later PRs are measured against the corrected max rather than the mistake it fixes.
  */
 export function maxPrs(history: Map<number, ReadonlyArray<EffectiveMaxEntry>>): MaxPr[] {
   const out: MaxPr[] = [];
   for (const list of history.values()) {
     let best: number | null = null;
     for (const e of list) {
+      if (e.source === "correction") {
+        best = e.valueLb;
+        continue;
+      }
       if (best !== null && e.source !== "initial") {
         const gainLb = Math.round((e.valueLb - best) * 10) / 10;
         if (gainLb >= MIN_PR_GAIN_LB) out.push({ entry: e, gainLb, keyId: e.rootId });
       }
       best = best === null ? e.valueLb : Math.max(best, e.valueLb);
+    }
+  }
+  return out;
+}
+
+export interface AmrapPr {
+  /** `amrap-<date>-<exerciseId>`. */
+  key: string;
+  date: ISODate;
+  exerciseId: number;
+  reps: number;
+  weightLb: number;
+  /** The best earlier AMRAP at this load or heavier. */
+  previousReps: number;
+}
+
+/**
+ * AMRAP rep PRs: a completed AMRAP set with more reps than every earlier AMRAP set of the same
+ * lift at the same or a heavier load (a first AMRAP at a load only sets the baseline). One per
+ * lift per session — its best set. Skipped exercises and unsaved (temporary-id) lifts are ignored.
+ */
+export function amrapPrs(sessions: ReadonlyArray<Session>, upTo?: ISODate): AmrapPr[] {
+  const sorted = sessions.filter((s) => !upTo || s.date <= upTo).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const history = new Map<number, Array<{ reps: number; weightLb: number }>>();
+  const out: AmrapPr[] = [];
+  for (const s of sorted) {
+    const today = new Map<number, Array<{ reps: number; weightLb: number }>>();
+    for (const b of s.blocks)
+      for (const e of b.exercises) {
+        if (e.skipped || e.exerciseId < 0) continue;
+        for (const set of e.sets) {
+          const weightLb = set.weight ?? set.targetWeight;
+          if (!set.amrap || !set.done || set.reps === null || weightLb === null) continue;
+          today.set(e.exerciseId, [...(today.get(e.exerciseId) ?? []), { reps: set.reps, weightLb }]);
+        }
+      }
+    for (const [exerciseId, sets] of today) {
+      const past = history.get(exerciseId) ?? [];
+      let pr: AmrapPr | null = null;
+      for (const set of sets) {
+        const atOrAbove = past.filter((p) => p.weightLb >= set.weightLb);
+        if (!atOrAbove.length) continue;
+        const previousReps = Math.max(...atOrAbove.map((p) => p.reps));
+        if (set.reps > previousReps && (!pr || set.reps > pr.reps || (set.reps === pr.reps && set.weightLb > pr.weightLb)))
+          pr = { key: `amrap-${s.date}-${exerciseId}`, date: s.date, exerciseId, reps: set.reps, weightLb: set.weightLb, previousReps };
+      }
+      if (pr) out.push(pr);
+      history.set(exerciseId, [...past, ...sets]);
     }
   }
   return out;
@@ -248,9 +306,29 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
     });
   }
 
-  // Strength targets.
+  // AMRAP rep PRs (see `amrapPrs`).
+  for (const pr of amrapPrs(data.sessions, today))
+    out.push({
+      key: pr.key,
+      title: `${exName(pr.exerciseId)} rep PR`,
+      detail: `${pr.reps} @ ${pr.weightLb} lb`,
+      date: pr.date,
+      tier: "pr",
+    });
+
+  // Benchmark metcon PRs (see `benchmarkPrs`).
+  for (const pr of benchmarkPrs(data.days.filter((d) => d.date <= today)))
+    out.push({
+      key: pr.key,
+      title: `${pr.entry.name} PR`,
+      detail: `${pr.entry.score} · previous ${pr.previous.score}`,
+      date: pr.entry.date,
+      tier: "pr",
+    });
+
+  // Strength targets. A correction restates a max; it never hits a target by itself.
   for (const t of data.settings.strengthTargets) {
-    const hit = (byExercise.get(t.exerciseId) ?? []).find((e) => e.valueLb >= t.targetLb && e.date >= t.setOn);
+    const hit = (byExercise.get(t.exerciseId) ?? []).find((e) => e.source !== "correction" && e.valueLb >= t.targetLb && e.date >= t.setOn);
     if (hit)
       out.push({
         key: `target-${t.id}`,

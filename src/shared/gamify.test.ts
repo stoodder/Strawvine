@@ -4,7 +4,8 @@ import { defaultSettings } from "./defaults";
 import { computeEnergySeries } from "./energy";
 import { achievements, checklist, isClosed, type AppData } from "./gamify";
 import { buildModel } from "./insights";
-import { emptyDayLog, type DayLog, type Exercise, type MaxEntry, type Settings } from "./schemas";
+import { currentMax } from "./program";
+import { emptyDayLog, type DayLog, type Exercise, type MaxEntry, type Session, type Settings } from "./schemas";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 // The program's first cycle starts Monday 2026-11-02.
@@ -176,5 +177,147 @@ describe("goal weight achievement", () => {
 
   it("has no achievement without any weigh-in", () => {
     expect(goalReached(appData({ settings: withGoal({ targetLb: 190, pacePctPerWeek: 1, setOn: "2026-11-10" }) }))).toBeUndefined();
+  });
+});
+
+describe("explicit max corrections", () => {
+  let nextId = 500;
+  const entry = (valueLb: number, source: MaxEntry["source"], createdAt: string): MaxEntry => ({
+    id: nextId++,
+    exerciseId: 1,
+    date: createdAt.slice(0, 10),
+    valueLb,
+    source,
+    note: null,
+    createdAt,
+  });
+  const prs = (maxEntries: MaxEntry[], s: Settings = settings) =>
+    achievements(appData({ settings: s, maxEntries }), today)
+      .filter((a) => a.tier === "pr")
+      .map((a) => a.title);
+  const base = () => entry(300, "initial", "2026-11-01T08:00:00.000Z");
+
+  it("is never a PR, even when it raises the max", () => {
+    expect(prs([base(), entry(320, "correction", "2026-11-05T18:00:00.000Z")])).toEqual([]);
+  });
+
+  it("becomes the current max and resets the high-water mark later PRs are measured against", () => {
+    // A typo celebrated days ago (3150) is corrected to 315; 320 next week is a real PR again.
+    const list = [
+      base(),
+      entry(3150, "manual", "2026-11-02T18:00:00.000Z"),
+      entry(315, "correction", "2026-11-06T18:00:00.000Z"),
+      entry(320, "amrap", "2026-11-09T18:00:00.000Z"),
+    ];
+    expect(prs(list)).toEqual(["Bench press 320", "Bench press 3150"]);
+    expect(currentMax(list, 1)?.valueLb).toBe(320);
+    // Lowering the max (a bad week, an injury) makes the next small gain a PR too.
+    expect(prs([base(), entry(280, "correction", "2026-11-06T18:00:00.000Z"), entry(290, "manual", "2026-11-20T18:00:00.000Z")])).toEqual([
+      "Bench press 290",
+    ]);
+  });
+
+  it("replaces a just-entered typo like a quick manual re-entry, without celebrating it", () => {
+    const typo = entry(3150, "manual", "2026-11-05T18:00:00.000Z");
+    const fix = entry(315, "correction", "2026-11-05T18:03:00.000Z");
+    expect(prs([base(), typo, fix])).toEqual([]);
+    // Re-typing the correction a minute later is still a correction.
+    expect(prs([base(), typo, fix, entry(316, "manual", "2026-11-05T18:04:00.000Z")])).toEqual([]);
+  });
+
+  it("never hits a strength target by itself", () => {
+    const withTarget = { ...settings, strengthTargets: [{ id: "t5", exerciseId: 1, targetLb: 320, setOn: "2026-11-01" }] };
+    const keys = (maxEntries: MaxEntry[]) => achievements(appData({ settings: withTarget, maxEntries }), today).map((a) => a.key);
+    expect(keys([base(), entry(325, "correction", "2026-11-06T18:00:00.000Z")])).not.toContain("target-t5");
+    expect(keys([base(), entry(325, "correction", "2026-11-06T18:00:00.000Z"), entry(326, "amrap", "2026-11-09T18:00:00.000Z")])).toContain(
+      "target-t5",
+    );
+  });
+});
+
+describe("AMRAP rep PRs", () => {
+  const amrapSession = (
+    date: string,
+    reps: number | null,
+    weight: number,
+    opts: { done?: boolean; exerciseId?: number; skipped?: boolean } = {},
+  ): Session => ({
+    date,
+    label: "Push",
+    cycle: 1,
+    week: 1,
+    deload: false,
+    primaryMaxLb: 315,
+    notes: "",
+    completedAt: null,
+    blocks: [
+      {
+        id: `p-${date}`,
+        kind: "primary",
+        exercises: [
+          {
+            exerciseId: opts.exerciseId ?? 1,
+            measure: "reps",
+            skipped: opts.skipped,
+            sets: [
+              { id: "a", targetReps: 6, targetWeight: weight, reps: 6, weight, done: true, amrap: false, appliedProgressionLb: null },
+              {
+                id: "b",
+                targetReps: 6,
+                targetWeight: weight,
+                reps,
+                weight,
+                done: opts.done ?? true,
+                amrap: true,
+                appliedProgressionLb: null,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const repPrs = (sessions: Session[]) =>
+    achievements(appData({ sessions }), today)
+      .filter((a) => a.key.startsWith("amrap-"))
+      .map((a) => [a.key, a.title, a.detail]);
+
+  it("celebrates beating the best earlier AMRAP at the same or a heavier load", () => {
+    expect(repPrs([amrapSession("2026-11-02", 9, 200), amrapSession("2026-12-07", 11, 200)])).toEqual([
+      ["amrap-2026-12-07-1", "Bench press rep PR", "11 @ 200 lb"],
+    ]);
+    // 10 @ 195 vs 12 earlier at a heavier 200: no PR. 13 @ 195 is.
+    expect(repPrs([amrapSession("2026-11-02", 12, 200), amrapSession("2026-12-07", 10, 195)])).toEqual([]);
+    expect(repPrs([amrapSession("2026-11-02", 12, 200), amrapSession("2026-12-07", 13, 195)])).toHaveLength(1);
+  });
+
+  it("needs an earlier AMRAP at that load or heavier, and only counts logged, not-skipped sets", () => {
+    expect(repPrs([amrapSession("2026-11-02", 9, 200)])).toEqual([]);
+    expect(repPrs([amrapSession("2026-11-02", 9, 200), amrapSession("2026-12-07", 12, 210)])).toEqual([]);
+    expect(repPrs([amrapSession("2026-11-02", 9, 200), amrapSession("2026-12-07", 12, 200, { done: false })])).toEqual([]);
+    expect(repPrs([amrapSession("2026-11-02", 9, 200), amrapSession("2026-12-07", 12, 200, { skipped: true })])).toEqual([]);
+    expect(repPrs([amrapSession("2026-11-02", 9, 200), amrapSession("2026-12-07", 12, 200, { exerciseId: 2 })])).toEqual([]);
+  });
+});
+
+describe("benchmark PR achievements", () => {
+  const metcon = (date: string, name: string, score: string): DayLog => ({
+    ...emptyDayLog(date),
+    metconDone: true,
+    metconBenchmark: name,
+    metconScore: score,
+  });
+
+  it("celebrates a parseable score that beats the previous best, not the first one", () => {
+    const days = [metcon("2026-11-02", "Fran", "4:02"), metcon("2026-11-16", "fran ", "4:10"), metcon("2026-11-30", "Fran", "3:45")];
+    const list = achievements(appData({ days }), today).filter((a) => a.key.startsWith("bench-"));
+    expect(list).toEqual([
+      { key: "bench-fran-2026-11-30", title: "Fran PR", detail: "3:45 · previous 4:02", date: "2026-11-30", tier: "pr" },
+    ]);
+  });
+
+  it("ignores results after today", () => {
+    const days = [metcon("2026-11-02", "Cindy", "18+3"), metcon("2027-01-04", "Cindy", "20+1")];
+    expect(achievements(appData({ days }), today).filter((a) => a.key.startsWith("bench-"))).toEqual([]);
   });
 });

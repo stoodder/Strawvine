@@ -10,6 +10,8 @@
  *   backoff (paused while offline); a 401 pauses until sign-in; any other 4xx marks the entry
  *   "not saved" (the edit stays on screen) and raises a toast with Retry.
  * - The dataset cache lives in IndexedDB, written in the background once things settle.
+ * - Creates carry an idempotency key (persisted with the op), so a retried POST whose first
+ *   response was lost doesn't create the row twice.
  */
 import { onlineManager, QueryClient, replaceEqualDeep } from "@tanstack/react-query";
 import type { Bootstrap } from "../../shared/schemas";
@@ -23,9 +25,12 @@ import {
   describe,
   discardFailed as discardFailedCore,
   emptyOutbox,
+  ensureIdempotencyKeys,
   failEntry,
   nextSendable,
+  opLabel,
   overlay,
+  pendingDates as pendingDatesOf,
   pruneAcked,
   request,
   retryFailed as retryFailedCore,
@@ -61,6 +66,8 @@ const LEGACY_CACHE_KEY = "strawvine:bootstrap";
 /** Set when the IndexedDB copy must not be trusted (a write failed, or sign-out started a wipe). */
 const CACHE_INVALID_KEY = "strawvine:cache-invalid";
 const LOGOUT_WARN_KEY = "strawvine:logout-warn";
+/** When everything was last known to be on the server (ms since epoch). */
+const LAST_SYNCED_KEY = "strawvine:last-synced";
 const BASE_KEY = "base";
 
 let base: Bootstrap | undefined;
@@ -114,7 +121,8 @@ function loadOutbox(): OutboxState {
     if (!raw) return emptyOutbox();
     const parsed = JSON.parse(raw) as OutboxState;
     if (!Array.isArray(parsed.entries)) return emptyOutbox();
-    return { ...emptyOutbox(), ...parsed };
+    // Outboxes saved before idempotency keys existed: key their creates before anything is sent.
+    return ensureIdempotencyKeys({ ...emptyOutbox(), ...parsed });
   } catch {
     return emptyOutbox();
   }
@@ -210,8 +218,10 @@ export async function fetchBootstrap({ signal }: { signal: AbortSignal }): Promi
     base = base ? replaceEqualDeep(base, snap) : snap;
   }
   reconcileOwed = false;
+  markSynced();
   publish();
   schedulePersist();
+  if (displayed?.settings.onboarded) requestPersistentStorage();
   return displayed!;
 }
 
@@ -252,27 +262,114 @@ const listeners = new Set<() => void>();
 let retrying = false;
 let authPaused = false;
 
+/** One unsynced change, for Settings → Sync. */
+export interface SyncItem {
+  /** Stable while the change is queued (an edit merged into a newer one takes that one's id). */
+  id: string;
+  label: string;
+  /** Rejected by the server (kept locally until retried or discarded). */
+  failed: boolean;
+  error?: string;
+}
+
+/** Sync details for Settings (see `useSyncInfo`). */
+export interface SyncInfoState {
+  online: boolean;
+  /** Changes waiting to be sent (not counting failed ones) — the non-failed `items`. */
+  pending: number;
+  /** Changes the server rejected. */
+  failed: number;
+  /** When everything was last known to be on the server, or null if never on this device. */
+  lastSyncedAt: number | null;
+  items: SyncItem[];
+}
+
+function readLastSynced(): number | null {
+  const n = Number(lsGet(LAST_SYNCED_KEY));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+let lastSyncedAt: number | null = readLastSynced();
+let infoState: SyncInfoState = { online: true, pending: 0, failed: 0, lastSyncedAt, items: [] };
+let datesState: Set<string> = new Set<string>();
+
+/** Everything is on the server as of now (the outbox just drained, or a snapshot arrived). */
+function markSynced() {
+  lastSyncedAt = Date.now();
+  lsSet(LAST_SYNCED_KEY, String(lastSyncedAt));
+}
+
+const sameItems = (a: SyncItem[], b: SyncItem[]) =>
+  a.length === b.length &&
+  a.every((x, i) => x.id === b[i]!.id && x.label === b[i]!.label && x.failed === b[i]!.failed && x.error === b[i]!.error);
+const sameSet = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
+
 function emit() {
   const live = unsynced(ob);
   const failed = live.filter((e) => e.state === "failed");
+  const online = onlineManager.isOnline();
+  let changed = false;
+
   const next: SyncState = {
     pending: live.length,
     failed: failed.length,
     failedMessage: failed[0]?.error ?? null,
-    online: onlineManager.isOnline(),
+    online,
     sending: inflight !== null,
     retrying,
     authPaused,
   };
-  if ((Object.keys(next) as (keyof SyncState)[]).every((k) => next[k] === syncState[k])) return;
-  syncState = next;
-  listeners.forEach((l) => l());
+  if (!(Object.keys(next) as (keyof SyncState)[]).every((k) => next[k] === syncState[k])) {
+    syncState = next;
+    changed = true;
+  }
+
+  const items: SyncItem[] = live
+    .filter((e) => e.op.kind !== "seen")
+    .map((e) => ({
+      id: String(e.seq),
+      label: opLabel(e.op),
+      failed: e.state === "failed",
+      ...(e.state === "failed" && e.error ? { error: e.error } : {}),
+    }));
+  const info: SyncInfoState = {
+    online,
+    // "Seen achievement" bookkeeping isn't listed or counted (and is never marked failed).
+    pending: items.length - failed.length,
+    failed: failed.length,
+    lastSyncedAt,
+    items: sameItems(items, infoState.items) ? infoState.items : items,
+  };
+  if ((Object.keys(info) as (keyof SyncInfoState)[]).some((k) => info[k] !== infoState[k])) {
+    infoState = info;
+    changed = true;
+  }
+
+  const dates = pendingDatesOf(ob.entries);
+  if (!sameSet(dates, datesState)) {
+    datesState = dates;
+    changed = true;
+  }
+
+  if (changed) listeners.forEach((l) => l());
 }
 
 export const getSyncState = () => syncState;
+export const getSyncInfo = () => infoState;
+/** Dates with unsynced day-log or workout edits. Same Set instance until it changes — never mutate it. */
+export const getPendingDates = () => datesState;
 export function subscribeSync(l: () => void) {
   listeners.add(l);
   return () => void listeners.delete(l);
+}
+
+// "Saved" pulses: a per-date counter bumped whenever the server confirms a day-log write.
+const pulses = new Map<string, number>();
+const pulseListeners = new Set<() => void>();
+export const getSavedPulse = (date: string) => pulses.get(date) ?? 0;
+export function subscribeSavedPulse(l: () => void) {
+  pulseListeners.add(l);
+  return () => void pulseListeners.delete(l);
 }
 
 export const hasUnsynced = () => unsynced(ob).length > 0;
@@ -331,7 +428,15 @@ export function kick() {
   void run();
 }
 
-async function run() {
+let current: Promise<void> | null = null;
+
+/** Sends what can be sent now; resolves when the loop stops (drained, offline, waiting to retry). */
+function run(): Promise<void> {
+  current ??= replay().finally(() => (current = null));
+  return current;
+}
+
+async function replay() {
   if (running) return;
   running = true;
   try {
@@ -344,7 +449,7 @@ async function run() {
       const req = request(e.op);
       let result: unknown;
       try {
-        result = await api<unknown>(req.path, { method: req.method, body: req.body });
+        result = await api<unknown>(req.path, { method: req.method, body: req.body, headers: req.headers });
       } catch (err) {
         inflight = null;
         if (err instanceof ApiError && err.status === 401) {
@@ -389,11 +494,17 @@ function onAcked(seq: number, result: unknown) {
     // Apply just this result; the overlay drops the op now that it's acked.
     base = applyAcked(base, [{ ...entry, state: "acked", result, ackNo: 0 }]);
   }
+  if (!unsynced(ob).length) markSynced();
   saveOutbox();
   publish();
   schedulePersist();
   ackWaiters.get(seq)?.(result);
   ackWaiters.delete(seq);
+  if (entry?.op.kind === "day") {
+    pulses.set(entry.op.date, getSavedPulse(entry.op.date) + 1);
+    pulseListeners.forEach((l) => l());
+  }
+  if (entry?.op.kind === "settings" && entry.op.settings.onboarded) requestPersistentStorage();
 }
 
 function onRejected(seq: number, op: Op, message: string) {
@@ -430,6 +541,49 @@ export function discardFailed() {
   saveOutbox();
   publish();
   reconcile();
+}
+
+/**
+ * "Sync now": sends everything queued straight away (skipping any retry backoff), then re-reads
+ * the server's copy. Resolves when both are done; never rejects. Failed changes stay failed.
+ */
+export async function syncNow(): Promise<void> {
+  await run(); // let an attempt already in flight finish first
+  failures = 0;
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    timer = undefined;
+  }
+  await run();
+  if (authPaused || !onlineManager.isOnline()) return;
+  reconcileOwed = false;
+  await queryClient.refetchQueries({ queryKey: BOOT_KEY }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Persistent storage
+// ---------------------------------------------------------------------------
+
+let persistenceAsked = false;
+
+/**
+ * Asks the browser not to evict this origin's storage (IndexedDB copy + outbox) under pressure
+ * — iOS otherwise clears PWAs' data after a while unused. Once per app load, after onboarding;
+ * failures and refusals are ignored.
+ */
+function requestPersistentStorage() {
+  if (persistenceAsked) return;
+  persistenceAsked = true;
+  const storage = typeof navigator !== "undefined" ? navigator.storage : undefined;
+  if (!storage || typeof storage.persist !== "function") return;
+  void (async () => {
+    try {
+      if (typeof storage.persisted === "function" && (await storage.persisted())) return;
+      await storage.persist();
+    } catch {
+      /* not supported / not allowed: nothing to do */
+    }
+  })();
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +628,8 @@ function wipeLocalData() {
   persistTimer = undefined;
   base = undefined;
   displayed = undefined;
+  lastSyncedAt = null;
+  lsDel(LAST_SYNCED_KEY);
   ob = { ...emptyOutbox(), nextTemp: ob.nextTemp, tempMap: ob.tempMap };
   saveOutbox();
   void idbDel(BASE_KEY).catch(() => {});
@@ -494,6 +650,7 @@ export async function initSync(): Promise<void> {
   if (started) return;
   started = true;
   ob = loadOutbox();
+  saveOutbox(); // persists idempotency keys given to an older outbox's creates
 
   let cached: Bootstrap | undefined;
   if (lsGet(CACHE_INVALID_KEY)) {

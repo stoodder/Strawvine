@@ -15,6 +15,13 @@
       "when": 1793568491556,
       "tag": "0001_auth_state",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793570891236,
+      "tag": "0002_idempotency_keys",
+      "breakpoints": true
     }
   ]
 }

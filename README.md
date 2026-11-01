@@ -109,8 +109,16 @@ is shorter than 12 characters or a known default. The log says exactly what to f
 ### Sessions
 
 Signing in sets a 180-day cookie that renews itself while the app is in use. **Sign out signs out every device**
-(the session epoch stored in `auth_state` moves on). Changing `APP_PASSWORD` or `SESSION_SECRET` also signs every
-device out.
+(the session epoch stored in `auth_state` moves on). Changing `APP_PASSWORD` or `SESSION_SECRET`, or restoring an
+export, also signs every device out.
+
+### Offline writes
+
+Edits are queued on the device and replayed in order. `POST /api/exercises` and `POST /api/exercises/:id/maxes`
+accept an `Idempotency-Key` header (8–80 characters of `A-Z a-z 0-9 . _ : -`); the client generates one per create and
+persists it with the queued edit. A repeated key returns the first response (with `Idempotent-Replayed: true`) instead of
+creating the row again; reusing a key for a different request is a 422. Keys live in `idempotency_keys` and are pruned
+after 7 days.
 
 ### Backups
 
@@ -142,5 +150,13 @@ heroku run --no-tty "node dist/server/restore.js -" < export.json               
 ```
 
 The restore applies migrations, then replaces everything in a single transaction (rows keep their ids; id sequences
-are moved past them). It refuses to run on a database that already has data — anything beyond the untouched first-boot
+are moved past them) and **signs every device out** (the session epoch moves on, so a cookie revoked before the restore
+can't come back). It refuses to run on a database that already has data — anything beyond the untouched first-boot
 seed — unless you add `--force`. Older, unversioned exports are accepted too.
+
+A database-level rollback (`heroku pg:backups:restore`) also rolls `auth_state` back, which can revive cookies that were
+signed out after the backup. Move the epoch past anything issued since:
+
+```sh
+heroku pg:psql -c "update auth_state set session_epoch = session_epoch + 1000, updated_at = now() where id = 1"
+```
