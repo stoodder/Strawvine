@@ -210,6 +210,12 @@ export const settingsSchema = z.object({
       /** Chosen pace in % of bodyweight per week (absolute). Capped by limits. */
       pacePctPerWeek: z.number().min(0).max(3),
       setOn: isoDate,
+      /**
+       * Bodyweight when the goal was set — fixes the goal's direction (cut vs build) so an
+       * overshoot settles into maintenance instead of flipping into the opposite phase.
+       * Optional for goals created before this field existed.
+       */
+      startLb: z.number().min(50).max(1000).nullable().optional(),
     })
     .nullable(),
   strengthTargets: z.array(
