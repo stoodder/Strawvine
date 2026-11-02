@@ -67,16 +67,36 @@ over", and staying there beyond.
   calorie bar.
 - Past the tolerance the bar is labelled "+N kcal over" / "+Ng over" in the same colour (not colour alone); the lime
   glow is kept for an on-target bar.
+- **Minimum overage**: the note shows the overage rounded to a whole unit, so a bar counts as over only once that
+  rounded overage is at least 1 g / 1 kcal (`MIN_OVERAGE`). A 4 g fat target with 4.3 g eaten stays lime with no note,
+  never "+0g over"; the note and the tint always appear together (`overTarget`).
+- **Colour mapping** (`severityMix` / `severityColor`, `src/web/components/ui.tsx`), monotonic in two legs, mixed in
+  OKLCH: severity 0 is pure lime; on (0, 0.5] the colour is lime → caution at **50 % + s** toward caution — it
+  starts halfway, so anything past the tolerance is visibly off lime (hue ≈ 117° against lime's 129°) — reaching
+  caution yellow at 0.5; on (0.5, 1] it is caution → warn at 2·(s − 0.5), warn red at 1. Where `color-mix()` isn't
+  supported (Safari before 16.2) the nearest token is painted instead: caution below 0.75, warn from 0.75 — never lime
+  once over. High-contrast mode raises the tokens, and the mix with them.
 - The tolerances are display constants (`OVER_TARGET_SCALE`, `PROTEIN_OVER_TARGET_SCALE`), not training rules.
 - Yellow is its own colour, never gold: gold stays for PRs and goals.
+- Progress's 7-day **intake strip** (calories eaten against each day's own target) uses the same tolerance, minimum
+  overage and colours: an over day is neutral up to its target with the excess in that day's over-target colour, so a
+  day 6 % over looks the same on Today and on Progress.
 
 ### 3.2 Steps trend (Progress)
 
 Progress charts daily steps (a dot per day, a dot per week past ~a year) with a **trend line**: the same descending
 weighted 7-day average as bodyweight (§4.1), with days without a count skipped and their weight removed from the
-divisor. Today's count is still in progress, so it is plotted but joins the trend only once the day is done. The step
-target is drawn as a neutral dashed reference line. The chart follows the same range toggle as the bodyweight and
-energy charts, and needs counts on at least two days.
+divisor. It is called the trend, not an average, because it isn't the plain 7-day mean on the check-in's "Avg steps"
+tile.
+
+- **Today's count is partial** ("so far"): it is drawn as a hollow point (held inside the plot if it falls under the
+  scale) and labelled "so far" in the legend and the table, and it is kept out of the trend, the y-scale and its
+  labels, the weekly means, and the chart's "from … to" summary. It joins all of them once the day is done.
+- The step target is a neutral dashed reference line, named in the legend row ("Target 15,000") rather than on the
+  line, where it would sit on the data.
+- The chart follows the same 30 / 90 / All range toggle as the bodyweight and energy charts; the Steps section names
+  the range it shows ("Last 30 days", "All time"), since the toggle is out of sight up on Bodyweight.
+- It needs counts on at least two complete days.
 
 ## 4. Energy engine (TDEE)
 

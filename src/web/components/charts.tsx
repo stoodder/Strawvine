@@ -69,6 +69,12 @@ export interface Series {
    * chart (scrubbing, the table) still shows each day's own value.
    */
   weeklyOver?: number;
+  /**
+   * The date whose value is still in progress (today's step count so far). It is drawn as a
+   * hollow point and kept out of everything that summarises complete days — the y-scale and its
+   * labels, weekly means, the "from … to" summary — and reads "so far" in the legend and table.
+   */
+  partialAt?: string;
 }
 
 /**
@@ -112,8 +118,9 @@ export function LineChart({
   series: Series[];
   height?: number;
   /**
-   * A dashed horizontal reference. "goal" (the default) is gold — a goal weight; "target" is a
-   * neutral grey for an everyday target (a step count) that isn't an achievement.
+   * A dashed horizontal reference. "goal" (the default) is gold — a goal weight, labelled on the
+   * line; "target" is a neutral grey for an everyday target (a step count) that isn't an
+   * achievement, named in the legend row ("Target 10,000") so no label sits on the data.
    */
   refLine?: { y: number; label: string; tone?: "goal" | "target" };
   formatY?: (v: number) => string;
@@ -143,15 +150,19 @@ export function LineChart({
       for (const p of s.points) if (p.y !== null) m.set(p.x, p.y);
       return m;
     });
+    // A partial (in-progress) value is read on hover and in the table, but doesn't set the scale.
     let dataMin = Infinity;
     let dataMax = -Infinity;
     let count = 0;
-    for (const m of byDate)
-      for (const v of m.values()) {
+    byDate.forEach((m, si) => {
+      const partialAt = series[si]!.partialAt;
+      for (const [x, v] of m) {
+        if (x === partialAt) continue;
         count++;
         if (v < dataMin) dataMin = v;
         if (v > dataMax) dataMax = v;
       }
+    });
     if (count < 2 || dates.length < 2) return null;
 
     // The y-domain hugs the data. A reference line close to the data joins the domain; one far
@@ -177,14 +188,15 @@ export function LineChart({
     // One path per series. Dots are zero-length segments drawn with round caps, so a decade of
     // daily weigh-ins is one element instead of thousands of <circle>s.
     const weekly = series.map((s) => s.kind === "dots" && s.weeklyOver !== undefined && dates.length > s.weeklyOver);
+    const complete = (s: Series) => (s.partialAt === undefined ? s.points : s.points.filter((p) => p.x !== s.partialAt));
     const paths = series.map((s, si) => {
       let d = "";
       if (weekly[si]) {
-        for (const p of weeklyMeans(s.points, (x) => idx.get(x)!)) d += `M${xOf(p.i).toFixed(1)},${yOf(p.y).toFixed(1)}h0`;
+        for (const p of weeklyMeans(complete(s), (x) => idx.get(x)!)) d += `M${xOf(p.i).toFixed(1)},${yOf(p.y).toFixed(1)}h0`;
         return d;
       }
       for (const p of s.points) {
-        if (p.y === null) continue;
+        if (p.y === null || p.x === s.partialAt) continue;
         const x = xOf(idx.get(p.x)!).toFixed(1);
         const y = yOf(p.y).toFixed(1);
         d += s.kind === "dots" ? `M${x},${y}h0` : `${d ? "L" : "M"}${x},${y}`;
@@ -193,7 +205,15 @@ export function LineChart({
     });
     // Dots closer together than ~2/3 of a haloed dot (5.6px) overlap into a band, not dots (see the drawing order).
     const dotsBand = paths.some((d, si) => series[si]!.kind === "dots" && (d.match(/M/g)?.length ?? 0) * 5.6 > plotW * 1.5);
-    return { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly, dotsBand };
+    // Partial points, held inside the plot when they fall outside the scale (a morning's few
+    // hundred steps under a week of thousands): "so far" is a floor, not a reading to scale.
+    const partials = series.flatMap((s, si) => {
+      const v = s.partialAt !== undefined ? byDate[si]!.get(s.partialAt) : undefined;
+      if (v === undefined) return [];
+      const y = Math.max(pad.t, Math.min(height - pad.b, yOf(v)));
+      return [{ si, x: xOf(idx.get(s.partialAt!)!), y }];
+    });
+    return { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly, dotsBand, partials };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- pad / plotW are constants
   }, [series, height, refLine?.y]);
 
@@ -209,7 +229,7 @@ export function LineChart({
   }, [table, geo]);
 
   if (!geo) return <div className="grid h-28 place-items-center text-sm text-mute">{emptyText}</div>;
-  const { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly, dotsBand } = geo;
+  const { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly, dotsBand, partials } = geo;
 
   const onMove = (clientX: number) => {
     const el = ref.current;
@@ -237,45 +257,64 @@ export function LineChart({
 
   const hoverDate = hover !== null ? dates[hover]! : null;
   const fmtOf = (s: Series) => s.format ?? formatY;
-  const lastOf = (s: Series) => {
-    for (let i = s.points.length - 1; i >= 0; i--) if (s.points[i]!.y !== null) return s.points[i];
+  const lastOf = (s: Series, withPartial = true) => {
+    for (let i = s.points.length - 1; i >= 0; i--) {
+      const p = s.points[i]!;
+      if (p.y !== null && (withPartial || p.x !== s.partialAt)) return p;
+    }
     return undefined;
   };
-  const firstOf = (s: Series) => s.points.find((q) => q.y !== null);
+  const firstOf = (s: Series) => s.points.find((q) => q.y !== null && q.x !== s.partialAt);
+  const partialOf = (s: Series, si: number) => (s.partialAt !== undefined ? byDate[si]!.get(s.partialAt) : undefined);
+  const pct = (v: number) => `${(v / height) * 100}%`;
+  // Axis values read in the main line's own format (e.g. one decimal for bodyweight).
+  const refTarget = refLine?.tone === "target";
+  const refGoal = !refTarget;
+  const fmtAxis = (series.find((s) => s.kind === "line") ?? series[0])?.format ?? formatY;
   // Spell the years out when the range crosses one ("Nov 2, 2025 to Mar 1, 2026").
   const crossesYear = dates[0]!.slice(0, 4) !== dates[dates.length - 1]!.slice(0, 4);
   const summary = [
     `${title}, ${formatShortDate(dates[0]!, crossesYear)} to ${formatShortDate(dates[dates.length - 1]!, crossesYear)}.`,
-    ...series.map((s) => {
+    ...series.map((s, si) => {
       const a = firstOf(s);
-      const b = lastOf(s);
-      return a && b ? `${s.label} ${fmtOf(s)(a.y!)} to ${fmtOf(s)(b.y!)}.` : `${s.label}: no data.`;
+      const b = lastOf(s, false);
+      const p = partialOf(s, si);
+      const soFar = p !== undefined ? ` ${s.label} so far on ${formatShortDate(s.partialAt!)}: ${fmtOf(s)(p)}.` : "";
+      return (a && b ? `${s.label} ${fmtOf(s)(a.y!)} to ${fmtOf(s)(b.y!)}.` : `${s.label}: no data.`) + soFar;
     }),
     ...series.filter((_, si) => weekly[si]).map((s) => `${s.label} drawn as weekly averages.`),
-    refLine ? `${refLine.label}.` : "",
+    refLine ? `${refLine.label}${refTarget ? ` ${fmtAxis(refLine.y)}` : ""}.` : "",
     "Use the left and right arrow keys to read each day.",
   ]
     .filter(Boolean)
     .join(" ");
-  const pct = (v: number) => `${(v / height) * 100}%`;
-  // Axis values read in the main line's own format (e.g. one decimal for bodyweight).
-  const refGoal = refLine?.tone !== "target";
-  const fmtAxis = (series.find((s) => s.kind === "line") ?? series[0])?.format ?? formatY;
   const gridAt = dataMax > dataMin ? [dataMax, (dataMax + dataMin) / 2, dataMin] : [dataMax];
 
   return (
     <div className="relative">
       <div className="mb-2 flex min-h-[34px] flex-wrap items-end gap-x-5 gap-y-1" aria-live="polite" aria-atomic="true">
         {series.map((s, si) => {
-          const y = hoverDate ? byDate[si]!.get(hoverDate) : lastOf(s)?.y;
+          const at = hoverDate ?? lastOf(s)?.x;
+          const y = at !== undefined ? byDate[si]!.get(at) : undefined;
           return (
             <div key={s.key} className="flex items-center gap-2">
               <span aria-hidden className="h-1.5 w-1.5 rounded-full" style={{ background: s.color }} />
               <span className="text-xs text-mute">{s.label}</span>
               <span className="num text-sm">{y != null ? fmtOf(s)(y) : "—"}</span>
+              {y != null && at === s.partialAt && <span className="-ml-1 text-xs text-mute">so far</span>}
             </div>
           );
         })}
+        {refLine && refTarget && (
+          <div className="flex items-center gap-2">
+            <span aria-hidden className="w-2.5 border-t border-dashed border-mute" />
+            <span className="text-xs text-mute">{refLine.label}</span>
+            <span className="num text-sm text-fg-2">
+              {fmtAxis(refLine.y)}
+              {pinned && <span aria-hidden>{pinned === "below" ? " ↓" : " ↑"}</span>}
+            </span>
+          </div>
+        )}
         <span className="label ml-auto">{hoverDate ? formatShortDate(hoverDate) : "Latest"}</span>
       </div>
       <div
@@ -352,6 +391,23 @@ export function LineChart({
               );
             }),
           )}
+          {partials.map(({ si, x, y }) => {
+            const s = series[si]!;
+            // Hollow, so "so far" never reads as a finished day.
+            return (
+              <circle
+                key={s.key}
+                data-partial=""
+                cx={x}
+                cy={y}
+                r={(strong ? 4.8 : 3.6) / 2 + 0.6}
+                fill="var(--color-ink-950)"
+                stroke={s.color}
+                strokeWidth={strong ? 1.75 : 1.25}
+                opacity={strong ? 1 : 0.8}
+              />
+            );
+          })}
           {hover !== null && (
             <g>
               <line
@@ -363,15 +419,21 @@ export function LineChart({
               />
               {series.map((s, si) => {
                 const y = byDate[si]!.get(hoverDate!);
-                return y != null ? <circle key={s.key} cx={xOf(hover)} cy={yOf(y)} r={3} fill={s.color} /> : null;
+                if (y == null) return null;
+                const p = hoverDate === s.partialAt ? partials.find((q) => q.si === si) : undefined;
+                return p ? (
+                  <circle key={s.key} cx={p.x} cy={p.y} r={3} fill="var(--color-ink-950)" stroke={s.color} strokeWidth={1.5} />
+                ) : (
+                  <circle key={s.key} cx={xOf(hover)} cy={yOf(y)} r={3} fill={s.color} />
+                );
               })}
             </g>
           )}
         </svg>
-        {/* High and low of the plotted data, at their own levels on the left. */}
+        {/* High and low of the plotted data, at their own levels on the left, on a backing so a reference line just past them doesn't strike them through. */}
         <span
           aria-hidden
-          className="pointer-events-none absolute left-2 -translate-y-full pb-0.5 font-mono text-2xs text-mute"
+          className="pointer-events-none absolute left-1.5 -translate-y-full rounded-sm bg-ink-950/75 px-0.5 pb-0.5 font-mono text-2xs text-mute"
           style={{ top: pct(yOf(dataMax)) }}
         >
           {fmtAxis(dataMax)}
@@ -379,30 +441,27 @@ export function LineChart({
         {dataMax > dataMin && (
           <span
             aria-hidden
-            className="pointer-events-none absolute left-2 pt-0.5 font-mono text-2xs text-mute"
+            className="pointer-events-none absolute left-1.5 rounded-sm bg-ink-950/75 px-0.5 pt-0.5 font-mono text-2xs text-mute"
             style={{ top: pct(yOf(dataMin)) }}
           >
             {fmtAxis(dataMin)}
           </span>
         )}
-        {refLine && !pinned && (
+        {/* A goal is labelled on its line; a target is named in the legend row instead. */}
+        {refLine && refGoal && !pinned && (
           <span
             aria-hidden
-            className={clsx(
-              "pointer-events-none absolute right-0 -translate-y-full pb-1 font-mono text-2xs",
-              refGoal ? "text-gold/90" : "text-mute",
-            )}
+            className="pointer-events-none absolute right-0 -translate-y-full pb-1 font-mono text-2xs text-gold/90"
             style={{ top: pct(yOf(refLine.y)) }}
           >
             {refLine.label}
           </span>
         )}
-        {refLine && pinned && (
+        {refLine && refGoal && pinned && (
           <span
             aria-hidden
             className={clsx(
-              "pointer-events-none absolute right-0 font-mono text-2xs",
-              refGoal ? "text-gold/90" : "text-mute",
+              "pointer-events-none absolute right-0 font-mono text-2xs text-gold/90",
               pinned === "below" ? "bottom-0" : "top-0",
             )}
           >
@@ -459,7 +518,15 @@ export function LineChart({
                       const y = byDate[si]!.get(d);
                       return (
                         <td key={s.key} className="num py-1.5 text-right text-fg">
-                          {y != null ? fmtOf(s)(y) : <span className="text-mute">—</span>}
+                          {y == null ? (
+                            <span className="text-mute">—</span>
+                          ) : d === s.partialAt ? (
+                            <>
+                              {fmtOf(s)(y)} <span className="text-mute">so far</span>
+                            </>
+                          ) : (
+                            fmtOf(s)(y)
+                          )}
                         </td>
                       );
                     })}

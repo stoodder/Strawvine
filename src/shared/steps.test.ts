@@ -31,7 +31,37 @@ describe("computeStepsSeries", () => {
     const s = computeStepsSeries(days, start, today, today);
     expect(s[8]!.steps).toBe(13000);
     expect(s[8]!.avgSteps).toBeNull();
+    expect(s[8]!.partial).toBe(true);
+    expect(s.slice(0, 8).every((d) => !d.partial)).toBe(true);
     expect(s[7]!.avgSteps).toBeCloseTo(weightedAverage([14000, 9000, 11000, 15000, 8000, null, 12000])!);
+  });
+
+  it("marks nothing partial when today has no count yet, or without a today", () => {
+    const today = addDays(start, 9);
+    expect(computeStepsSeries(days, start, today, today).some((d) => d.partial)).toBe(false);
+    expect(computeStepsSeries(days, start, addDays(start, 8), null).some((d) => d.partial)).toBe(false);
+  });
+
+  it("handles a one-day range (its trend still reads the days before it)", () => {
+    const s = computeStepsSeries(days, addDays(start, 4), addDays(start, 4), null);
+    expect(s).toEqual([
+      { date: addDays(start, 4), steps: 15000, avgSteps: weightedAverage([15000, 8000, null, 12000, 10000])!, partial: false },
+    ]);
+    // A one-day range that is today: its partial count and no trend.
+    expect(computeStepsSeries(days, addDays(start, 4), addDays(start, 4), addDays(start, 4))).toEqual([
+      { date: addDays(start, 4), steps: 15000, avgSteps: null, partial: true },
+    ]);
+  });
+
+  it("runs past today without trend or partial points for the future", () => {
+    const today = addDays(start, 6);
+    const s = computeStepsSeries(days, addDays(start, 5), addDays(start, 8), today);
+    expect(s.map((d) => d.date)).toEqual([5, 6, 7, 8].map((i) => addDays(start, i)));
+    expect(s[0]!.avgSteps).toBeCloseTo(weightedAverage([11000, 15000, 8000, null, 12000, 10000])!);
+    // Today (day 6) is partial; days after it may hold counts (logged ahead, or clock skew) but
+    // feed no trend and aren't "so far".
+    expect(s.map((d) => d.avgSteps).slice(1)).toEqual([null, null, null]);
+    expect(s.map((d) => d.partial)).toEqual([false, true, false, false]);
   });
 
   it("has no trend for a week without counts, and counts a logged 0", () => {

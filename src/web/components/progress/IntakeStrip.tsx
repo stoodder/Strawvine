@@ -5,10 +5,10 @@ import { addDays, dateRange, formatShortDate, weekdayName } from "../../../share
 import type { EnergyDay } from "../../../shared/energy";
 import type { AppData } from "../../../shared/gamify";
 import { targetsFor } from "../../../shared/insights";
+import { overTargetSeverity } from "../../../shared/nutrition";
 import { fmt } from "../../lib/format";
+import { severityClass, severityColor } from "../ui";
 
-/** A day over target by more than this reads as over (matches Today's Fuel bar). */
-const OVER = 0.05;
 /** Where the target sits in each column; above it is room for overs (up to 1/TARGET_AT × target). */
 const TARGET_AT = 0.7;
 
@@ -20,9 +20,11 @@ interface StripDay {
 
 /**
  * The last seven days of calories eaten against each day's own target (from `targetsFor`, i.e.
- * the engine as of the day before). Under or on target in lime; over is neutral up to the target
- * with the excess in warn; a day without calories or a target is a dim stub. Today is still in
- * progress and says so.
+ * the engine as of the day before). Under or on target in lime; over (past the same tolerance as
+ * Today's calorie bar, `overTargetSeverity`) is neutral up to the target with the excess in the
+ * same over-target colour as that bar (`severityColor`: caution yellow → warn red), so a day 6 %
+ * over looks alike on both screens. A day without calories or a target is a dim stub. Today is
+ * still in progress and says so.
  */
 export const IntakeStrip = memo(function IntakeStrip({
   data,
@@ -44,7 +46,8 @@ export const IntakeStrip = memo(function IntakeStrip({
     if (d.eaten === null) return `${when}: no calories logged`;
     if (d.target === null) return `${when}: ${fmt(d.eaten)} kcal, no target yet`;
     const diff = d.eaten - d.target;
-    return `${when}: ${fmt(d.eaten)} of ${fmt(d.target)} kcal, ${diff > d.target * OVER ? `${fmt(diff)} over` : diff >= 0 ? "on target" : `${fmt(-diff)} under`}`;
+    const over = overTargetSeverity(d.eaten, d.target) > 0;
+    return `${when}: ${fmt(d.eaten)} of ${fmt(d.target)} kcal, ${over ? `${fmt(diff)} over` : diff >= 0 ? "on target" : `${fmt(-diff)} under`}`;
   };
 
   return (
@@ -59,7 +62,8 @@ export const IntakeStrip = memo(function IntakeStrip({
       <ul className="grid grid-cols-7 gap-2" aria-label="Calories eaten against each day's target, last 7 days">
         {days.map((d, i) => {
           const ratio = d.eaten !== null && d.target ? d.eaten / d.target : null;
-          const over = ratio !== null && ratio > 1 + OVER;
+          const severity = overTargetSeverity(d.eaten, d.target);
+          const over = severity > 0;
           const fill = ratio !== null ? Math.min(ratio * TARGET_AT, 1) : 0;
           const isToday = d.date === today;
           const diff = d.eaten !== null && d.target ? d.eaten - d.target : null;
@@ -71,7 +75,7 @@ export const IntakeStrip = memo(function IntakeStrip({
                   <motion.div
                     className={clsx(
                       "absolute inset-x-0 bottom-0 rounded-[4px]",
-                      // Over: the part up to the target stays neutral, the excess above it carries the warn tone.
+                      // Over: the part up to the target stays neutral, the excess above it carries the over-target colour.
                       over ? "bg-fg-2/20" : "bg-accent",
                       isToday && "opacity-60",
                     )}
@@ -82,8 +86,9 @@ export const IntakeStrip = memo(function IntakeStrip({
                   >
                     {over && (
                       <div
-                        className="absolute inset-x-0 top-0 rounded-t-[4px] bg-warn"
-                        style={{ height: `${((fill - TARGET_AT) / fill) * 100}%` }}
+                        className={clsx("absolute inset-x-0 top-0 rounded-t-[4px]", severityClass(severity, "bg"))}
+                        data-severity={Math.round(severity * 100) / 100}
+                        style={{ height: `${((fill - TARGET_AT) / fill) * 100}%`, backgroundColor: severityColor(severity) }}
                       />
                     )}
                   </motion.div>
@@ -98,7 +103,10 @@ export const IntakeStrip = memo(function IntakeStrip({
                   <span className="max-[16rem]:hidden">{weekdayName(d.date, true)}</span>
                   <span className="hidden max-[16rem]:inline">{weekdayName(d.date, true).slice(0, 1)}</span>
                 </div>
-                <div className={clsx("num mt-0.5 truncate text-2xs", over ? "text-warn" : "text-mute")}>
+                <div
+                  className={clsx("num mt-0.5 truncate text-2xs", over ? severityClass(severity, "text") : "text-mute")}
+                  style={over ? { color: severityColor(severity) } : undefined}
+                >
                   {diff === null ? "—" : compactDiff(diff)}
                 </div>
               </div>

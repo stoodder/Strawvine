@@ -133,15 +133,18 @@
     background: var(--color-ink-950);
     /*
      * Safety net against sideways panning (the layout itself must fit — e2e/13 and e2e/25 measure
-     * with this lifted): whatever still sticks out is clipped, and a horizontal swipe doesn't
-     * rubber-band the page on iOS. `clip`, not `hidden`: hidden makes body a scroll container,
-     * which breaks position: sticky and window scrolling. Body is `relative` so that absolutely
-     * positioned descendants are clipped by it too (with the initial containing block as theirs,
-     * a phone still widens the layout viewport to fit them). Fixed layers (dock, sheets) escape
-     * any clip: they must fit by themselves.
+     * with this lifted): whatever still sticks out is clipped by body, so there is nothing to pan
+     * to. `clip`, not `hidden`: hidden makes body a scroll container, which breaks position:
+     * sticky and window scrolling. html clips too so that body's clip stays on body (a visible
+     * html would hand body's overflow to the viewport instead) — which is also why a Sheet locks
+     * the page by pinning body rather than with body overflow (ui.tsx `lockPage`). Body is
+     * `relative` so that absolutely positioned descendants are clipped by it too (with the initial
+     * containing block as theirs, a phone still widens the layout viewport to fit them). Fixed
+     * layers (dock, sheets) escape any clip: they must fit by themselves. No
+     * overscroll-behavior-x: it would turn off the trackpad's swipe back/forward, and with
+     * nothing to pan to there is no sideways rubber-banding to stop (e2e/28).
      */
     overflow-x: clip;
-    overscroll-behavior-x: none;
   }
   body {
     @apply bg-ink-950 text-fg font-sans antialiased;
@@ -149,7 +152,6 @@
     min-height: 100dvh;
     font-feature-settings: "cv11", "ss01";
     overflow-x: clip;
-    overscroll-behavior-x: none;
     overscroll-behavior-y: none;
   }
   /* Ambient glow painted once at the top of the page (not fixed: fixed backgrounds cause

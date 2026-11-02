@@ -92,8 +92,8 @@ export function ProgressScreen() {
   );
 
   const stepsSeries = useMemo<Series[]>(() => {
-    // A single day is a dot, not a trend: wait for a couple.
-    if (steps.filter((d) => d.steps !== null).length < 2) return [];
+    // A single day is a dot, not a trend: wait for a couple (complete ones: today's is "so far").
+    if (steps.filter((d) => d.steps !== null && !d.partial).length < 2) return [];
     return [
       {
         key: "steps",
@@ -103,6 +103,8 @@ export function ProgressScreen() {
         points: steps.map((d) => ({ x: d.date, y: d.steps })),
         format: (v) => fmt(v),
         weeklyOver: 400,
+        // Today's count is still climbing: a hollow "so far" point, off the scale and the weekly means.
+        partialAt: steps.find((d) => d.partial)?.date,
       },
       {
         key: "avg",
@@ -115,10 +117,7 @@ export function ProgressScreen() {
     ];
   }, [steps]);
   const stepTarget = data.settings.targets.steps;
-  const stepRef = useMemo(
-    () => (stepTarget > 0 ? { y: stepTarget, label: `target ${fmt(stepTarget)}`, tone: "target" as const } : undefined),
-    [stepTarget],
-  );
+  const stepRef = useMemo(() => (stepTarget > 0 ? { y: stepTarget, label: "Target", tone: "target" as const } : undefined), [stepTarget]);
 
   const loggedCount = model.todayEnergy?.loggedCount ?? 0;
   const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
@@ -332,7 +331,8 @@ export function ProgressScreen() {
         <IntakeStrip data={data} series={model.series} today={today} />
       </Section>
 
-      <Section label="Steps">
+      {/* Follows the range toggle up on Bodyweight; named here, where that toggle is out of sight. */}
+      <Section label="Steps" right={<span className="text-xs text-mute">{range ? `Last ${range} days` : "All time"}</span>}>
         <LineChart
           series={stepsSeries}
           refLine={stepRef}
@@ -342,7 +342,8 @@ export function ProgressScreen() {
         />
         {stepsSeries.length > 0 && (
           <p className="mt-3 text-xs leading-relaxed text-mute">
-            Weighted 7-day average, like your weight trend. Today&rsquo;s count joins it once the day is done.
+            The line is your step trend, weighted toward recent days like your weight trend, so it won&rsquo;t match the plain 7-day average
+            above. Today&rsquo;s count (the hollow dot) joins it once the day is done.
           </p>
         )}
       </Section>

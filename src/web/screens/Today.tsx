@@ -6,12 +6,12 @@ import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { CALIBRATION_DAYS } from "../../shared/energy";
 import { dayChecklist, isClosed } from "../../shared/gamify";
 import { targetsFor } from "../../shared/insights";
-import { overTargetSeverity, PROTEIN_OVER_TARGET_SCALE, type OverTargetScale } from "../../shared/nutrition";
+import { overTarget, PROTEIN_OVER_TARGET_SCALE, type OverTargetScale } from "../../shared/nutrition";
 import { cyclePosition, programDayFor } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
-import { Bar, Section, severityColor, Stat } from "../components/ui";
+import { Bar, Section, severityClass, severityColor, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { JournalText } from "../components/TextArea";
 import { DayChecklist } from "../components/today/Checklist";
@@ -81,9 +81,8 @@ export function TodayScreen() {
   const missing =
     day.weightLb !== null && day.calories === null ? "calories" : day.calories !== null && day.weightLb === null ? "weight" : null;
   const trendDelta = energy?.avgWeight != null && prevEnergy?.avgWeight != null ? energy.avgWeight - prevEnergy.avgWeight : null;
-  const overKcal = rec && day.calories !== null ? day.calories - rec.calories : 0;
   // 0 within 5 % of the target, then lime → caution yellow → warn as the day runs further over (SPEC §3.1).
-  const kcalSeverity = overTargetSeverity(day.calories, rec?.calories);
+  const { severity: kcalSeverity, over: overKcal } = overTarget(day.calories, rec?.calories);
 
   return (
     <div>
@@ -190,7 +189,10 @@ export function TodayScreen() {
             </div>
             <Bar className="mt-4" value={day.calories ? day.calories / rec.calories : 0} severity={kcalSeverity} />
             {kcalSeverity > 0 && (
-              <div className="num mt-1.5 text-right text-xs" style={{ color: severityColor(kcalSeverity) }}>
+              <div
+                className={clsx("num mt-1.5 text-right text-xs", severityClass(kcalSeverity, "text"))}
+                style={{ color: severityColor(kcalSeverity) }}
+              >
                 +{fmt(overKcal)} <span className="text-mute">kcal over</span>
               </div>
             )}
@@ -321,8 +323,8 @@ export function Macro({
 }) {
   // A zero target (e.g. carbs on an aggressive cut) has no meaningful bar.
   const hasTarget = target > 0;
-  const severity = overTargetSeverity(eaten, target, scale);
-  const over = severity > 0 && eaten !== null ? eaten - target : 0;
+  // `over` (whole grams) is 0 exactly when `severity` is: no "+0g over" on a tiny target.
+  const { severity, over } = overTarget(eaten, target, scale);
   return (
     <div className="min-w-0">
       <div className="label mb-1.5">{label}</div>
@@ -333,7 +335,7 @@ export function Macro({
       <Bar className="mt-2" value={hasTarget && eaten ? eaten / target : 0} severity={severity} />
       {/* Not colour alone: the text says "over". */}
       {over > 0 && (
-        <div className="num mt-1 text-[0.6875rem]" style={{ color: severityColor(severity) }}>
+        <div className={clsx("num mt-1 text-[0.6875rem]", severityClass(severity, "text"))} style={{ color: severityColor(severity) }}>
           +{fmt(over)}g over
         </div>
       )}

@@ -97,34 +97,97 @@ describe("LineChart: steps with their trend and a target", () => {
   const today = "2026-10-21";
   const days = Array.from({ length: 21 }, (_, i) => ({
     date: addDays("2026-10-01", i),
-    steps: i === 4 ? null : 8000 + ((i * 1733) % 7000),
+    steps: i === 4 ? null : i === 20 ? 1234 : 8000 + ((i * 1733) % 7000),
   }));
   const s = computeStepsSeries(days, "2026-10-01", today, today);
+  const fmtN = (v: number) => v.toLocaleString("en-US", { maximumFractionDigits: 0 });
   const series: Series[] = [
-    { key: "steps", label: "Steps", kind: "dots", color: "gray", points: s.map((d) => ({ x: d.date, y: d.steps })) },
-    { key: "avg", label: "Trend", kind: "line", color: "lime", points: s.map((d) => ({ x: d.date, y: d.avgSteps })) },
+    {
+      key: "steps",
+      label: "Steps",
+      kind: "dots",
+      color: "gray",
+      points: s.map((d) => ({ x: d.date, y: d.steps })),
+      format: fmtN,
+      partialAt: s.find((d) => d.partial)?.date,
+    },
+    { key: "avg", label: "Trend", kind: "line", color: "lime", points: s.map((d) => ({ x: d.date, y: d.avgSteps })), format: fmtN },
   ];
+  const complete = days.filter((d) => d.steps !== null && d.date !== today).map((d) => d.steps!);
 
-  it("draws the daily dots, the trend line and a neutral (not gold) target line", () => {
-    const { container } = render(
-      <LineChart series={series} title="Steps" refLine={{ y: 15000, label: "target 15,000", tone: "target" }} />,
-    );
+  it("draws the daily dots, the trend line and a neutral (not gold) target named in the legend", () => {
+    const { container } = render(<LineChart series={series} title="Steps" refLine={{ y: 15000, label: "Target", tone: "target" }} />);
     const paths = [...container.querySelectorAll("svg path")];
     const dots = paths.filter((p) => p.getAttribute("stroke") === "gray");
-    expect(dots[0]!.getAttribute("d")!.match(/M/g)).toHaveLength(20); // 21 days, one missed
+    expect(dots[0]!.getAttribute("d")!.match(/M/g)).toHaveLength(19); // 21 days, one missed, today apart
     const line = paths.filter((p) => p.getAttribute("stroke") === "lime").at(-1)!;
     expect(line.getAttribute("d")!.match(/[ML]/g)).toHaveLength(20); // ends yesterday: today is in progress
     const ref = container.querySelector("svg line[stroke-dasharray]")!;
     expect(ref.getAttribute("stroke")).toBe("var(--color-mute)");
-    const label = screen.getByText("target 15,000");
+    // Named in the legend row, not on the line (where it sat on the data).
+    const label = screen.getByText("Target");
     expect(label.className).toContain("text-mute");
-    expect(label.className).not.toContain("text-gold");
-    expect(screen.getByRole("img").getAttribute("aria-label")).toMatch(/^Steps, .*Steps \d+ to \d+\. Trend \d+ to \d+\. target 15,000\./);
+    expect(label.nextElementSibling!.textContent).toBe("15,000");
+    expect(container.querySelector(".text-gold\\/90")).toBeNull();
+    expect(screen.getByRole("img").getAttribute("aria-label")).toMatch(
+      /^Steps, .*Steps [\d,]+ to [\d,]+\. .*Trend [\d,]+ to [\d,]+\. Target 15,000\./,
+    );
   });
 
-  it("keeps the goal line gold by default", () => {
-    const { container } = render(<LineChart series={series} title="Steps" refLine={{ y: 12000, label: "goal" }} />);
+  it("draws today's partial count hollow, off the scale, and reads it as 'so far'", () => {
+    const { container } = render(<LineChart series={series} title="Steps" />);
+    const partial = container.querySelector("svg circle[data-partial]")!;
+    expect(partial.getAttribute("fill")).toBe("var(--color-ink-950)");
+    expect(partial.getAttribute("stroke")).toBe("gray");
+    // The axis labels are the complete days' high and low, not today's 1,234.
+    const axis = [...container.querySelectorAll("span.font-mono")].map((e) => e.textContent);
+    expect(axis).toContain(fmtN(Math.min(...complete)));
+    expect(axis).toContain(fmtN(Math.max(...complete)));
+    expect(axis).not.toContain("1,234");
+    // Inside the plot even though it's below the scale.
+    expect(Number(partial.getAttribute("cy"))).toBeLessThanOrEqual(180);
+    // Legend: today's count, so far.
+    const steps = screen.getByText("Steps", { selector: "span" });
+    expect(steps.parentElement!.textContent).toBe("Steps1,234so far");
+    const label = screen.getByRole("img").getAttribute("aria-label")!;
+    expect(label).toContain(`Steps so far on ${formatShortDate(today)}: 1,234.`);
+    expect(label).not.toMatch(/to 1,234\./);
+    // Table: today's row says so too.
+    act(() => screen.getByRole("button", { name: /Table/ }).click());
+    const row = screen.getByRole("row", { name: new RegExp(`^${formatShortDate(today)}`) });
+    expect(row.textContent).toContain("1,234 so far");
+    const yesterday = screen.getByRole("row", { name: new RegExp(`^${formatShortDate(addDays(today, -1))}`) });
+    expect(yesterday.textContent).not.toContain("so far");
+  });
+
+  it("keeps the partial day out of the weekly means", () => {
+    // 500 days ending today, so the dots are weekly means; today's tiny count would drag its week down.
+    const long = Array.from({ length: 500 }, (_, i) => ({ date: addDays(today, i - 499), steps: i === 499 ? 10 : 10000 }));
+    const ls = computeStepsSeries(long, long[0]!.date, today, today);
+    const lseries: Series[] = [
+      {
+        key: "steps",
+        label: "Steps",
+        kind: "dots",
+        color: "gray",
+        weeklyOver: 400,
+        points: ls.map((d) => ({ x: d.date, y: d.steps })),
+        partialAt: today,
+      },
+      { key: "avg", label: "Trend", kind: "line", color: "lime", points: ls.map((d) => ({ x: d.date, y: d.avgSteps })) },
+    ];
+    const { container } = render(<LineChart series={lseries} title="Steps" />);
+    const d = [...container.querySelectorAll("svg path")].find((p) => p.getAttribute("stroke") === "gray")!.getAttribute("d")!;
+    // Every weekly mean is 10,000: all on one level.
+    const ys = new Set([...d.matchAll(/M[\d.]+,([\d.]+)h0/g)].map((m) => m[1]));
+    expect(ys.size).toBe(1);
+    expect(container.querySelector("svg circle[data-partial]")).not.toBeNull();
+  });
+
+  it("keeps the goal line gold, labelled on the line, by default", () => {
+    const { container } = render(<LineChart series={series} title="Steps" refLine={{ y: 12000, label: "goal 12000" }} />);
     expect(container.querySelector("svg line[stroke-dasharray]")!.getAttribute("stroke")).toBe("var(--color-gold)");
+    expect(screen.getByText("goal 12000").className).toContain("text-gold");
   });
 });
 

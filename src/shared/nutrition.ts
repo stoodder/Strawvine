@@ -177,9 +177,18 @@ export const OVER_TARGET_SCALE: OverTargetScale = { tolerance: 0.05, full: 0.25 
 export const PROTEIN_OVER_TARGET_SCALE: OverTargetScale = { tolerance: 0.25, full: 0.75 };
 
 /**
+ * The smallest overage worth showing, in the bar's own unit (1 g, 1 kcal): the "+N over" note
+ * shows the overage rounded to a whole unit, so on a tiny target (4 g of fat, 4.3 g eaten) a
+ * fraction of a gram past the tolerance would read "+0g over" on a tinted bar. Below this the bar
+ * stays on target.
+ */
+export const MIN_OVERAGE = 1;
+
+/**
  * How far `eaten` is over `target`, on a 0…1 scale: 0 at or under the target and within the
  * scale's tolerance, rising linearly to 1 at `full` over (and staying 1 beyond). 0 when there is
- * nothing to compare (no entry, or a target ≤ 0).
+ * nothing to compare (no entry, or a target ≤ 0), and while the overage rounds to less than
+ * `MIN_OVERAGE`.
  */
 export function overTargetSeverity(
   eaten: number | null | undefined,
@@ -188,9 +197,24 @@ export function overTargetSeverity(
 ): number {
   if (eaten === null || eaten === undefined || target === null || target === undefined) return 0;
   if (!Number.isFinite(eaten) || !Number.isFinite(target) || target <= 0) return 0;
+  if (Math.round(eaten - target) < MIN_OVERAGE) return 0;
   // In grams/kcal rather than ratios, so "exactly 5 % over" isn't nudged past by rounding.
   const excess = eaten - target - target * scale.tolerance;
   if (excess <= 1e-9) return 0;
   const span = target * (scale.full - scale.tolerance);
   return span <= 0 ? 1 : Math.min(1, excess / span);
+}
+
+/**
+ * The over-target reading of a bar: its severity (`overTargetSeverity`) and the overage to print
+ * ("+N over", rounded to a whole unit). `over` is 0 exactly when `severity` is, so a note never
+ * shows without a tint, or a tint without a note.
+ */
+export function overTarget(
+  eaten: number | null | undefined,
+  target: number | null | undefined,
+  scale: OverTargetScale = OVER_TARGET_SCALE,
+): { severity: number; over: number } {
+  const severity = overTargetSeverity(eaten, target, scale);
+  return { severity, over: severity > 0 ? Math.round(eaten! - target!) : 0 };
 }
