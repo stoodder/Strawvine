@@ -265,6 +265,13 @@ optional note.
   it — exactly, whatever else is writing at the same time — so a device whose copy was current stays current after its
   own edits (the next revalidation is a 304), and one that missed another write never mistakes it for current. After
   onboarding the app asks the browser for persistent storage so the offline copy isn't evicted.
+- Exercise creates and the `weighted` flag (§6.5), with windows of different app versions sharing one queue: a weighted
+  create is sent without the flag (absent = weighted, as servers before it accept), and the flag doesn't count toward a
+  create's idempotency check, so one sent by an older window (which drops it) and retried by a newer one replays. When
+  that saved an unweighted create as weighted, the next current window patches it back. Exports are version 3
+  (exercises carry `weighted`); older ones restore every exercise as weighted. Migration 0006 turned the flag off once
+  for existing exercises with no sign of a load (not main lifts or max-tracked, no max entry, strength target, program
+  day or logged/planned load).
 - Edits the server would reject (limits a person can hit: too many sets, an overlong note…) are refused before they are
   queued; Settings → Sync lists the last 20 with why, until cleared.
 - **Version-checked saves.** Workouts and settings are saved as whole documents, each with a server revision. An edit
