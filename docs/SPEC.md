@@ -240,6 +240,23 @@ optional note.
 ### 6.5 Accessories & supersets
 
 - Exercises and their sets can be grouped into **supersets** (covers core couplets and any pairing).
+  - A superset's exercises are done in order (A1, A2, …): "Log next round" logs the next open set of each, in that
+    order, then the accessory rest starts. Letters follow the page (the first superset is A).
+  - **Superset sheet** (from the "Superset A" header, or the exercise options' "Manage Superset A" / "Superset with
+    another exercise"): the members in order, each with Move up / Move down and **Remove from superset**, then **Add
+    from this workout** (another accessory of the session moves in at the end, with all its sets, logged or not — out of
+    its own block, which disappears, or out of another superset, which a member of two leaves as a single exercise) and
+    **Add new exercise** (from the library or created; pre-filled like an exercise added by hand).
+  - **Remove from superset** keeps the exercise in the workout, in a block of its own right after the superset (Undo
+    from the exercise's options). Removing an exercise from the workout is separate ("Remove — also from future
+    Mondays" on a Monday).
+  - **Reorder** (the Accessories header) moves the accessory blocks — a superset as one — up or down. The main lift
+    always comes first, holds the main lift alone and never joins a superset.
+  - Moves are buttons (keyboard and screen-reader friendly; each move is announced with the new position), not drag:
+    the sheet drags down to close and holding a set edits it. Limits as the server's: 6 exercises per superset (nothing
+    more can join a full one) and 30 blocks (nothing can be taken out while a session holds 30).
+  - Structure and order are part of the session, so next week's pre-fill carries them (supersets, members' order, block
+    order).
 - Sets measure reps, seconds or distance. Independently, an exercise is **weighted** (tracks a load in lb) or not, so
   every combination exists: reps + load (rows, curls), time + load (weighted dead hang, weighted plank), distance + load
   (farmer's / sandbag carry), and unloaded reps, time or distance (pull-ups, a plank, a run). The flag is chosen when the
@@ -377,8 +394,11 @@ optional note.
     logged on either, the measure this device changed (else the server's) with that copy's sets; with logged sets on
     both in different measures, the server's copy stands and this device's logged sets are kept apart, as a second
     entry of the exercise in their own measure right after it — never mixed in or dropped;
-  - exercises are matched by the sets they hold (not their position), so splitting or joining a superset on one device
-    while the other logs never duplicates an exercise or a set; a set added on both devices keeps both;
+  - exercises are matched by the sets they hold (not their position), so splitting or joining a superset — or moving an
+    exercise into another one — on one device while the other logs never duplicates an exercise or a set; a set added
+    on both devices keeps both;
+  - order (a superset's members, the workout's blocks) follows the device that reordered: this device's order when it
+    changed it, else the server's — so a reorder on one device and logging on the other both survive;
   - if the merge leaves two main lifts (a session rebuilt on one device), the one matching the session's plan is kept and
     the other's logged sets are folded onto it (same lift) or kept as an accessory block (different lift) — logged work
     is never dropped;

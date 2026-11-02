@@ -132,7 +132,11 @@ for (const width of [195, 320, 375]) {
       }
       await page.goto("/");
       for (const row of ["Nutrition", "Steps", "Metcon"]) {
-        await page.locator("button[aria-controls]").filter({ hasText: new RegExp(`^${row}`) }).first().click();
+        await page
+          .locator("button[aria-controls]")
+          .filter({ hasText: new RegExp(`^${row}`) })
+          .first()
+          .click();
         await page.waitForTimeout(400);
         expect(await pageOverflow(page), `Today with ${row} open at ${width} px`).toBeNull();
       }
@@ -154,6 +158,15 @@ for (const width of [195, 320, 375]) {
         await page.keyboard.press("Escape");
         await expect(sheet).toHaveCount(0);
       }
+
+      // The superset's own sheet: its members' names beside the move and remove buttons.
+      await page.getByRole("button", { name: "Manage Superset A" }).click();
+      const superset = page.getByRole("dialog", { name: "Superset A" });
+      await expect(superset.getByRole("button", { name: `Remove ${UNBREAKABLE} from Superset A` })).toBeVisible();
+      await page.waitForTimeout(400);
+      expect(await outsideViewport(superset), `superset sheet at ${width} px`).toEqual([]);
+      await page.keyboard.press("Escape");
+      await expect(superset).toHaveCount(0);
 
       await page.getByRole("button", { name: "Exercise", exact: true }).click();
       const add = page.getByRole("dialog");

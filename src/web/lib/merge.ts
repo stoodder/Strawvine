@@ -11,6 +11,7 @@
  * server, so the other device's changes are kept.
  */
 import type { Block, BlockExercise, Session, SetEntry, Settings } from "../../shared/schemas";
+import { MAX_BLOCKS, MAX_SETS, MAX_SUPERSET } from "../../shared/sessionStructure";
 
 /**
  * Deep equality for JSON-shaped data (keys whose value is `undefined` count as absent). Fast
@@ -80,8 +81,28 @@ function align<T>(
 }
 
 /**
- * The merged list: local items (merged with their server counterpart) in local order, plus the
- * server items worth keeping, each placed after the server item that precedes it.
+ * Whether one version changed the relative order of the items it shares with the ancestor (a
+ * reorder; adding or removing items isn't one).
+ */
+function reordered<T>(ancestor: readonly T[] | null, list: readonly T[], key: (x: T, i: number, side: Side) => string, side: Side) {
+  if (!ancestor) return false;
+  const pos = new Map<string, number>();
+  ancestor.forEach((x, i) => pos.set(key(x, i, "a"), i));
+  let last = -1;
+  for (let i = 0; i < list.length; i++) {
+    const p = pos.get(key(list[i]!, i, side));
+    if (p === undefined) continue;
+    if (p < last) return true;
+    last = p;
+  }
+  return false;
+}
+
+/**
+ * The merged list: the items both versions hold (merged), the ones only one of them holds that are
+ * worth keeping, in this device's order — or in the server's when only the server reordered the
+ * items they share (e.g. a superset's order, or the workout's, changed there while this device
+ * logged). Items only the other version holds go after the item that precedes them there.
  */
 function mergeList<T>(
   ancestor: readonly T[] | null,
@@ -97,30 +118,40 @@ function mergeList<T>(
   const pairs = align(local, server, key, fallback, known);
   const paired = new Set(pairs.filter((j) => j >= 0));
 
-  const out: Array<{ item: T; serverIndex: number }> = [];
+  type Entry = { item: T; l: number; s: number };
+  const entries: Entry[] = [];
   local.forEach((l, i) => {
     const j = pairs[i]!;
     const a = anc.get(key(l, i, "l"));
-    if (j >= 0) out.push({ item: mergeItem(a, l, server[j]!), serverIndex: j });
-    else if (!a || !deepEqual(a, l)) out.push({ item: l, serverIndex: -1 }); // added here, or changed here after the server dropped it
+    if (j >= 0) entries.push({ item: mergeItem(a, l, server[j]!), l: i, s: j });
+    else if (!a || !deepEqual(a, l)) entries.push({ item: l, l: i, s: -1 }); // added here, or changed here after the server dropped it
     // else: unchanged here and removed on the server → stays removed
   });
   server.forEach((s, j) => {
     if (paired.has(j)) return;
     const a = anc.get(key(s, j, "s"));
     if (a && deepEqual(a, s)) return; // removed here, untouched on the server → stays removed
-    // Added on the server (or changed there after this device removed it): keep it, after the
-    // nearest earlier server item that made it into the result.
+    // Added on the server (or changed there after this device removed it): keep it.
+    entries.push({ item: s, l: -1, s: j });
+  });
+
+  // The order to follow, and where the other version's own items go: after the nearest earlier
+  // item of their version that made it into the result.
+  const byServer = !reordered(ancestor, local, key, "l") && reordered(ancestor, server, key, "s");
+  const lead: keyof Entry = byServer ? "s" : "l";
+  const other: keyof Entry = byServer ? "l" : "s";
+  const out = entries.filter((e) => e[lead] >= 0).sort((x, y) => x[lead] - y[lead]);
+  for (const e of entries.filter((x) => x[lead] < 0).sort((x, y) => x[other] - y[other])) {
     let at = 0;
-    for (let n = j - 1; n >= 0; n--) {
-      const k = out.findIndex((o) => o.serverIndex === n);
+    for (let n = e[other] - 1; n >= 0; n--) {
+      const k = out.findIndex((o) => o[other] === n);
       if (k >= 0) {
         at = k + 1;
         break;
       }
     }
-    out.splice(at, 0, { item: s, serverIndex: j });
-  });
+    out.splice(at, 0, e);
+  }
   return out.map((o) => o.item);
 }
 
@@ -582,7 +613,7 @@ export function mergeSession(ancestor: Session | null | undefined, local: Sessio
 // ---------------------------------------------------------------------------
 
 /** The server's limits on a workout (sessionSchema) that a merge can run into. */
-export const SESSION_LIMITS = { blocks: 30, superset: 6, sets: 30 } as const;
+export const SESSION_LIMITS = { blocks: MAX_BLOCKS, superset: MAX_SUPERSET, sets: MAX_SETS } as const;
 
 /**
  * Brings a merged workout within the server's limits without losing logged work: unlogged sets

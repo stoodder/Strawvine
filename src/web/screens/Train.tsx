@@ -2,6 +2,7 @@ import clsx from "clsx";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router";
 import {
+  ArrowUpDown,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -44,6 +45,20 @@ import {
   shownLoad,
   targetsMetPhrase,
 } from "../../shared/session";
+import {
+  accessoryBlocks,
+  locateExercise,
+  MAX_BLOCKS,
+  MAX_SETS,
+  MAX_SUPERSET,
+  movableInto,
+  moveBlock,
+  moveExerciseToBlock,
+  reorderInBlock,
+  splitOut,
+  supersetLetters,
+  type ExPlace,
+} from "../../shared/sessionStructure";
 import { useDockHeight, useDockTop } from "../components/Dock";
 import { CheckDot, Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
@@ -52,6 +67,7 @@ import { AddExerciseSheet } from "../components/train/AddExerciseSheet";
 import { EditExerciseSheet } from "../components/train/EditExerciseSheet";
 import { FinishPanel } from "../components/train/FinishPanel";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
+import { SupersetSheet, WorkoutOrderSheet } from "../components/train/SupersetSheets";
 import { useDismissedHints } from "../components/train/hintDismiss";
 import { afterLayout, useRevealAboveDock, whenReady } from "../components/train/reveal";
 import { MainSetButton, PlannedChip, SetChip } from "../components/train/SetControls";
@@ -90,10 +106,6 @@ import {
 import { useFocusAfter } from "../components/useFocusAfter";
 import { useTitle } from "../components/useTitle";
 
-/** Server limits (sessionSchema): sets per exercise, exercises per superset, blocks per session. */
-const MAX_SETS = 30;
-const MAX_SUPERSET = 6;
-const MAX_BLOCKS = 30;
 /** How far ahead the planned sessions can be previewed (read-only). */
 const PREVIEW_DAYS = 14;
 
@@ -112,6 +124,8 @@ const settled = (s: Session): Session =>
     ? { ...s, completedAt: null }
     : s;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** A stable React key for an exercise in its block: its first set travels with it through any move or reorder. */
+const exKey = (e: BlockExercise, i: number) => e.sets[0]?.id ?? `e${e.exerciseId}-${i}`;
 
 type Hint = NonNullable<ReturnType<typeof accessoryHint>>;
 /**
@@ -207,7 +221,8 @@ export function TrainScreen() {
   // whose target is gone closes its sheet instead of pointing at a neighbour.
   const [editingHeld, setEditing] = useState<SetRef | null>(null);
   const [amrapHeld, setAmrap] = useState<SetRef | null>(null);
-  const [adding, setAdding] = useState<{ mode: "new" } | { mode: "pair"; blockId: string } | null>(null);
+  /** `back`: opened from the superset sheet, which comes back once the exercise is added (or not). */
+  const [adding, setAdding] = useState<{ mode: "new" } | { mode: "pair"; blockId: string; back?: boolean } | null>(null);
   const [actionsHeld, setActions] = useState<HeldEx | null>(null);
   const editing = resolveSetRef(session, editingHeld);
   const amrap = resolveSetRef(session, amrapHeld);
@@ -216,6 +231,13 @@ export function TrainScreen() {
   if (amrapHeld && amrap !== amrapHeld) setAmrap(amrap);
   if (actionsHeld && actions !== actionsHeld) setActions(actions);
   if (adding?.mode === "pair" && !session.blocks.some((b) => b.id === adding.blockId)) setAdding(null);
+  /** The block whose superset sheet is open, and whether the workout order sheet is. */
+  const [managingId, setManaging] = useState<string | null>(null);
+  const [ordering, setOrdering] = useState(false);
+  /** What the last structure edit did: the open sheet's live region announces it. */
+  const [structureStatus, setStructureStatus] = useState("");
+  const managed = managingId ? session.blocks.find((b) => b.id === managingId && b.kind === "accessory") : undefined;
+  if (managingId && !managed) setManaging(null);
   const [maxFor, setMaxFor] = useState<Exercise | null>(null);
   /** The exercise in the Edit exercise sheet, and the row whose options opened it (for focus after). */
   const [editingExercise, setEditingExercise] = useState<{ id: number; ref: ExRef } | null>(null);
@@ -239,7 +261,7 @@ export function TrainScreen() {
 
   // A sheet makes the app (and its toasts) inert and the toast would sit over the sheet's
   // buttons: retire the last undo offer when one opens.
-  const sheetOpen = !!(editing || amrap || adding || actions || maxFor || editingExercise);
+  const sheetOpen = !!(editing || amrap || adding || actions || maxFor || editingExercise || managed || ordering);
   useEffect(() => {
     if (sheetOpen && lastToast.current !== null) {
       toast.dismiss(lastToast.current);
@@ -553,10 +575,73 @@ export function TrainScreen() {
     // Pre-filled from the last time it was done, as this session's own pre-fill would carry it.
     const sets = setsForAddedExercise(ex, session, data);
     const item = { exerciseId: ex.id, measure: ex.measure, sets };
-    if (adding?.mode === "pair") commit(mapBlock(session, adding.blockId, (b) => ({ ...b, exercises: [...b.exercises, item] })));
-    else commit({ ...session, blocks: [...session.blocks, { id: newId(), kind: "accessory", exercises: [item] }] });
+    if (adding?.mode === "pair") {
+      const next = mapBlock(session, adding.blockId, (b) =>
+        b.exercises.length >= MAX_SUPERSET ? b : { ...b, exercises: [...b.exercises, item] },
+      );
+      commit(next);
+      if (adding.back) {
+        const letter = supersetLetters(next).get(adding.blockId);
+        const n = next.blocks.find((b) => b.id === adding.blockId)?.exercises.length ?? 0;
+        openManage(adding.blockId, letter ? `${ex.name} added to Superset ${letter} as ${letter}${n}` : "");
+      }
+    } else commit({ ...session, blocks: [...session.blocks, { id: newId(), kind: "accessory", exercises: [item] }] });
     tick();
     setAdding(null);
+  };
+
+  // --- Superset & workout structure (src/shared/sessionStructure) ---------------------------
+  const letters = supersetLetters(session);
+  const accessories = accessoryBlocks(session);
+  const openManage = (blockId: string, status = "") => {
+    setStructureStatus(status);
+    setManaging(blockId);
+  };
+  /** Save a structure edit made in an open sheet, and say what it did (the sheet's live region). */
+  const restructure = (next: Session, status: string) => {
+    if (next === session) return false;
+    tick();
+    commit(next);
+    setStructureStatus(status);
+    return true;
+  };
+  const exAt = (p: ExPlace) => session.blocks.find((b) => b.id === p.blockId)?.exercises[p.exIdx];
+  const moveMember = (blockId: string, exIdx: number, delta: -1 | 1) => {
+    const e = exAt({ blockId, exIdx });
+    if (!e) return;
+    const next = reorderInBlock(session, blockId, exIdx, exIdx + delta);
+    const letter = supersetLetters(next).get(blockId) ?? "";
+    const n = next.blocks.find((b) => b.id === blockId)?.exercises.length ?? 0;
+    restructure(next, `${exName(e.exerciseId)} moved ${delta < 0 ? "up" : "down"} · now ${letter}${exIdx + delta + 1} of ${n}`);
+  };
+  const removeMember = (blockId: string, exIdx: number) => {
+    const e = exAt({ blockId, exIdx });
+    if (!e) return;
+    const letter = letters.get(blockId) ?? "";
+    if (restructure(splitOut(session, { blockId, exIdx }), `${exName(e.exerciseId)} removed from Superset ${letter} · now right after it`))
+      // Its row is gone (with the button pressed): back to the top of the list.
+      focusWhenReady(() => document.querySelector<HTMLElement>("[data-superset-members]"));
+  };
+  const addExisting = (blockId: string, from: ExPlace) => {
+    const e = exAt(from);
+    if (!e) return;
+    const next = moveExerciseToBlock(session, from, blockId);
+    const letter = supersetLetters(next).get(blockId) ?? "";
+    const n = next.blocks.find((b) => b.id === blockId)?.exercises.length ?? 0;
+    if (restructure(next, `${exName(e.exerciseId)} added to Superset ${letter} as ${letter}${n}`))
+      focusWhenReady(() => document.querySelector<HTMLElement>(`[data-member="${exKey(e, from.exIdx)}"] [data-move="up"]`));
+  };
+  const moveAccessory = (index: number, delta: -1 | 1) => {
+    const b = accessories[index];
+    if (!b) return;
+    const next = moveBlock(session, b.id, index + delta);
+    const was = letters.get(b.id);
+    const now = supersetLetters(next).get(b.id);
+    const what = was ? `Superset ${was}` : exName(b.exercises[0]!.exerciseId);
+    restructure(
+      next,
+      `${what} moved ${delta < 0 ? "up" : "down"} · ${index + delta + 1} of ${accessories.length}${was && now !== was ? ` · now Superset ${now}` : ""}`,
+    );
   };
 
   /** Log every still-open set of one exercise, or of a whole superset block, at its targets. */
@@ -704,8 +789,6 @@ export function TrainScreen() {
     f.block.kind === "accessory" || (!f.set.amrap && f.index >= plannedCount);
 
   const go = (d: string) => navigate(d === today ? "/train" : `/train/${d}`);
-
-  let supersetCount = 0;
 
   return (
     <div>
@@ -1125,180 +1208,212 @@ export function TrainScreen() {
           )}
 
           {/* Accessories */}
-          <Section label="Accessories">
-            {session.blocks
-              .filter((b) => b.kind === "accessory")
-              .map((b) => {
-                const superset = b.exercises.length > 1;
-                const letter = superset ? String.fromCharCode(65 + supersetCount++) : "";
-                return (
-                  <div key={b.id} data-block={b.id} className="mb-8">
-                    {superset && (
+          <Section
+            label="Accessories"
+            right={
+              !isPreview && accessories.length > 1 ? (
+                <button
+                  type="button"
+                  aria-haspopup="dialog"
+                  aria-label="Reorder workout"
+                  data-reorder
+                  className="tap label -my-3 -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 text-mute"
+                  onClick={() => {
+                    setStructureStatus("");
+                    setOrdering(true);
+                  }}
+                >
+                  <ArrowUpDown size={12} aria-hidden /> Reorder
+                </button>
+              ) : undefined
+            }
+          >
+            {accessories.map((b) => {
+              const superset = b.exercises.length > 1;
+              const letter = letters.get(b.id) ?? "";
+              return (
+                <div key={b.id} data-block={b.id} className="mb-8">
+                  {superset &&
+                    (isPreview ? (
                       <div className="mb-2 flex items-center gap-2 text-glow">
                         <Link2 size={12} />
                         <span className="label text-glow">Superset {letter}</span>
                       </div>
-                    )}
-                    <div className={clsx(superset && "border-l border-glow/25 pl-4")}>
-                      {b.exercises.map((e, exIdx) => {
-                        const name = exName(e.exerciseId);
-                        const ref = { blockId: b.id, exIdx };
-                        const tagLabel = superset && <span className="label mr-2 text-glow">{`${letter}${exIdx + 1}`}</span>;
-                        if (e.skipped)
-                          return (
-                            <div
-                              key={exIdx}
-                              className={clsx("flex min-h-11 flex-wrap items-center justify-between gap-x-3", exIdx > 0 && "mt-3")}
-                            >
-                              <div className="min-w-0 truncate text-[0.9375rem] text-mute">
-                                {tagLabel}
-                                {name}
-                              </div>
-                              <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end">
-                                <span className="label">
-                                  Skipped<span className="max-[16rem]:hidden"> today</span>
-                                </span>
-                                {!isPreview && (
-                                  <>
-                                    <span className="label px-1.5" aria-hidden>
-                                      ·
-                                    </span>
-                                    <button
-                                      type="button"
-                                      aria-label={`Unskip ${name}`}
-                                      data-ex={`${b.id}:${exIdx}`}
-                                      data-control="unskip"
-                                      className="tap label -mr-2 min-h-11 px-2 text-accent"
-                                      onClick={() => {
-                                        setSkipped(ref, false);
-                                        focusWhenReady(exControl(ref, "options"));
-                                      }}
-                                    >
-                                      Unskip
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        const weighted = exWeighted(e.exerciseId);
-                        const hint =
-                          isPreview || session.deload || session.completedAt
-                            ? null
-                            : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, {
-                                weighted,
-                                // Only performances in the measure this block is shown and logged in:
-                                // the exercise's current one, or the one its logged sets were done in.
-                                measure: e.measure,
-                              });
-                        const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
+                    ) : (
+                      // The superset's own sheet: its order, taking one out, adding one.
+                      <button
+                        type="button"
+                        aria-haspopup="dialog"
+                        aria-label={`Manage Superset ${letter}`}
+                        data-manage={b.id}
+                        className="tap -my-1.5 -ml-2 mb-0.5 inline-flex min-h-11 items-center gap-2 px-2 text-glow"
+                        onClick={() => openManage(b.id)}
+                      >
+                        <Link2 size={12} aria-hidden />
+                        <span className="label text-glow">Superset {letter}</span>
+                        <ChevronRight size={12} aria-hidden className="opacity-60" />
+                      </button>
+                    ))}
+                  <div className={clsx(superset && "border-l border-glow/25 pl-4")}>
+                    {b.exercises.map((e, exIdx) => {
+                      const name = exName(e.exerciseId);
+                      const ref = { blockId: b.id, exIdx };
+                      const tagLabel = superset && <span className="label mr-2 text-glow">{`${letter}${exIdx + 1}`}</span>;
+                      if (e.skipped)
                         return (
-                          <div key={exIdx} className={clsx(exIdx > 0 && "mt-5")}>
-                            <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
-                              <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
-                                {tagLabel}
-                                {name}
-                              </div>
+                          <div
+                            key={exKey(e, exIdx)}
+                            className={clsx("flex min-h-11 flex-wrap items-center justify-between gap-x-3", exIdx > 0 && "mt-3")}
+                          >
+                            <div className="min-w-0 truncate text-[0.9375rem] text-mute">
+                              {tagLabel}
+                              {name}
+                            </div>
+                            <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end">
+                              <span className="label">
+                                Skipped<span className="max-[16rem]:hidden"> today</span>
+                              </span>
                               {!isPreview && (
+                                <>
+                                  <span className="label px-1.5" aria-hidden>
+                                    ·
+                                  </span>
+                                  <button
+                                    type="button"
+                                    aria-label={`Unskip ${name}`}
+                                    data-ex={`${b.id}:${exIdx}`}
+                                    data-control="unskip"
+                                    className="tap label -mr-2 min-h-11 px-2 text-accent"
+                                    onClick={() => {
+                                      setSkipped(ref, false);
+                                      focusWhenReady(exControl(ref, "options"));
+                                    }}
+                                  >
+                                    Unskip
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      const weighted = exWeighted(e.exerciseId);
+                      const hint =
+                        isPreview || session.deload || session.completedAt
+                          ? null
+                          : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, {
+                              weighted,
+                              // Only performances in the measure this block is shown and logged in:
+                              // the exercise's current one, or the one its logged sets were done in.
+                              measure: e.measure,
+                            });
+                      const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
+                      return (
+                        <div key={exKey(e, exIdx)} className={clsx(exIdx > 0 && "mt-5")}>
+                          <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
+                            <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
+                              {tagLabel}
+                              {name}
+                            </div>
+                            {!isPreview && (
+                              <button
+                                type="button"
+                                aria-label={`${name} options`}
+                                aria-haspopup="dialog"
+                                data-ex={`${b.id}:${exIdx}`}
+                                data-control="options"
+                                className="tap -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
+                                onClick={() => setActions({ ...ref, exerciseId: e.exerciseId })}
+                              >
+                                <MoreHorizontal size={16} />
+                              </button>
+                            )}
+                          </div>
+                          {showHint && hint && (
+                            <div className="-mt-1 mb-1 flex flex-wrap items-center gap-x-2 text-xs text-mute">
+                              {hint.kind === "hold" ? (
+                                // Calmer than an increase: nothing to apply, just "stay here" — with
+                                // when it was missed ("Missed reps at 60 lb on Nov 2 · hold").
+                                <span>{hint.reason.replace(" — ", " · ")}</span>
+                              ) : (
+                                <>
+                                  <span title={hint.reason}>
+                                    Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb
+                                    <span className="max-[359px]:hidden"> · {targetsMetPhrase(hint.measure)}</span> → try{" "}
+                                    <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
+                                    className="tap label -my-2 min-h-11 px-1.5 text-accent"
+                                    onClick={() => {
+                                      applyHint(ref, hint.suggestedWeight, name);
+                                      // The hint row goes once the sets are at the suggestion.
+                                      focusWhenReady(exControl(ref, "options"));
+                                    }}
+                                  >
+                                    Apply
+                                  </button>
+                                </>
+                              )}
+                              <button
+                                type="button"
+                                aria-label={`Dismiss the ${name} hint for today`}
+                                className="tap -my-2 -ml-2 grid min-h-11 w-11 place-items-center text-mute"
+                                onClick={() => {
+                                  dismissHint(e.exerciseId);
+                                  focusAfter(exControl(ref, "options"));
+                                }}
+                              >
+                                <X size={12} />
+                              </button>
+                            </div>
+                          )}
+                          {isPreview ? (
+                            <ul className="mt-1 flex flex-wrap gap-2" aria-label={`${name} sets`}>
+                              {e.sets.map((s, si) => (
+                                <PlannedChip key={s.id} index={si} set={s} measure={e.measure} weighted={weighted} />
+                              ))}
+                            </ul>
+                          ) : (
+                            <div className="mt-1 flex flex-wrap gap-2">
+                              {e.sets.map((s, si) => {
+                                const setRef = { ...ref, setId: s.id };
+                                return (
+                                  <SetChip
+                                    key={s.id}
+                                    dataSet={s.id}
+                                    open={!s.done}
+                                    exerciseName={name}
+                                    index={si}
+                                    set={s}
+                                    measure={e.measure}
+                                    weighted={weighted}
+                                    describedBy={hintId}
+                                    onTap={() => toggleDone(setRef)}
+                                    onHold={() => setEditing(setRef)}
+                                  />
+                                );
+                              })}
+                              {e.sets.length < MAX_SETS && (
                                 <button
                                   type="button"
-                                  aria-label={`${name} options`}
-                                  aria-haspopup="dialog"
-                                  data-ex={`${b.id}:${exIdx}`}
-                                  data-control="options"
-                                  className="tap -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
-                                  onClick={() => setActions({ ...ref, exerciseId: e.exerciseId })}
+                                  aria-label={`Add ${name} set`}
+                                  className="tap hc-edge grid h-[52px] w-11 place-items-center rounded-2xl text-mute ring-1 ring-white/[0.06] ring-inset"
+                                  onClick={() => addAccessorySet(ref)}
                                 >
-                                  <MoreHorizontal size={16} />
+                                  <Plus size={14} />
                                 </button>
                               )}
                             </div>
-                            {showHint && hint && (
-                              <div className="-mt-1 mb-1 flex flex-wrap items-center gap-x-2 text-xs text-mute">
-                                {hint.kind === "hold" ? (
-                                  // Calmer than an increase: nothing to apply, just "stay here" — with
-                                  // when it was missed ("Missed reps at 60 lb on Nov 2 · hold").
-                                  <span>{hint.reason.replace(" — ", " · ")}</span>
-                                ) : (
-                                  <>
-                                    <span title={hint.reason}>
-                                      Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb
-                                      <span className="max-[359px]:hidden"> · {targetsMetPhrase(hint.measure)}</span> → try{" "}
-                                      <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
-                                    </span>
-                                    <button
-                                      type="button"
-                                      aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
-                                      className="tap label -my-2 min-h-11 px-1.5 text-accent"
-                                      onClick={() => {
-                                        applyHint(ref, hint.suggestedWeight, name);
-                                        // The hint row goes once the sets are at the suggestion.
-                                        focusWhenReady(exControl(ref, "options"));
-                                      }}
-                                    >
-                                      Apply
-                                    </button>
-                                  </>
-                                )}
-                                <button
-                                  type="button"
-                                  aria-label={`Dismiss the ${name} hint for today`}
-                                  className="tap -my-2 -ml-2 grid min-h-11 w-11 place-items-center text-mute"
-                                  onClick={() => {
-                                    dismissHint(e.exerciseId);
-                                    focusAfter(exControl(ref, "options"));
-                                  }}
-                                >
-                                  <X size={12} />
-                                </button>
-                              </div>
-                            )}
-                            {isPreview ? (
-                              <ul className="mt-1 flex flex-wrap gap-2" aria-label={`${name} sets`}>
-                                {e.sets.map((s, si) => (
-                                  <PlannedChip key={s.id} index={si} set={s} measure={e.measure} weighted={weighted} />
-                                ))}
-                              </ul>
-                            ) : (
-                              <div className="mt-1 flex flex-wrap gap-2">
-                                {e.sets.map((s, si) => {
-                                  const setRef = { ...ref, setId: s.id };
-                                  return (
-                                    <SetChip
-                                      key={s.id}
-                                      dataSet={s.id}
-                                      open={!s.done}
-                                      exerciseName={name}
-                                      index={si}
-                                      set={s}
-                                      measure={e.measure}
-                                      weighted={weighted}
-                                      describedBy={hintId}
-                                      onTap={() => toggleDone(setRef)}
-                                      onHold={() => setEditing(setRef)}
-                                    />
-                                  );
-                                })}
-                                {e.sets.length < MAX_SETS && (
-                                  <button
-                                    type="button"
-                                    aria-label={`Add ${name} set`}
-                                    className="tap hc-edge grid h-[52px] w-11 place-items-center rounded-2xl text-mute ring-1 ring-white/[0.06] ring-inset"
-                                    onClick={() => addAccessorySet(ref)}
-                                  >
-                                    <Plus size={14} />
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
-            {!session.blocks.some((b) => b.kind === "accessory") && (
+                </div>
+              );
+            })}
+            {!accessories.length && (
               <p className="mb-6 text-sm text-mute">
                 {isPreview
                   ? `Nothing to carry over yet — the accessories you log on a ${weekday} show up here.`
@@ -1492,12 +1607,74 @@ export function TrainScreen() {
 
       <AddExerciseSheet
         open={!!adding}
-        onClose={() => setAdding(null)}
+        onClose={() => {
+          if (adding?.mode === "pair" && adding.back) openManage(adding.blockId);
+          setAdding(null);
+        }}
         title={adding?.mode === "pair" ? "Add to superset" : "Add exercise"}
         exercises={data.exercises}
         recentIds={recentIds}
         onPick={addExercise}
         onCreate={async (input) => addExercise(await createExercise(input))}
+      />
+
+      <SupersetSheet
+        open={!!managed}
+        onClose={() => {
+          const id = managingId;
+          setManaging(null);
+          // Opened from the superset's header, its trigger is still there; when it isn't (the sheet
+          // came back after adding a new exercise), land on the superset's header or its first row.
+          focusWhenReady(() =>
+            document.activeElement && document.activeElement !== document.body
+              ? null
+              : (document.querySelector<HTMLElement>(`[data-manage="${id}"]`) ??
+                document.querySelector<HTMLElement>(`[data-ex="${id}:0"][data-control="options"]`)),
+          );
+        }}
+        letter={managed ? (letters.get(managed.id) ?? null) : null}
+        members={(managed?.exercises ?? []).map((e, i) => {
+          const done = e.sets.filter((x) => x.done).length;
+          return {
+            key: exKey(e, i),
+            name: exName(e.exerciseId),
+            detail: e.skipped ? "Skipped today" : `${plural(e.sets.length, "set")}${done ? ` · ${done} logged` : ""}`,
+          };
+        })}
+        candidates={(managed ? movableInto(session, managed.id) : []).map((c) => ({
+          key: exKey(c.exercise, c.exIdx),
+          name: exName(c.exercise.exerciseId),
+          from: c.fromSuperset ? `Superset ${letters.get(c.blockId)}` : null,
+        }))}
+        full={!!managed && managed.exercises.length >= MAX_SUPERSET}
+        blocksFull={blocksFull}
+        status={structureStatus}
+        limitNote={{ superset: `A superset holds up to ${MAX_SUPERSET} exercises`, blocks: `A session holds up to ${MAX_BLOCKS} blocks` }}
+        onMove={(i, d) => managed && moveMember(managed.id, i, d)}
+        onRemove={(i) => managed && removeMember(managed.id, i)}
+        onAddExisting={(key) => {
+          if (!managed) return;
+          const c = movableInto(session, managed.id).find((x) => exKey(x.exercise, x.exIdx) === key);
+          if (c) addExisting(managed.id, c);
+        }}
+        onAddNew={() => {
+          if (!managed) return;
+          setAdding({ mode: "pair", blockId: managed.id, back: true });
+          setManaging(null);
+        }}
+      />
+
+      <WorkoutOrderSheet
+        open={ordering}
+        onClose={() => setOrdering(false)}
+        mainLift={primaryBlock && primaryExId != null ? primaryName : null}
+        blocks={accessories.map((b) => ({
+          key: b.id,
+          title: b.exercises.length > 1 ? `Superset ${letters.get(b.id)}` : exName(b.exercises[0]!.exerciseId),
+          members: b.exercises.length > 1 ? b.exercises.map((e) => exName(e.exerciseId)) : [],
+        }))}
+        status={structureStatus}
+        onMove={moveAccessory}
       />
 
       <Sheet open={!!actionsEx} onClose={() => setActions(null)} title={actionsEx ? exName(actionsEx.exerciseId) : ""}>
@@ -1527,14 +1704,7 @@ export function TrainScreen() {
               const live = actionsBlock.exercises.filter((e) => !e.skipped);
               const blockOpen = live.reduce((n, e) => n + e.sets.filter(loggable).length, 0);
               const roundSize = live.filter((e) => e.sets.some(loggable)).length;
-              const letter = isSuperset
-                ? String.fromCharCode(
-                    65 +
-                      session.blocks
-                        .filter((x) => x.kind === "accessory" && x.exercises.length > 1)
-                        .findIndex((x) => x.id === actionsBlock.id),
-                  )
-                : "";
+              const letter = letters.get(actionsBlock.id) ?? "";
               const name = exName(actionsEx.exerciseId);
               const row =
                 "tap flex min-h-12 w-full items-center gap-3 rounded-2xl bg-accent/[0.07] px-4 py-3 text-left text-fg disabled:opacity-40";
@@ -1644,47 +1814,75 @@ export function TrainScreen() {
             )}
 
             <div className="mt-6 space-y-2">
-              {(() => {
-                const full = actionsBlock.exercises.length >= MAX_SUPERSET;
-                return (
+              {actionsBlock.exercises.length > 1 ? (
+                <>
                   <button
                     type="button"
-                    disabled={full}
-                    className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left disabled:opacity-60"
+                    aria-haspopup="dialog"
+                    className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
                     onClick={() => {
-                      setAdding({ mode: "pair", blockId: actions.blockId });
+                      openManage(actionsBlock.id);
                       setActions(null);
                     }}
                   >
                     <Link2 size={16} className="shrink-0 text-glow" />
                     <span>
-                      Superset with another exercise
-                      {full && <span className="block text-xs text-fg-2">A superset holds up to {MAX_SUPERSET} exercises</span>}
+                      Manage Superset {letters.get(actionsBlock.id)}
+                      <span className="block text-xs text-fg-2">Order, add from this workout, remove</span>
                     </span>
                   </button>
-                );
-              })()}
-              {actionsBlock.exercises.length > 1 && (
+                  <button
+                    type="button"
+                    aria-disabled={blocksFull || undefined}
+                    className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left aria-disabled:cursor-default aria-disabled:opacity-60"
+                    onClick={
+                      blocksFull
+                        ? undefined
+                        : () => {
+                            const letter = letters.get(actionsBlock.id) ?? "";
+                            const moved = actionsEx;
+                            const from = { blockId: actionsBlock.id, exIdx: actions.exIdx };
+                            const next = splitOut(session, from);
+                            setActions(null);
+                            if (next === session) return;
+                            tick();
+                            commit(next, {
+                              message: `${exName(moved.exerciseId)} removed from Superset ${letter}`,
+                              // Back into the superset, at its place (wherever it is by then).
+                              revert: (cur) => {
+                                const at = locateExercise(cur, moved);
+                                return at ? moveExerciseToBlock(cur, at, from.blockId, from.exIdx) : cur;
+                              },
+                            });
+                            // Its row (and the options button that opened this sheet) moved to a block of its own.
+                            const at = locateExercise(next, moved);
+                            if (at) focusWhenReady(exControl(at, "options"));
+                          }
+                    }
+                  >
+                    <Unlink2 size={16} className="shrink-0 text-mute" />
+                    <span>
+                      Remove from superset
+                      <span className="block text-xs text-fg-2">
+                        {blocksFull ? `A session holds up to ${MAX_BLOCKS} blocks` : "Stays in the workout, on its own after the superset"}
+                      </span>
+                    </span>
+                  </button>
+                </>
+              ) : (
                 <button
                   type="button"
-                  disabled={blocksFull}
-                  className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left disabled:opacity-60"
+                  aria-haspopup="dialog"
+                  className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
                   onClick={() => {
-                    const without = mapBlock(session, actionsBlock.id, (b) => ({
-                      ...b,
-                      exercises: b.exercises.filter((_, i) => i !== actions.exIdx),
-                    }));
-                    const idx = without.blocks.findIndex((b) => b.id === actionsBlock.id);
-                    const blocks: Block[] = [...without.blocks];
-                    blocks.splice(idx + 1, 0, { id: newId(), kind: "accessory", exercises: [actionsEx] });
-                    commit({ ...without, blocks });
+                    openManage(actionsBlock.id);
                     setActions(null);
                   }}
                 >
-                  <Unlink2 size={16} className="shrink-0 text-mute" />
+                  <Link2 size={16} className="shrink-0 text-glow" />
                   <span>
-                    Split out of superset
-                    {blocksFull && <span className="block text-xs text-fg-2">A session holds up to {MAX_BLOCKS} blocks</span>}
+                    Superset with another exercise
+                    <span className="block text-xs text-fg-2">From this workout or a new one</span>
                   </span>
                 </button>
               )}

@@ -323,6 +323,88 @@ describe("mergeSession: exercises that move between blocks", () => {
     expect(shape(m)).toBe("X[10:a1|11:b1*]");
   });
 
+  describe("reorders and moves (superset management) vs logging on the other device", () => {
+    // Superset X of 10 and 11, then single blocks Y (12) and Z (13).
+    const start = sess([
+      block("X", ex(10, [set("a1"), set("a2")]), ex(11, [set("b1"), set("b2")])),
+      block("Y", ex(12, [set("c1")])),
+      block("Z", ex(13, [set("d1")])),
+    ]);
+    const logOn = (s: Session, id: string): Session => ({
+      ...s,
+      blocks: s.blocks.map((b) => ({
+        ...b,
+        exercises: b.exercises.map((e) => ({ ...e, sets: e.sets.map((x) => (x.id === id ? logged(id) : x)) })),
+      })),
+    });
+    const swapped = sess([
+      block("X", ex(11, [set("b1"), set("b2")]), ex(10, [set("a1"), set("a2")])),
+      block("Y", ex(12, [set("c1")])),
+      block("Z", ex(13, [set("d1")])),
+    ]);
+
+    it("a superset reordered here while the other device logged: this order, their sets", () => {
+      const m = mergeSession(start, swapped, logOn(start, "a1"));
+      expect(shape(m)).toBe("X[11:b1,b2|10:a1*,a2] Y[12:c1] Z[13:d1]");
+      unique(m);
+    });
+
+    it("…reordered on the other device while this one logged: their order is kept, with this device's sets", () => {
+      const m = mergeSession(start, logOn(start, "a1"), swapped);
+      expect(shape(m)).toBe("X[11:b1,b2|10:a1*,a2] Y[12:c1] Z[13:d1]");
+      unique(m);
+    });
+
+    it("the workout's blocks reordered on either device while the other logged", () => {
+      const moved = sess([start.blocks[2]!, start.blocks[0]!, start.blocks[1]!]);
+      expect(shape(mergeSession(start, moved, logOn(start, "c1")))).toBe("Z[13:d1] X[10:a1,a2|11:b1,b2] Y[12:c1*]");
+      expect(shape(mergeSession(start, logOn(start, "c1"), moved))).toBe("Z[13:d1] X[10:a1,a2|11:b1,b2] Y[12:c1*]");
+    });
+
+    it("reordered on both devices: this device's order wins; nothing is lost or doubled", () => {
+      const other = sess([start.blocks[1]!, start.blocks[0]!, start.blocks[2]!]);
+      const mine = sess([start.blocks[2]!, start.blocks[1]!, start.blocks[0]!]);
+      const m = mergeSession(start, mine, logOn(other, "d1"));
+      expect(shape(m)).toBe("Z[13:d1*] Y[12:c1] X[10:a1,a2|11:b1,b2]");
+      unique(m);
+    });
+
+    it("an exercise moved from its own block into the superset here while the other device logged it", () => {
+      // Y's 12 joins X as A3; Y disappears.
+      const joined = sess([
+        block("X", ex(10, [set("a1"), set("a2")]), ex(11, [set("b1"), set("b2")]), ex(12, [set("c1")])),
+        block("Z", ex(13, [set("d1")])),
+      ]);
+      expect(shape(mergeSession(start, joined, logOn(start, "c1")))).toBe("X[10:a1,a2|11:b1,b2|12:c1*] Z[13:d1]");
+      // …and the other way round: moved on the other device while this one logged it.
+      expect(shape(mergeSession(start, logOn(start, "c1"), joined))).toBe("X[10:a1,a2|11:b1,b2|12:c1*] Z[13:d1]");
+    });
+
+    it("an exercise moved out of the superset into another block while the other device logged a round", () => {
+      // 11 leaves X for Z (Z becomes a superset); the other device logged a1 and b1.
+      const moved = sess([
+        block("X", ex(10, [set("a1"), set("a2")])),
+        block("Y", ex(12, [set("c1")])),
+        block("Z", ex(13, [set("d1")]), ex(11, [set("b1"), set("b2")])),
+      ]);
+      const round = logOn(logOn(start, "a1"), "b1");
+      for (const m of [mergeSession(start, moved, round), mergeSession(start, round, moved)]) {
+        expect(shape(m)).toBe("X[10:a1*,a2] Y[12:c1] Z[13:d1|11:b1*,b2]");
+        unique(m);
+      }
+    });
+
+    it("moved into a superset here, reordered there: one copy of each exercise, every logged set", () => {
+      const joined = sess([
+        block("X", ex(10, [set("a1"), set("a2")]), ex(11, [set("b1"), set("b2")]), ex(12, [set("c1")])),
+        block("Z", ex(13, [set("d1")])),
+      ]);
+      const m = mergeSession(start, logOn(joined, "c1"), logOn(swapped, "b2"));
+      expect(shape(m)).toBe("X[11:b1,b2*|10:a1,a2|12:c1*] Z[13:d1]");
+      unique(m);
+    });
+  });
+
   it("an exercise swapped for another lift (same sets) isn't duplicated", () => {
     const swapped = sess([block("X", ex(12, [set("a1"), set("a2")]), ex(11, [set("b1"), set("b2")]))]);
     const m = mergeSession(anc, swapped, loggedA);
@@ -347,7 +429,7 @@ describe("mergeSession: exercises that move between blocks", () => {
       for (let k = 0; k < 4; k++) {
         const b = blocks[rnd(blocks.length)]!;
         const e = b.exercises[rnd(b.exercises.length)]!;
-        switch (rnd(5)) {
+        switch (rnd(8)) {
           case 0: // log a set
             if (e.sets.length) e.sets[rnd(e.sets.length)] = { ...e.sets[0]!, id: e.sets[rnd(e.sets.length)]!.id, done: true, reps: 5 };
             break;
@@ -373,6 +455,24 @@ describe("mergeSession: exercises that move between blocks", () => {
           case 4: // remove an exercise
             if (b.exercises.length > 1) b.exercises.splice(rnd(b.exercises.length), 1);
             break;
+          case 5: // reorder within the block
+            if (b.exercises.length > 1) b.exercises.unshift(b.exercises.splice(rnd(b.exercises.length), 1)[0]!);
+            break;
+          case 6: // move the block
+            {
+              blocks = blocks.filter((x) => x !== b);
+              blocks.splice(rnd(blocks.length + 1), 0, b);
+            }
+            break;
+          case 7: // move an exercise into another block
+            {
+              const dest = blocks[rnd(blocks.length)]!;
+              if (dest !== b && dest.exercises.length < 6) {
+                dest.exercises.push(b.exercises.splice(b.exercises.indexOf(e), 1)[0]!);
+                if (!b.exercises.length) blocks = blocks.filter((x) => x !== b);
+              }
+            }
+            break;
         }
       }
       return { ...s, blocks };
@@ -388,7 +488,9 @@ describe("mergeSession: exercises that move between blocks", () => {
       const m = mergeSession(start, l, s);
       unique(m);
       expect(m.blocks.every((b) => b.exercises.length > 0)).toBe(true);
-      // Every set logged on either device is still there.
+      // Every set on both devices (and every set logged on either) is still there, once.
+      const both = new Set(allSetIds(l).filter((id) => allSetIds(s).includes(id)));
+      for (const id of both) expect(allSetIds(m).filter((x) => x === id)).toHaveLength(1);
       const loggedIds = [...l.blocks, ...s.blocks].flatMap((b) =>
         b.exercises.flatMap((e) => e.sets.filter((x) => x.done).map((x) => x.id)),
       );
