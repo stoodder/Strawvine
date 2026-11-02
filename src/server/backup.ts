@@ -20,6 +20,7 @@ import {
   type Settings,
 } from "../shared/schemas";
 import { SEED_ACCESSORIES, SEED_EXERCISES } from "../shared/defaults";
+import { normalizeMainLift } from "../shared/sessionStructure";
 import { newKeySalt } from "./auth";
 import type { Db } from "./db/client";
 import {
@@ -253,7 +254,8 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
     );
     await insertChunked(data.days, (chunk) => tx.insert(dayLogs).values(chunk.map((d) => ({ ...d, updatedAt: now }))));
     await insertChunked(data.sessions, (chunk) =>
-      tx.insert(sessions).values(chunk.map((s) => ({ date: s.date, data: s, updatedAt: now }))),
+      // The main-lift block holds the main lift alone (see the session PUT).
+      tx.insert(sessions).values(chunk.map((s) => ({ date: s.date, data: normalizeMainLift(s), updatedAt: now }))),
     );
     await insertChunked(uniqueSeen, (chunk) => tx.insert(seenAchievements).values(chunk));
     await tx.insert(settings).values({ id: 1, data: data.settings, updatedAt: now });

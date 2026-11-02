@@ -523,6 +523,36 @@ describe("path parameters", () => {
     const after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
     expect(after.sessions.map((s) => s.date)).not.toContain("2026-11-09");
   });
+
+  it("saves a main-lift block holding more than the main lift with the extras in an accessory block after it", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const built = { ...buildSession("2026-11-09", b), date: "2026-11-10" }; // a Monday's plan
+    const [main, ...rest] = built.blocks;
+    const extra = { exerciseId: b.exercises[1]!.id, measure: "reps" as const, sets: [] };
+    const session = { ...built, blocks: [{ ...main!, exercises: [main!.exercises[0]!, extra] }, ...rest] };
+    const res = await req("/api/sessions/2026-11-10", json("PUT", session));
+    expect(res.status).toBe(200);
+    const want = [
+      [main!.id, "primary", [main!.exercises[0]!.exerciseId]],
+      [`${main!.id.slice(0, 36)}-2`, "accessory", [extra.exerciseId]],
+      ...rest.map((x) => [x.id, x.kind, x.exercises.map((e) => e.exerciseId)]),
+    ];
+    const shape = (s: Bootstrap["sessions"][number]) => s.blocks.map((x) => [x.id, x.kind, x.exercises.map((e) => e.exerciseId)]);
+    expect(shape(await res.json())).toEqual(want);
+    const after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(shape(after.sessions.find((s) => s.date === "2026-11-10")!)).toEqual(want);
+    // No room for the extras' block: refused, nothing written.
+    const full = {
+      ...session,
+      date: "2026-11-11",
+      blocks: [
+        session.blocks[0]!,
+        ...Array.from({ length: 29 }, (_, i) => ({ id: `f${i}`, kind: "accessory" as const, exercises: [extra] })),
+      ],
+    };
+    expect((await req("/api/sessions/2026-11-11", json("PUT", full))).status).toBe(400);
+    expect((await req("/api/sessions/2026-11-10", { method: "DELETE" })).status).toBe(200);
+  });
 });
 
 describe("request hardening", () => {

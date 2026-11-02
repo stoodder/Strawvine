@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { blockSchema, sessionSchema, type Block, type BlockExercise, type Exercise, type Session, type SetEntry } from "./schemas";
 import { blankSet, effectiveSession, savedAfterEdit } from "./session";
 import {
+  derivedBlockId,
   MAX_BLOCKS,
   MAX_SUPERSET,
   locateExercise,
   movableInto,
   moveBlock,
   moveExerciseToBlock,
+  normalizeMainLift,
   reorderInBlock,
   splitOut,
   supersetLetters,
@@ -205,5 +207,32 @@ describe("limits", () => {
     const blocks = (n: number) => of(n).map((e, i) => block(`b${i}`, e));
     expect(sessionSchema.safeParse(sess(blocks(MAX_BLOCKS))).success).toBe(true);
     expect(sessionSchema.safeParse(sess(blocks(MAX_BLOCKS + 1))).success).toBe(false);
+  });
+});
+
+describe("normalizeMainLift", () => {
+  it("keeps the main lift alone in its block; the others move, with their sets, to an accessory block right after it", () => {
+    const crowded: Block = { id: "P", kind: "primary", skipped: true, exercises: [ex(1, logged("p1")), ex(2, set("q1")), ex(3)] };
+    const s = sess([crowded, block("P-2", dips), block("Y", plank)]);
+    const n = normalizeMainLift(s);
+    expect(shape(n)).toBe("P[1] P-3[2|3] P-2[12] Y[13]");
+    expect(n.blocks[0]).toMatchObject({ kind: "primary", skipped: true });
+    expect(n.blocks[1]).toEqual({ id: "P-3", kind: "accessory", exercises: [crowded.exercises[1], crowded.exercises[2]] });
+    expect(n.blocks[2]).toBe(s.blocks[1]);
+    expect(sessionSchema.safeParse(n).success).toBe(true);
+    expect(normalizeMainLift(n)).toBe(n);
+  });
+
+  it("returns the same session when the main lift is alone", () => {
+    expect(normalizeMainLift(base)).toBe(base);
+  });
+});
+
+describe("derivedBlockId", () => {
+  it("is the first free <id>-n, within the 40-character id limit", () => {
+    const taken = new Set(["X", "X-2"]);
+    expect(derivedBlockId("X", taken)).toBe("X-3");
+    expect(derivedBlockId("X", taken)).toBe("X-4");
+    expect(derivedBlockId("a".repeat(40), new Set()).length).toBeLessThanOrEqual(40);
   });
 });

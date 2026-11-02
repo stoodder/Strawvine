@@ -396,14 +396,25 @@ optional note.
     entry of the exercise in their own measure right after it — never mixed in or dropped;
   - exercises are matched by the sets they hold (not their position), so splitting or joining a superset — or moving an
     exercise into another one — on one device while the other logs never duplicates an exercise or a set; a set added
-    on both devices keeps both;
+    on both devices keeps both. An exercise that had no sets is matched by its lift across the whole workout (the same
+    block first, then anywhere, in order), so one moved, split out or skipped on one device while the other skips it,
+    adds and logs a set on it, or moves it elsewhere is still one exercise; the same lift twice on purpose stays twice;
   - order (a superset's members, the workout's blocks) follows the device that reordered: this device's order when it
-    changed it, else the server's — so a reorder on one device and logging on the other both survive;
+    changed it, else the server's — so a reorder on one device and logging on the other both survive. Something only one
+    device added goes after what precedes it there — or, when it was last there, stays last;
   - if the merge leaves two main lifts (a session rebuilt on one device), the one matching the session's plan is kept and
     the other's logged sets are folded onto it (same lift) or kept as an accessory block (different lift) — logged work
     is never dropped;
-  - a merged workout over the server's limits (30 sets, 6 per superset, 30 blocks) is trimmed of unlogged work; if logged
-    work alone is over a limit, the edit is marked "not saved" with the reason;
+  - a merged workout is brought within the server's limits (30 sets, 6 per superset, 30 blocks): unlogged sets past 30
+    are dropped; a superset over 6 (e.g. each device moved an exercise into a superset of 5) keeps 6 — those with logged
+    sets first, then in order — and the rest move, with their sets, into a block of their own right after it; past 30
+    blocks, blocks with nothing logged are dropped from the end, those overflow blocks first. Whatever unlogged work is
+    dropped is named in the merge toast ("…; 2 unlogged exercises were left out (a workout holds at most 30 blocks)");
+    if logged work alone is over a limit, the edit is marked "not saved" with the reason;
+  - the main-lift block holds the main lift alone: one holding more (an older build, a merge, an import) keeps its
+    first exercise and the others move, with their sets, into an accessory block right after it — in every merge and
+    on the server when a workout is saved or restored, so it is never stored (a save that leaves no room for that block
+    is refused);
   - settings merge field by field: the fields this device changed, the server's for everything else; strength targets
     merge by id, the weekday schedules and program weeks element by element; for other lists both devices changed, this
     device's wins and the toast names it;

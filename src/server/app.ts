@@ -49,6 +49,7 @@ import {
   type SessionConfig,
 } from "./auth";
 import { exercisePatchRefusal } from "../shared/exerciseEdit";
+import { MAX_BLOCKS, normalizeMainLift } from "../shared/sessionStructure";
 import { buildExport, toDay, toExercise, toMax } from "./backup";
 import type { Db } from "./db/client";
 import { dayLogs, exercises, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
@@ -754,7 +755,11 @@ export function createApp(opts: AppOptions) {
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
     if (parsed.data.date !== c.req.param("date")) return c.json({ error: "date mismatch" }, 400);
     const pre = precondition(c);
-    const doc = parsed.data;
+    // The main-lift block holds the main lift alone (an older client may send more): what's saved,
+    // and answered, is normalized. Its extras need a block of their own, within the limit.
+    const doc = normalizeMainLift(parsed.data);
+    if (doc.blocks.length > MAX_BLOCKS)
+      return c.json({ error: "invalid", issues: [{ path: "blocks", message: `A workout can have at most ${MAX_BLOCKS} blocks` }] }, 400);
     type Out = { conflict: { data: Session; rev: string } } | { rev: string | null; conflict?: undefined };
     const out = await write(c, async (tx): Promise<Out> => {
       if (!pre) {
