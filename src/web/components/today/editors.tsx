@@ -127,7 +127,7 @@ export function FuelEditor({ day, patch }: EditorProps) {
         setPaste({ text, manual: false });
       }}
     >
-      <div className="flex items-baseline gap-2">
+      <div className="flex flex-wrap items-baseline gap-x-2">
         <NumberInput
           ariaLabel="Calories"
           value={day.calories}

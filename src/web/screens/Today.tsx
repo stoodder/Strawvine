@@ -122,7 +122,7 @@ export function TodayScreen() {
       {/* At 200% zoom the streak and ring wrap under the title instead of squeezing it. */}
       <div className="mt-6 flex flex-wrap items-center justify-between gap-x-5 gap-y-4">
         <div className="min-w-32 flex-1">
-          <h1 className="text-[clamp(2.125rem,11vw,2.75rem)] leading-none font-light tracking-tight">
+          <h1 className="text-[clamp(1.75rem,11vw,2.75rem)] leading-none font-light tracking-tight">
             {isToday ? "Today" : weekdayName(date)}
           </h1>
           <p className="mt-3 text-sm text-mute">

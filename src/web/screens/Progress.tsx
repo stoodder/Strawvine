@@ -365,7 +365,7 @@ export function ProgressScreen() {
                 className="tap flex w-full items-center gap-4 rounded-2xl px-1 py-3.5 text-left"
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-[0.9375rem] text-fg-2">{ex.name}</div>
+                  <div className="text-[0.9375rem] text-fg-2 wrap-anywhere">{ex.name}</div>
                   <div className="mt-0.5 text-xs text-mute">
                     {cur && start !== undefined && cur.valueLb !== start ? (
                       <>

@@ -457,9 +457,10 @@ export function Stepper({
   const btn = clsx(
     "tap hc-edge relative grid shrink-0 place-items-center rounded-full bg-white/[0.05] text-fg-2 active:bg-white/[0.1]",
     // md looks 36px but takes a 44px tap; xl is 56px already.
-    xl ? "h-14 w-14" : "h-9 w-9 after:absolute after:-inset-1 after:content-['']",
+    // At 200% zoom (a ~195 px viewport) the xl stepper steps down so it fits a sheet.
+    xl ? "h-14 w-14 max-[259px]:h-11 max-[259px]:w-11" : "h-9 w-9 after:absolute after:-inset-1 after:content-['']",
   );
-  const valueCls = clsx("num min-w-[3ch] text-center font-light", xl ? "text-7xl" : "text-2xl");
+  const valueCls = clsx("num min-w-[3ch] text-center font-light", xl ? "text-7xl max-[259px]:min-w-[2ch] max-[259px]:text-4xl" : "text-2xl");
 
   useEffect(() => {
     if (editing) inputRef.current?.select();
@@ -481,7 +482,7 @@ export function Stepper({
   };
 
   return (
-    <div className="flex items-center gap-4" role="group" aria-label={label}>
+    <div className={clsx("flex items-center gap-4", xl && "max-[259px]:gap-2")} role="group" aria-label={label}>
       <button
         type="button"
         className={btn}
@@ -814,14 +815,14 @@ export function Sheet({
             <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-white/15" />
             {title && (
               <div className="mb-5 flex items-center justify-between">
-                <h3 id={id} className="text-lg font-medium">
+                <h3 id={id} className="min-w-0 text-lg font-medium wrap-anywhere">
                   {title}
                 </h3>
                 <button
                   type="button"
                   onClick={onClose}
                   aria-label="Close"
-                  className="tap -my-2.5 -mr-3 grid h-11 w-11 place-items-center text-mute"
+                  className="tap -my-2.5 -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
                 >
                   <X size={18} />
                 </button>

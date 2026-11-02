@@ -187,9 +187,9 @@ export function GoalsScreen() {
             const name = ex?.name ?? "Lift";
             return (
               <div key={t.id}>
-                <div className="flex items-center justify-between">
-                  <div className="text-[0.9375rem] text-fg-2">{name}</div>
-                  <div className="num flex items-center text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 text-[0.9375rem] text-fg-2 wrap-anywhere">{name}</div>
+                  <div className="num flex shrink-0 items-center text-sm">
                     {done && (
                       <>
                         <Trophy size={13} className="mr-1.5 text-gold" aria-hidden />
@@ -520,7 +520,7 @@ function AddTargetSheet({ open, onClose }: { open: boolean; onClose: () => void 
             type="button"
             aria-pressed={sel === e.id}
             onClick={() => setExerciseId(e.id)}
-            className={clsx("chip", sel === e.id ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2")}
+            className={clsx("chip max-w-full wrap-anywhere", sel === e.id ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2")}
           >
             {e.name}
           </button>

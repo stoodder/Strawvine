@@ -102,7 +102,7 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
 
   return (
     <Sheet open={open} onClose={close} title={exercise.name}>
-      <div className="flex items-end justify-between">
+      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
         <div>
           <div className="label mb-1.5">Current max</div>
           <div className="num text-5xl font-light tracking-tight">
@@ -142,7 +142,7 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
             className={`field ${inputBox} min-w-0 flex-1`}
           />
         </div>
-        <div className="mt-3 flex items-center gap-3">
+        <div className="mt-3 flex flex-wrap items-center gap-3">
           {current && (
             <label className="flex min-h-11 shrink-0 cursor-pointer items-center gap-2.5 text-xs text-fg-2">
               <Toggle on={correction} onChange={setCorrection} label="Correction, not a PR" />
