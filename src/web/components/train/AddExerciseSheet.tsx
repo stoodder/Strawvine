@@ -1,9 +1,9 @@
 import clsx from "clsx";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, Plus, Search } from "lucide-react";
 import type { Exercise, ExerciseCategory, Measure } from "../../../shared/schemas";
 import { isWeighted } from "../../../shared/session";
-import { Field, Sheet, Toggle } from "../ui";
+import { Sheet } from "../ui";
 
 /** One name per category, used for both the create chips and the list tags. */
 const CATEGORIES: Array<[ExerciseCategory, string]> = [
@@ -19,15 +19,35 @@ const MEASURES: Array<[Measure, string]> = [
   ["seconds", "Time"],
   ["meters", "Distance"],
 ];
-/** List tag: category, plus what is logged besides reps — time, distance, load ("Carry · m · lb", "Core · s"). */
-const exerciseTag = (e: Exercise) =>
+const MEASURE_WORD: Record<Measure, string> = { reps: "reps", seconds: "time", meters: "distance" };
+
+/** A main lift (tracks a max, or a barbell lift): its sets always carry a load, so weighted isn't a choice. */
+export const isMainLift = (e: Pick<Exercise, "tracksMax" | "category">) => e.tracksMax || e.category === "primary";
+
+/**
+ * List tag: the category, then the measure when it isn't reps, then "weighted" when the exercise
+ * tracks a load — never on a main lift, whose sets always carry one ("Barbell", "Accessory ·
+ * weighted", "Core · time", "Carry · distance · weighted").
+ */
+export const exerciseTag = (e: Exercise) =>
   [
     CATEGORY_LABEL[e.category] ?? e.category,
-    e.measure === "seconds" ? "s" : e.measure === "meters" ? "m" : null,
-    isWeighted(e) ? "lb" : null,
+    e.measure === "reps" ? null : MEASURE_WORD[e.measure],
+    isWeighted(e) && !isMainLift(e) ? "weighted" : null,
   ]
     .filter(Boolean)
     .join(" · ");
+
+/**
+ * What "weighted" starts as in the create card, until the person picks: loaded for rep work
+ * (curls, rows) and carries; unloaded for holds, runs and core or conditioning reps (a plank, a
+ * shuttle run, a sit-up) — a weighted dead hang is one tap away. (A barbell lift is always
+ * weighted: the card offers no choice for it.)
+ */
+export function defaultWeighted(measure: Measure, category: ExerciseCategory): boolean {
+  if (category === "carry") return true;
+  return measure === "reps" && category !== "core" && category !== "conditioning";
+}
 
 function ChoiceChip({ on, onClick, children }: { on: boolean; onClick: () => void; children: string }) {
   return (
@@ -63,9 +83,11 @@ export function AddExerciseSheet({
   const [q, setQ] = useState("");
   const [category, setCategory] = useState<ExerciseCategory>("accessory");
   const [measure, setMeasure] = useState<Measure>("reps");
-  // On by default, whatever the measure: most accessory work is loaded, and the switch sits right
-  // under the measure for a plank or a run.
-  const [weighted, setWeighted] = useState(true);
+  // Follows the measure and category (defaultWeighted) until the person picks; null = not picked.
+  // A barbell lift is always weighted, like a main lift in Settings: no choice shown.
+  const [weightedPick, setWeightedPick] = useState<boolean | null>(null);
+  const loadChoice = !isMainLift({ tracksMax: false, category });
+  const weighted = !loadChoice || (weightedPick ?? defaultWeighted(measure, category));
   const [busy, setBusy] = useState(false);
 
   const list = useMemo(() => {
@@ -81,8 +103,21 @@ export function AddExerciseSheet({
 
   const exact = list.some((e) => e.name.toLowerCase() === q.trim().toLowerCase());
 
-  const close = () => {
+  // A fresh create card each time the sheet opens: Train keeps the sheet mounted, so the last
+  // pick would otherwise carry over to the next exercise.
+  const reset = () => {
     setQ("");
+    setCategory("accessory");
+    setMeasure("reps");
+    setWeightedPick(null);
+  };
+  useEffect(() => {
+    if (!open) reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const close = () => {
+    reset();
     onClose();
   };
 
@@ -125,18 +160,38 @@ export function AddExerciseSheet({
               </ChoiceChip>
             ))}
           </div>
-          <Field label="Weighted" hint="Log a load (lb) with each set">
-            <Toggle label="Weighted" on={weighted} onChange={setWeighted} />
-          </Field>
+          {loadChoice && (
+            <>
+              <div className="label mt-3 mb-1.5" id="new-ex-load">
+                Load
+              </div>
+              <div
+                className="flex flex-wrap gap-2"
+                role="group"
+                aria-labelledby="new-ex-load"
+                aria-describedby="new-ex-load-hint"
+              >
+                <ChoiceChip on={weighted} onClick={() => setWeightedPick(true)}>
+                  Weighted
+                </ChoiceChip>
+                <ChoiceChip on={!weighted} onClick={() => setWeightedPick(false)}>
+                  Unweighted
+                </ChoiceChip>
+              </div>
+              <p id="new-ex-load-hint" className="mt-1.5 text-xs text-fg-2">
+                {weighted ? "Log a load (lb) with each set" : `No load — just the ${MEASURE_WORD[measure]}`}
+              </p>
+            </>
+          )}
           <button
             type="button"
             disabled={busy}
-            className="btn-primary mt-1 w-full"
+            className="btn-primary mt-4 w-full"
             onClick={async () => {
               setBusy(true);
               try {
                 await onCreate({ name: q.trim(), category, measure, weighted });
-                setQ("");
+                reset();
               } finally {
                 setBusy(false);
               }
@@ -152,14 +207,15 @@ export function AddExerciseSheet({
           <li key={e.id}>
             <button
               type="button"
-              className="tap flex w-full items-center justify-between py-3.5 text-left"
+              // The tag drops under the name (right-aligned) when both don't fit on one line.
+              className="tap flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-1 py-3.5 text-left"
               onClick={() => {
                 onPick(e);
                 setQ("");
               }}
             >
-              <span className="text-[0.9375rem]">{e.name}</span>
-              <span className="label shrink-0 pl-3">{exerciseTag(e)}</span>
+              <span className="min-w-0 text-[0.9375rem]">{e.name}</span>
+              <span className="label ml-auto text-right">{exerciseTag(e)}</span>
             </button>
           </li>
         ))}

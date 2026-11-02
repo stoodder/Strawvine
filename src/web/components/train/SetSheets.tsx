@@ -62,7 +62,7 @@ function FineLoad({ weight, onChange }: { weight: number; onChange: (v: number) 
 
 /**
  * Edit a single set's reps/time/distance and load. The load is offered for a weighted exercise,
- * and for any set that already has one (an exercise made unweighted later keeps its old loads
+ * and for a set logged with one (an exercise made unweighted later keeps its logged loads
  * editable rather than silently hidden).
  */
 export function SetEditSheet({
@@ -99,7 +99,11 @@ export function SetEditSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, setId, measure]);
   if (!set) return null;
-  const showLoad = weighted || !!(set.weight ?? set.targetWeight);
+  // An unweighted exercise offers the load only on a set logged with one (kept, not hidden); a
+  // target load it may still carry is neither shown nor logged.
+  const showLoad = weighted || (set.done && !!set.weight);
+  // No load is stored as null, never 0.
+  const load = showLoad ? weight || null : null;
   const repStep = measure === "reps" ? 1 : measure === "seconds" ? 5 : 5;
   const repLabel = measure === "reps" ? "Reps" : measure === "seconds" ? "Seconds" : "Meters";
   return (
@@ -139,9 +143,9 @@ export function SetEditSheet({
               onSave({
                 ...set,
                 targetReps: reps,
-                targetWeight: weight || null,
+                targetWeight: showLoad ? load : set.targetWeight,
                 reps: set.done ? reps : set.reps,
-                weight: set.done ? weight || null : set.weight,
+                weight: set.done ? load : set.weight,
               })
             }
           >
@@ -152,7 +156,7 @@ export function SetEditSheet({
             className="btn-primary flex-1 whitespace-nowrap"
             onClick={() => {
               success();
-              onSave({ ...set, reps, weight: weight || null, done: true });
+              onSave({ ...set, reps, weight: load, done: true });
             }}
           >
             {set.done ? "Update" : "Log set"}
