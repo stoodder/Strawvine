@@ -33,6 +33,12 @@ export function blankSet(partial: Partial<SetEntry> = {}): SetEntry {
  */
 export const isWeighted = (ex: Pick<Exercise, "weighted"> | null | undefined): boolean => ex?.weighted !== false;
 
+/**
+ * A main lift (tracks a max, or a barbell lift): its sets always carry a load, so whether it is
+ * weighted isn't a choice (§6.5).
+ */
+export const isMainLift = (e: Pick<Exercise, "tracksMax" | "category">): boolean => e.tracksMax || e.category === "primary";
+
 /** Target for a set of an exercise done for the first time: 10 reps, 30 seconds or 40 meters. */
 export function defaultTarget(measure: Measure): number {
   return measure === "seconds" ? 30 : measure === "meters" ? 40 : 10;
@@ -131,19 +137,30 @@ function scaleLoad(weightLb: number, factor: number, roundToLb: number): number 
 }
 
 /**
- * The next session's prescription for an exercise. Reps carry over as *targets* — a missed rep
- * must not become next week's target — except for sets the athlete added without one, which
- * carry what was done. Loads carry what was actually lifted, scaled by `loadFactor`, whatever the
- * measure (a weighted hang or carry deloads too); an unweighted exercise carries no load.
+ * The next session's prescription for an exercise, in the exercise's *current* measure and load
+ * (`current`). Reps carry over as *targets* — a missed rep must not become next week's target —
+ * except for sets the athlete added without one, which carry what was done. Loads carry what was
+ * actually lifted, scaled by `loadFactor`, whatever the measure (a weighted hang or carry deloads
+ * too); an unweighted exercise carries no load. When the exercise's measure has changed since `ex`
+ * was done (reps then, timed now), only the set count and loads carry: every target starts at the
+ * new measure's `defaultTarget`.
  */
-function carryOverExercise(ex: BlockExercise, loadFactor: number, roundToLb: number, weighted: boolean): BlockExercise {
+function carryOverExercise(
+  ex: BlockExercise,
+  loadFactor: number,
+  roundToLb: number,
+  current: Pick<Exercise, "measure" | "weighted">,
+): BlockExercise {
+  const weighted = isWeighted(current);
+  const sameMeasure = ex.measure === current.measure;
   return {
     exerciseId: ex.exerciseId,
-    measure: ex.measure,
+    measure: current.measure,
     sets: ex.sets.map((s) => {
       const weight = weighted ? (s.weight ?? s.targetWeight) : null;
       const scaled = weight !== null && weight > 0 && loadFactor !== 1 ? scaleLoad(weight, loadFactor, roundToLb) : weight;
-      return blankSet({ targetReps: s.targetReps ?? s.reps, targetWeight: scaled });
+      const targetReps = sameMeasure ? (s.targetReps ?? s.reps) : defaultTarget(current.measure);
+      return blankSet({ targetReps, targetWeight: scaled });
     }),
   };
 }
@@ -191,7 +208,8 @@ function loadFactor(program: Settings["program"], toDeload: boolean, fromDeload:
  * done before that session, exactly as the session's own pre-fill would carry it (`buildSession`:
  * accessory blocks only, never a skipped performance, a normal week before a deload one, targets
  * rather than missed reps, loads scaled between deload and normal weeks, none for an unweighted
- * exercise). Never done: three sets at the measure's default target.
+ * exercise, targets reset when it was last done in another measure). Never done: three sets at the
+ * measure's default target.
  */
 export function setsForAddedExercise(
   exercise: Pick<Exercise, "id" | "measure" | "weighted">,
@@ -201,7 +219,7 @@ export function setsForAddedExercise(
   const { program } = ctx.settings;
   const done = lastPerformance(exercise.id, into.date, ctx.sessions, planDateOf(into));
   const factor = done ? loadFactor(program, into.deload, done.session.deload) : 1;
-  const carried = done ? carryOverExercise(done.exercise, factor, program.roundToLb, isWeighted(exercise)).sets : [];
+  const carried = done ? carryOverExercise(done.exercise, factor, program.roundToLb, exercise).sets : [];
   return carried.length ? carried : Array.from({ length: 3 }, () => blankSet({ targetReps: defaultTarget(exercise.measure) }));
 }
 
@@ -253,13 +271,12 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
       const exercises = b.exercises.flatMap((e) => {
         const ex = ctx.exercises.find((x) => x.id === e.exerciseId && !x.archived);
         if (!ex) return [];
-        const weighted = isWeighted(ex);
         // Skipped last time: still on the plan, prefilled from the last time it was really done.
         const done = e.skipped ? lastPerformance(e.exerciseId, date, ctx.sessions) : null;
         return [
           done
-            ? carryOverExercise(done.exercise, factorFrom(done.session), program.roundToLb, weighted)
-            : carryOverExercise(e, factorFrom(source), program.roundToLb, weighted),
+            ? carryOverExercise(done.exercise, factorFrom(done.session), program.roundToLb, ex)
+            : carryOverExercise(e, factorFrom(source), program.roundToLb, ex),
         ];
       });
       if (exercises.length) blocks.push({ id: newId(), kind: "accessory", exercises });
@@ -459,16 +476,18 @@ function targetMissedPhrase(measure: Measure): string {
  * session's target — reps, seconds or meters — with a load: "increase" to the heaviest of those
  * loads + `incrementLb`. When a set fell short: "hold" at that load. Deload weeks are ignored:
  * their light loads say nothing about progress; so are performances logged without any load (while
- * the exercise was unweighted). Null for an unweighted exercise (`weighted: false`), when a logged
- * set of the performance has no target or no load, when nothing was logged with a load, or when the
- * increment is 0 (hints off). A logged set's load is what it was logged with, never its target.
+ * the exercise was unweighted), and — given the exercise's current `measure` — performances done in
+ * another measure (12 reps from before the exercise became a timed hold say nothing about a hold).
+ * Null for an unweighted exercise (`weighted: false`), when a logged set of the performance has no
+ * target or no load, when nothing was logged with a load, or when the increment is 0 (hints off). A
+ * logged set's load is what it was logged with, never its target.
  */
 export function accessoryHint(
   exerciseId: number,
   beforeDate: ISODate,
   sessions: ReadonlyArray<Session>,
   incrementLb: number,
-  { weighted }: { weighted: boolean },
+  { weighted, measure: current }: { weighted: boolean; measure?: Measure },
 ): AccessoryHint | null {
   if (!(incrementLb > 0) || !weighted) return null;
   const prior = sessions.filter((s) => s.date < beforeDate && !s.deload).sort(byDateDesc);
@@ -476,7 +495,7 @@ export function accessoryHint(
     const performed = s.blocks
       .filter((b) => b.kind === "accessory")
       .flatMap((b) => b.exercises)
-      .filter((e) => e.exerciseId === exerciseId && !e.skipped);
+      .filter((e) => e.exerciseId === exerciseId && !e.skipped && (current === undefined || e.measure === current));
     const logged = performed.flatMap((e) => e.sets.filter((x) => x.done));
     // Nothing logged, or nothing logged with a load (done while unweighted): look further back.
     if (!logged.some((x) => (x.weight ?? 0) > 0)) continue;
@@ -531,4 +550,47 @@ export function sessionVolume(session: Session): number {
 
 export function isSessionStarted(session: Session): boolean {
   return session.blocks.some((b) => b.exercises.some((e) => e.sets.some((s) => s.done)));
+}
+
+/**
+ * `session` after `exercise`'s measure changed (edited in the exercise library), or null when it
+ * stays as it is. Only a session still in progress follows — not completed — and in it only the
+ * accessory blocks where the exercise has nothing logged yet: those take the new measure, and every
+ * set's target resets to the measure's `defaultTarget` (set count, ids and loads kept; whether a
+ * load counts is read from the exercise anyway). Where a set is already logged the exercise keeps
+ * the measure it was done in, as it does in every completed session: history shows what was done.
+ */
+export function followMeasureChange(session: Session, exercise: Pick<Exercise, "id" | "measure">): Session | null {
+  if (session.completedAt) return null;
+  let changed = false;
+  const blocks = session.blocks.map((b) => {
+    if (b.kind !== "accessory") return b;
+    let touched = false;
+    const exercises = b.exercises.map((e) => {
+      if (e.exerciseId !== exercise.id || e.measure === exercise.measure || e.sets.some((x) => x.done)) return e;
+      touched = true;
+      const targetReps = defaultTarget(exercise.measure);
+      return { ...e, measure: exercise.measure, sets: e.sets.map((x) => ({ ...x, targetReps, reps: null })) };
+    });
+    if (!touched) return b;
+    changed = true;
+    return { ...b, exercises };
+  });
+  return changed ? { ...session, blocks } : null;
+}
+
+/**
+ * The saved sessions that follow a change of `exercise`'s measure (`followMeasureChange`), as they
+ * should now be saved: only those dated `fromDate` (today) or later. An earlier session is history;
+ * pre-fill and hints already read it against the exercise's current measure.
+ */
+export function sessionsFollowingMeasure(
+  sessions: ReadonlyArray<Session>,
+  exercise: Pick<Exercise, "id" | "measure">,
+  fromDate: ISODate,
+): Session[] {
+  return sessions.flatMap((s) => {
+    const next = s.date >= fromDate ? followMeasureChange(s, exercise) : null;
+    return next ? [next] : [];
+  });
 }

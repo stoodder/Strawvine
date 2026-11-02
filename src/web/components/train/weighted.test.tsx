@@ -1,26 +1,16 @@
 /**
  * Weighted exercises (any measure + a load): creating one, showing or hiding the load on set
- * chips and in the set editor, and the weighted chip in Settings' exercise library.
+ * chips and in the set editor. (Editing an exercise: EditExerciseSheet.test.tsx.)
  */
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Exercise, SetEntry } from "../../../shared/schemas";
-import { LiftsEditor } from "../../screens/Settings";
 import { AddExerciseSheet } from "./AddExerciseSheet";
 import { PlannedChip, SetChip } from "./SetControls";
 import { SetEditSheet } from "./SetSheets";
 import { describeSet } from "./sessionEdit";
-
-// Settings' library reads exercises from the store and shows toasts: stand-ins for both.
-const store = vi.hoisted(() => ({ exercises: [] as Exercise[], update: vi.fn(), toast: vi.fn() }));
-vi.mock("../../lib/store", () => ({
-  useData: () => ({ data: { exercises: store.exercises } }),
-  useUpdateExercise: () => store.update,
-  useCreateExercise: () => vi.fn(),
-}));
-vi.mock("../Toast", () => ({ useToast: () => ({ show: store.toast, dismiss: vi.fn() }) }));
 
 const root = () => document.getElementById("root")!;
 const set = (o: Partial<SetEntry> = {}): SetEntry => ({
@@ -278,44 +268,5 @@ describe("set editor", () => {
     expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({ targetWeight: null, weight: null }));
     await user.click(screen.getByRole("button", { name: "Log set" }));
     expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({ done: true, weight: null }));
-  });
-});
-
-describe("Settings' exercise library", () => {
-  beforeEach(() => {
-    store.update.mockClear();
-    store.toast.mockClear();
-    store.exercises = [
-      exercise({ id: 1, name: "Bench press", category: "primary", tracksMax: true }),
-      exercise({ id: 2, name: "Sandbag clean", category: "primary" }),
-      exercise({ id: 3, name: "Weighted dead hang", measure: "seconds" }),
-      exercise({ id: 4, name: "Pull-up", weighted: false }),
-    ];
-  });
-
-  it("offers the weighted chip only off the main lifts", () => {
-    render(<LiftsEditor />, { container: root() });
-    expect(screen.queryByRole("button", { name: "Bench press: weighted" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Sandbag clean: weighted" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Weighted dead hang: weighted" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("button", { name: "Pull-up: weighted" }).getAttribute("aria-pressed")).toBe("false");
-  });
-
-  it("turning weighted off says the logged loads are kept, with an undo", async () => {
-    const user = userEvent.setup();
-    render(<LiftsEditor />, { container: root() });
-    await user.click(screen.getByRole("button", { name: "Weighted dead hang: weighted" }));
-    expect(store.update).toHaveBeenCalledWith(3, { weighted: false });
-    expect(store.toast).toHaveBeenCalledTimes(1);
-    const toast = store.toast.mock.calls[0]![0] as { message: string; action: { label: string; onAction: () => void } };
-    expect(toast.message).toBe("Weighted dead hang no longer tracks load — logged loads are kept");
-    expect(toast.action.label).toBe("Undo");
-    toast.action.onAction();
-    expect(store.update).toHaveBeenLastCalledWith(3, { weighted: true });
-
-    // Turning it on needs no toast.
-    await user.click(screen.getByRole("button", { name: "Pull-up: weighted" }));
-    expect(store.update).toHaveBeenLastCalledWith(4, { weighted: true });
-    expect(store.toast).toHaveBeenCalledTimes(1);
   });
 });

@@ -21,6 +21,7 @@ import {
   type StreakInfo,
 } from "../../shared/gamify";
 import type { Bootstrap, DayLogPatch, Exercise, MaxEntry, MaxSource, Session, Settings } from "../../shared/schemas";
+import { sessionsFollowingMeasure } from "../../shared/session";
 import {
   clearRefused,
   currentData,
@@ -221,9 +222,19 @@ export function useCreateExercise() {
   );
 }
 
-export function useUpdateExercise() {
-  return useCallback(async (id: number, patch: Partial<Omit<Exercise, "id">>): Promise<void> => {
+/**
+ * Saves an edit of an exercise, as made in the Edit exercise sheet (a patch of only the changed fields, see
+ * `exerciseEditPatch`). A new measure also moves the sessions in progress from today on that
+ * haven't logged the exercise yet onto it (`sessionsFollowingMeasure`); history keeps its measure.
+ */
+export function useEditExercise() {
+  return useCallback((id: number, patch: Partial<Omit<Exercise, "id">>): void => {
+    if (!Object.keys(patch).length) return;
     enqueue({ kind: "updateExercise", id, patch });
+    if (patch.measure === undefined) return;
+    const sessions = currentData()?.sessions ?? [];
+    for (const s of sessionsFollowingMeasure(sessions, { id, measure: patch.measure }, localToday()))
+      enqueue({ kind: "session", date: s.date, doc: s });
   }, []);
 }
 

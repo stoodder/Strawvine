@@ -169,6 +169,25 @@ describe("api", () => {
     const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
     expect(b.exercises.find((e) => e.id === run.id)?.weighted).toBe(true);
 
+    // Every field of an edit, and only the fields it names (another device's edit of a different field survives).
+    const edited = await req(`/api/exercises/${hang.id}`, json("PATCH", { name: "  Dead hang ", category: "core", measure: "reps" }));
+    expect(await edited.json()).toMatchObject({ id: hang.id, name: "Dead hang", category: "core", measure: "reps", weighted: true });
+    const more = await req(`/api/exercises/${hang.id}`, json("PATCH", { tracksMax: true, archived: true, weighted: false }));
+    expect(await more.json()).toMatchObject({
+      name: "Dead hang",
+      category: "core",
+      measure: "reps",
+      tracksMax: true,
+      archived: true,
+      weighted: false,
+    });
+    expect((await req(`/api/exercises/${hang.id}`, json("PATCH", {}))).status).toBe(200);
+    for (const bad of [{ measure: "minutes" }, { category: "cardio" }, { name: "  " }, { name: "x".repeat(81) }, { id: 1 }])
+      expect((await req(`/api/exercises/${hang.id}`, json("PATCH", bad))).status, JSON.stringify(bad)).toBe(400);
+    expect((await req("/api/exercises/999999", json("PATCH", { name: "Nope" }))).status).toBe(404);
+    // Names needn't be unique (a library may hold two "Row"s; they're told apart by id).
+    expect((await req(`/api/exercises/${run.id}`, json("PATCH", { name: "Dead hang" }))).status).toBe(200);
+
     // Rows written without the column (as before the migration) are weighted.
     const [raw] = await db.execute<{ weighted: boolean }>(sql`insert into exercises (name) values ('Raw row') returning weighted`);
     expect(raw?.weighted).toBe(true);

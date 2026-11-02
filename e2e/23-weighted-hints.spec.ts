@@ -5,7 +5,7 @@
  * even though its older sets have one.
  */
 import type { Page } from "@playwright/test";
-import { expect, expectSynced, MONDAY, MONDAY_ISO, onboardedOn, serverData, test } from "./helpers";
+import { expect, expectSynced, MONDAY, MONDAY_ISO, onboardedOn, openExerciseEditor, serverData, test } from "./helpers";
 
 /** The Monday after the suite's first one: week 2, Push again. */
 const NEXT_MONDAY = new Date(2026, 10, 2, 10, 0, 0);
@@ -79,11 +79,12 @@ test("an exercise made unweighted logs no load and gets no hint from its old loa
 
   // Made unweighted while the session is in progress.
   await expectSynced(page);
-  await page.goto("/settings");
-  const toggle = page.getByRole("button", { name: "Ring row: weighted" });
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  const sheet = await openExerciseEditor(page, "Ring row");
+  const load = sheet.getByRole("group", { name: "Load" });
+  await expect(load.getByRole("button", { name: "Weighted", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await load.getByRole("button", { name: "Unweighted" }).click();
+  await sheet.getByRole("button", { name: "Save" }).click();
+  await expect(sheet).toHaveCount(0);
   await page.goto("/train");
 
   // One tap logs the next set without the load it was pre-filled with; the set logged before keeps its load.

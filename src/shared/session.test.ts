@@ -10,6 +10,7 @@ import {
   buildSessionFrom,
   defaultTarget,
   effectiveTargetWeight,
+  followMeasureChange,
   isWeighted,
   logAtTargets,
   loggedWeightFor,
@@ -20,6 +21,7 @@ import {
   planMatches,
   planSignature,
   sessionCounts,
+  sessionsFollowingMeasure,
   sessionVolume,
   setsForAddedExercise,
   shownLoad,
@@ -883,5 +885,144 @@ describe("nextSession", () => {
     // Before the first cycle starts, nothing is scheduled.
     const late = { ...settings, program: { ...settings.program, cycleStartDate: "2027-01-04" } };
     expect(nextSession("2026-11-08", { settings: late, exercises })).toBeNull();
+  });
+});
+
+describe("changing an exercise's measure", () => {
+  // Exercise 30 used to be counted in reps; it is now timed (or a distance).
+  const library = (measure: "reps" | "seconds" | "meters", weighted = true): Exercise[] => [
+    ...exercises,
+    { id: 30, name: "Sled push", category: "accessory", tracksMax: false, measure, weighted, archived: false },
+  ];
+  const logged = (targetReps: number, reps: number, weight: number | null) =>
+    blankSet({ targetReps, targetWeight: weight, reps, weight, done: true });
+  const withAcc = (date: string, ex: BlockExercise, extra: Partial<Session> = {}): Session => ({
+    ...buildSession(date, { settings, exercises: [], maxEntries: [], sessions: [] }),
+    blocks: [{ id: `b-${date}`, kind: "accessory", exercises: [ex] }],
+    ...extra,
+  });
+  const repsMonday = withAcc("2026-11-09", {
+    exerciseId: 30,
+    measure: "reps",
+    sets: [logged(12, 12, 90), logged(12, 10, 90), logged(12, 12, 95)],
+  });
+  const targets = (sets: ReadonlyArray<SetEntry>) => sets.map((s) => [s.targetReps, s.targetWeight]);
+  const prefill = (measure: "reps" | "seconds" | "meters", weighted = true, sessions = [repsMonday]) =>
+    buildSession("2026-11-16", { settings, exercises: library(measure, weighted), maxEntries, sessions }).blocks.find(
+      (b) => b.kind === "accessory",
+    )!.exercises[0]!;
+
+  it("pre-fills next week in the new measure: the set count and loads carry, targets reset", () => {
+    expect(targets(prefill("reps").sets)).toEqual([
+      [12, 90],
+      [12, 90],
+      [12, 95],
+    ]);
+    const timed = prefill("seconds");
+    expect(timed.measure).toBe("seconds");
+    expect(targets(timed.sets)).toEqual([
+      [30, 90],
+      [30, 90],
+      [30, 95],
+    ]);
+    expect(prefill("meters").sets.map((s) => s.targetReps)).toEqual([40, 40, 40]);
+    // Made unweighted along the way: no load either.
+    expect(targets(prefill("seconds", false).sets)).toEqual([
+      [30, null],
+      [30, null],
+      [30, null],
+    ]);
+    // The past session keeps what was done.
+    expect(repsMonday.blocks[0]!.exercises[0]!.measure).toBe("reps");
+  });
+
+  it("carries targets again once it has been done in the new measure", () => {
+    const timedMonday = withAcc("2026-11-16", { exerciseId: 30, measure: "seconds", sets: [logged(45, 45, 90)] });
+    const next = buildSession("2026-11-23", { settings, exercises: library("seconds"), maxEntries, sessions: [repsMonday, timedMonday] });
+    expect(targets(next.blocks.find((b) => b.kind === "accessory")!.exercises[0]!.sets)).toEqual([[45, 90]]);
+  });
+
+  it("resets the targets of a skipped exercise carried from a performance in the old measure", () => {
+    const skipped = withAcc("2026-11-16", { exerciseId: 30, measure: "reps", skipped: true, sets: [blankSet({ targetReps: 12 })] });
+    const next = buildSession("2026-11-23", { settings, exercises: library("seconds"), maxEntries, sessions: [repsMonday, skipped] });
+    const ex = next.blocks.find((b) => b.kind === "accessory")!.exercises[0]!;
+    expect(ex.measure).toBe("seconds");
+    expect(targets(ex.sets)).toEqual([
+      [30, 90],
+      [30, 90],
+      [30, 95],
+    ]);
+  });
+
+  it("adds it by hand the same way: set count and loads from last time, the new measure's targets", () => {
+    const ctx = { settings, sessions: [repsMonday] };
+    const into = buildSession("2026-11-17", { settings, exercises: [], maxEntries: [], sessions: [] });
+    expect(targets(setsForAddedExercise({ id: 30, measure: "seconds", weighted: true }, into, ctx))).toEqual([
+      [30, 90],
+      [30, 90],
+      [30, 95],
+    ]);
+    expect(targets(setsForAddedExercise({ id: 30, measure: "meters", weighted: false }, into, ctx))).toEqual([
+      [40, null],
+      [40, null],
+      [40, null],
+    ]);
+    expect(targets(setsForAddedExercise({ id: 30, measure: "reps", weighted: true }, into, ctx))[0]).toEqual([12, 90]);
+  });
+
+  it("gives no progression hint from a performance in another measure", () => {
+    const allMet = withAcc("2026-11-09", { exerciseId: 30, measure: "reps", sets: [logged(12, 12, 90)] });
+    expect(accessoryHint(30, "2026-11-16", [allMet], 5, { weighted: true, measure: "reps" })?.suggestedWeight).toBe(95);
+    expect(accessoryHint(30, "2026-11-16", [allMet], 5, { weighted: true, measure: "seconds" })).toBeNull();
+    // An older performance in the current measure still counts (looks past the other measure).
+    const olderTimed = withAcc("2026-11-02", { exerciseId: 30, measure: "seconds", sets: [logged(30, 20, 70)] });
+    expect(accessoryHint(30, "2026-11-16", [allMet, olderTimed], 5, { weighted: true, measure: "seconds" })).toMatchObject({
+      kind: "hold",
+      measure: "seconds",
+      lastWeight: 70,
+    });
+  });
+
+  describe("the session in progress", () => {
+    const today = "2026-11-16";
+    const open = withAcc(today, {
+      exerciseId: 30,
+      measure: "reps",
+      sets: [blankSet({ id: "a", targetReps: 12, targetWeight: 90 }), blankSet({ id: "b", targetReps: 12, targetWeight: 95 })],
+    });
+
+    it("follows the change while nothing of it is logged: new measure, default targets, same sets and loads", () => {
+      const next = followMeasureChange(open, { id: 30, measure: "seconds" })!;
+      const ex = next.blocks[0]!.exercises[0]!;
+      expect(ex.measure).toBe("seconds");
+      expect(ex.sets.map((s) => [s.id, s.targetReps, s.targetWeight])).toEqual([
+        ["a", 30, 90],
+        ["b", 30, 95],
+      ]);
+      expect(next.date).toBe(today);
+      // Already in that measure, or another exercise: nothing to do.
+      expect(followMeasureChange(open, { id: 30, measure: "reps" })).toBeNull();
+      expect(followMeasureChange(open, { id: 31, measure: "seconds" })).toBeNull();
+    });
+
+    it("leaves an exercise with a logged set, a completed session and the main lift alone", () => {
+      const started = withAcc(today, { exerciseId: 30, measure: "reps", sets: [logged(12, 12, 90), blankSet({ targetReps: 12 })] });
+      expect(followMeasureChange(started, { id: 30, measure: "seconds" })).toBeNull();
+      expect(followMeasureChange({ ...open, completedAt: "2026-11-16T18:00:00Z" }, { id: 30, measure: "seconds" })).toBeNull();
+      const main: Session = { ...open, blocks: [{ ...open.blocks[0]!, kind: "primary" }] };
+      expect(followMeasureChange(main, { id: 30, measure: "seconds" })).toBeNull();
+    });
+
+    it("only touches the blocks it changes, and only sessions from today on", () => {
+      const other: BlockExercise = { exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 8 })] };
+      const two: Session = { ...open, blocks: [{ id: "x", kind: "accessory", exercises: [other] }, ...open.blocks] };
+      const next = followMeasureChange(two, { id: 30, measure: "meters" })!;
+      expect(next.blocks[0]).toBe(two.blocks[0]);
+      expect(next.blocks[1]!.exercises[0]!.sets.map((s) => s.targetReps)).toEqual([40, 40]);
+
+      const yesterday = { ...open, date: "2026-11-15" };
+      const followed = sessionsFollowingMeasure([yesterday, open, repsMonday], { id: 30, measure: "seconds" }, today);
+      expect(followed.map((s) => s.date)).toEqual([today]);
+    });
   });
 });

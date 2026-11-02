@@ -1,9 +1,9 @@
 /**
  * Weighted is its own choice, next to the measure: a weighted dead hang (time + load) shows and
  * logs a load; an unweighted plank (time only) has no load anywhere. The flag can be changed
- * later in Settings' exercise library.
+ * later in the Edit exercise sheet (Settings → Exercise library).
  */
-import { expect, expectSynced, MONDAY, onboardedOn, serverData, test, toastMessage } from "./helpers";
+import { expect, expectSynced, MONDAY, onboardedOn, openExerciseEditor, serverData, test, toastMessage } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await onboardedOn(page, MONDAY);
@@ -62,24 +62,32 @@ test("a weighted hold logs a load; an unweighted one has none", async ({ page })
   expect(exercises.find((e) => e.name === "Plank")).toMatchObject({ measure: "seconds", weighted: false });
 
   // Made weighted later in the library: the plank's sets now offer a load.
-  await page.goto("/settings");
-  const chip = page.getByRole("button", { name: "Plank: weighted" });
-  await expect(chip).toHaveAttribute("aria-pressed", "false");
-  // A main lift always carries a load: no chip to turn it off.
-  await expect(page.getByRole("button", { name: "Bench press: weighted" })).toHaveCount(0);
-  await chip.click();
-  await expect(chip).toHaveAttribute("aria-pressed", "true");
+  const setLoad = async (choice: "Weighted" | "Unweighted") => {
+    const sheet = await openExerciseEditor(page, "Plank");
+    const load = sheet.getByRole("group", { name: "Load" });
+    const other = choice === "Weighted" ? "Unweighted" : "Weighted";
+    await expect(load.getByRole("button", { name: other, exact: true })).toHaveAttribute("aria-pressed", "true");
+    await load.getByRole("button", { name: choice, exact: true }).click();
+    await sheet.getByRole("button", { name: "Save" }).click();
+    await expect(sheet).toHaveCount(0);
+  };
+  await setLoad("Weighted");
+  await expect(page.getByRole("button", { name: "Edit Plank" })).toHaveAccessibleDescription("Accessory · time · weighted");
+  // A main lift always carries a load: no choice to turn it off.
+  const bench = await openExerciseEditor(page, "Bench press");
+  await expect(bench.getByRole("group", { name: "Load" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await expectSynced(page);
   expect((await serverData(page)).exercises.find((e) => e.name === "Plank")).toMatchObject({ weighted: true });
 
   // Back off: the logged loads are kept, and Undo turns it back on.
-  await chip.click();
-  await expect(chip).toHaveAttribute("aria-pressed", "false");
+  await setLoad("Unweighted");
   await expect(toastMessage(page, "Plank no longer tracks load — logged loads are kept")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit Plank" })).toHaveAccessibleDescription("Accessory · time");
   await expectSynced(page);
   expect((await serverData(page)).exercises.find((e) => e.name === "Plank")).toMatchObject({ weighted: false });
   await page.getByRole("region", { name: "Notifications" }).getByRole("button", { name: "Undo" }).click();
-  await expect(chip).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Edit Plank" })).toHaveAccessibleDescription("Accessory · time · weighted");
   await expectSynced(page);
   expect((await serverData(page)).exercises.find((e) => e.name === "Plank")).toMatchObject({ weighted: true });
 

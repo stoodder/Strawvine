@@ -225,6 +225,15 @@ export async function serverData(page: Page): Promise<Bootstrap> {
   return res.json();
 }
 
+/** Open Settings and an exercise's Edit exercise sheet from the exercise library; returns the sheet. */
+export async function openExerciseEditor(page: Page, name: string) {
+  await page.goto("/settings");
+  await page.getByRole("button", { name: `Edit ${name}`, exact: true }).click();
+  const sheet = page.getByRole("dialog", { name: "Edit exercise" });
+  await expect(sheet.getByRole("textbox", { name: "Name" })).toHaveValue(name);
+  return sheet;
+}
+
 /** Wait until nothing is waiting to sync on this page (the dock's pending pill is gone). */
 export async function expectSynced(page: Page) {
   await expect(page.getByRole("button", { name: /pending/ })).toHaveCount(0, { timeout: 20_000 });
