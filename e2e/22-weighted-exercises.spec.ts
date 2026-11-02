@@ -3,7 +3,7 @@
  * logs a load; an unweighted plank (time only) has no load anywhere. The flag can be changed
  * later in Settings' exercise library.
  */
-import { expect, expectSynced, MONDAY, onboardedOn, serverData, test } from "./helpers";
+import { expect, expectSynced, MONDAY, onboardedOn, serverData, test, toastMessage } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await onboardedOn(page, MONDAY);
@@ -16,10 +16,12 @@ async function create(page: import("@playwright/test").Page, name: string, measu
   const sheet = page.getByRole("dialog", { name: "Add exercise" });
   await sheet.getByRole("textbox", { name: "Search or create exercise" }).fill(name);
   await sheet.getByRole("button", { name: measure, exact: true }).click();
-  const toggle = sheet.getByRole("switch", { name: "Weighted" });
-  await expect(toggle).toHaveAttribute("aria-checked", "true"); // on by default
-  if (!weighted) await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-checked", String(weighted));
+  // A hold starts unweighted; the load is a chip pair like the category and measure.
+  const load = sheet.getByRole("group", { name: "Load" });
+  await expect(load.getByRole("button", { name: "Unweighted" })).toHaveAttribute("aria-pressed", "true");
+  const choice = load.getByRole("button", { name: weighted ? "Weighted" : "Unweighted", exact: true });
+  await choice.click();
+  await expect(choice).toHaveAttribute("aria-pressed", "true");
   await sheet.getByRole("button", { name: /Create & add/ }).click();
   await expect(sheet).toHaveCount(0);
 }
@@ -29,6 +31,10 @@ test("a weighted hold logs a load; an unweighted one has none", async ({ page })
   // No load yet: the chip says so, so there's something to set.
   const first = page.getByRole("button", { name: /^Weighted dead hang set 1: 30\s?s\s*\(no load\)$/ });
   await expect(first).toBeVisible();
+  // …and so does the set list in the exercise's actions.
+  await page.getByRole("button", { name: "Weighted dead hang options" }).click();
+  await expect(page.getByRole("button", { name: "Edit set 1: 30 seconds (no load)" })).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await first.focus();
   await page.keyboard.press("Shift+F10");
@@ -57,10 +63,26 @@ test("a weighted hold logs a load; an unweighted one has none", async ({ page })
 
   // Made weighted later in the library: the plank's sets now offer a load.
   await page.goto("/settings");
-  const chip = page.getByRole("button", { name: "Plank: track load" });
+  const chip = page.getByRole("button", { name: "Plank: weighted" });
   await expect(chip).toHaveAttribute("aria-pressed", "false");
+  // A main lift always carries a load: no chip to turn it off.
+  await expect(page.getByRole("button", { name: "Bench press: weighted" })).toHaveCount(0);
   await chip.click();
   await expect(chip).toHaveAttribute("aria-pressed", "true");
+  await expectSynced(page);
+  expect((await serverData(page)).exercises.find((e) => e.name === "Plank")).toMatchObject({ weighted: true });
+
+  // Back off: the logged loads are kept, and Undo turns it back on.
+  await chip.click();
+  await expect(chip).toHaveAttribute("aria-pressed", "false");
+  await expect(toastMessage(page, "Plank no longer tracks load — logged loads are kept")).toBeVisible();
+  await expectSynced(page);
+  expect((await serverData(page)).exercises.find((e) => e.name === "Plank")).toMatchObject({ weighted: false });
+  await page.getByRole("region", { name: "Notifications" }).getByRole("button", { name: "Undo" }).click();
+  await expect(chip).toHaveAttribute("aria-pressed", "true");
+  await expectSynced(page);
+  expect((await serverData(page)).exercises.find((e) => e.name === "Plank")).toMatchObject({ weighted: true });
+
   await page.goto("/train");
   await expect(page.getByRole("button", { name: /^Plank set 1: 30\s?s\s*\(no load\)$/ })).toBeVisible();
 });

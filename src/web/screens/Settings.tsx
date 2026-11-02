@@ -11,6 +11,7 @@ import { InlineText } from "../components/InlineText";
 import { useToast } from "../components/Toast";
 import { useFocusAfter } from "../components/useFocusAfter";
 import { formatRest, parseRest } from "../components/settings/restTime";
+import { isMainLift } from "../components/train/AddExerciseSheet";
 import { BoxNumber, Field, Section, Toggle, useFieldIds } from "../components/ui";
 import { useTitle } from "../components/useTitle";
 import { fmt } from "../lib/format";
@@ -818,7 +819,7 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
   );
 }
 
-function LiftsEditor() {
+export function LiftsEditor() {
   const { data } = useData();
   const toast = useToast();
   const updateExercise = useUpdateExercise();
@@ -842,28 +843,43 @@ function LiftsEditor() {
     >
       <div className="divide-y divide-white/[0.04]">
         {list.map((e) => (
-          // The chips wrap under the name when they don't fit beside it (narrow screens, zoom).
+          // The chips wrap under the name when they don't fit beside it (narrow screens, zoom). The
+          // name's basis is its own length (Inter averages ≈0.5em a character; 0.55em leaves a
+          // margin), so the chips wrap before the name gets cut off; a name longer than the row
+          // still truncates.
           <div key={e.id} className={clsx("flex flex-wrap items-center gap-x-3 gap-y-1 py-2", e.archived && "opacity-50")}>
-            <InlineText
-              ariaLabel={`Rename ${e.name}`}
-              value={e.name}
-              maxLength={80}
-              required
-              requiredMessage="A lift needs a name."
-              onCommit={(name) => void updateExercise(e.id, { name })}
-              className="min-w-0 flex-[1_1_7rem]"
-              inputClassName="text-sm"
-            />
+            <div className="min-w-0 shrink grow text-sm" style={{ flexBasis: `min(100%, ${e.name.length * 0.55 + 0.25}em)` }}>
+              <InlineText
+                ariaLabel={`Rename ${e.name}`}
+                value={e.name}
+                maxLength={80}
+                required
+                requiredMessage="A lift needs a name."
+                onCommit={(name) => void updateExercise(e.id, { name })}
+                inputClassName="text-sm"
+              />
+            </div>
             <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1">
-              <button
-                type="button"
-                aria-pressed={isWeighted(e)}
-                aria-label={`${e.name}: track load`}
-                onClick={() => void updateExercise(e.id, { weighted: !isWeighted(e) })}
-                className={clsx("chip", isWeighted(e) ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-fg-2")}
-              >
-                load
-              </button>
+              {/* A main lift's sets always carry a load: no choice to offer. */}
+              {!isMainLift(e) && (
+                <button
+                  type="button"
+                  aria-pressed={isWeighted(e)}
+                  aria-label={`${e.name}: weighted`}
+                  onClick={() => {
+                    const weighted = !isWeighted(e);
+                    void updateExercise(e.id, { weighted });
+                    if (!weighted)
+                      toast.show({
+                        message: `${e.name} no longer tracks load — logged loads are kept`,
+                        action: { label: "Undo", onAction: () => void updateExercise(e.id, { weighted: true }) },
+                      });
+                  }}
+                  className={clsx("chip", isWeighted(e) ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-fg-2")}
+                >
+                  weighted
+                </button>
+              )}
               <button
                 type="button"
                 aria-pressed={e.tracksMax}

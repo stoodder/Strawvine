@@ -31,9 +31,9 @@ function HoldFill({ holding, className }: { holding: boolean; className: string 
 }
 
 /**
- * A set's load line on a chip: the load, or "—" for a weighted exercise without one yet (so it
- * reads as something to set; the chip's name says "(no load)" after the reps instead). An
- * unweighted exercise shows a load only if a set still has one.
+ * A set's load line on a chip: the load, or a muted "lb" for a weighted exercise without one yet
+ * (an empty pounds field, so it reads as something to set; the chip's name says "(no load)" after
+ * the reps instead). The caller passes no load for an unweighted exercise's pending sets.
  */
 function ChipLoad({ weight, weighted, className }: { weight: number | null; weighted: boolean; className: string }) {
   if (weight)
@@ -46,11 +46,17 @@ function ChipLoad({ weight, weighted, className }: { weight: number | null; weig
     );
   if (!weighted) return null;
   return (
-    <span aria-hidden className={clsx("num mt-1 text-[0.625rem] leading-none", className)}>
-      —
+    <span aria-hidden className={clsx("mt-1 text-[0.625rem] leading-none", className)}>
+      lb
     </span>
   );
 }
+
+/**
+ * The load a set shows: a weighted exercise's logged or target load; an unweighted exercise's
+ * only once logged with one (an old load stays visible, a target load is never shown).
+ */
+const shownLoad = (set: SetEntry, weighted: boolean) => (set.done ? set.weight : weighted ? set.targetWeight : null);
 
 /** An accessory set: tap logs / unlogs, hold edits. */
 export function SetChip({
@@ -72,7 +78,7 @@ export function SetChip({
   index: number;
   set: SetEntry;
   measure: Measure;
-  /** The exercise tracks a load: a set without one shows "—". */
+  /** The exercise tracks a load: a set without one shows an empty "lb". */
   weighted?: boolean;
   describedBy?: string;
   onTap: () => void;
@@ -80,10 +86,11 @@ export function SetChip({
 }) {
   const { holding, handlers } = useHold({ onTap, onHold });
   const reps = set.done ? set.reps : set.targetReps;
-  const weight = set.done ? set.weight : set.targetWeight;
+  const weight = shownLoad(set, weighted);
   const unit = measureUnit(measure);
   // The accessible name is built from the visible text plus sr-only words around it (WCAG 2.5.3):
-  // "Row set 1: 10 reps at 50 lb", where "10" and "50" are what the chip shows ("… (no load)" for "—").
+  // "Row set 1: 10 reps at 50 lb", where "10" and "50" are what the chip shows ("… (no load)" for
+  // an empty "lb").
   return (
     <motion.button
       type="button"
@@ -182,16 +189,18 @@ export function PlannedChip({
   weighted?: boolean;
 }) {
   const unit = measureUnit(measure);
+  // Planned targets: an unweighted exercise shows no target load.
+  const load = weighted ? set.targetWeight : null;
   return (
     <li className="hc-edge flex h-[52px] min-w-[64px] flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.12] px-3 text-fg-2">
-      <span className="sr-only">{`Set ${index + 1}: ${describeSet(set, measure, weighted)}`}</span>
+      <span className="sr-only">{`Set ${index + 1}: ${describeSet({ ...set, targetWeight: load }, measure, weighted)}`}</span>
       <span aria-hidden className="num text-[0.9375rem] leading-none">
         {set.targetReps ?? "—"}
         {unit && <span className="text-[0.625rem] text-mute">{unit}</span>}
       </span>
-      {(set.targetWeight || weighted) && (
-        <span aria-hidden className="num mt-1 text-[0.625rem] leading-none text-mute">
-          {set.targetWeight || "—"}
+      {(load || weighted) && (
+        <span aria-hidden className={clsx("mt-1 text-[0.625rem] leading-none text-mute", load && "num")}>
+          {load || "lb"}
         </span>
       )}
     </li>
