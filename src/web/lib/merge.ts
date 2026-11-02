@@ -238,9 +238,18 @@ export function mergeSettings(ancestor: Settings | null | undefined, local: Sett
 // Sessions
 // ---------------------------------------------------------------------------
 
-/** A set logged or edited on this device wins; with no common ancestor, a logged set beats an unlogged one. */
+/**
+ * A set logged or edited on this device wins — except that a set logged on either side beats an
+ * edit of the same, still unlogged set's targets on the other (its targets, or a measure change
+ * shown on a stale copy, must never unlog what was done). With no common ancestor, a logged set
+ * beats an unlogged one.
+ */
 function mergeSet(a: SetEntry | undefined, l: SetEntry, s: SetEntry): SetEntry {
-  if (a) return deepEqual(l, a) ? s : l;
+  if (a) {
+    if (deepEqual(l, a)) return s;
+    if (!a.done && !l.done && s.done) return s;
+    return l;
+  }
   if (s.done && !l.done) return { ...s, id: l.id };
   return l;
 }
@@ -358,11 +367,55 @@ function normalizeMoves(ids: Idents, docs: Record<Side, Session | null>): Record
   return out;
 }
 
+const hasLogged = (x: BlockExercise) => x.sets.some((st) => st.done);
+
+/**
+ * Exercises a merge had to keep apart from the one they were merged with (`mergeExercise`): the
+ * block merge puts each right after it.
+ */
+const spills = new WeakMap<BlockExercise, BlockExercise>();
+
+/**
+ * An exercise saved on two devices: its fields merge like settings, its sets by id (`mergeSet`).
+ * Sets are counted in the exercise's `measure`, so sets in two measures are never mixed. When the
+ * two versions disagree on it:
+ * - the side holding logged sets decides: its measure and its sets (the other side's are unlogged,
+ *   and their targets meant another measure). A stale device showing a measure change can't turn
+ *   rep sets logged elsewhere into seconds, nor the other way round;
+ * - nothing logged on either side: the measure as fields merge it (this device's when it changed
+ *   it), with that side's sets;
+ * - logged sets on both sides, in different measures: the server's version stands — it is already
+ *   what every other device has, and history and volume read it — and the sets logged on this
+ *   device are kept apart, as a second entry of the exercise in their own measure right after it
+ *   (spilled), rather than mixed in or lost.
+ */
 function mergeExercise(a: BlockExercise | undefined, l: BlockExercise, s: BlockExercise): BlockExercise {
   const { sets: _a, ...aRest } = a ?? ({} as Partial<BlockExercise>);
   const { sets: _l, ...lRest } = l;
   const { sets: _s, ...sRest } = s;
   const head = mergeFields(a ? aRest : null, lRest, sRest);
+  if (l.measure !== s.measure) {
+    const lLogged = hasLogged(l);
+    const sLogged = hasLogged(s);
+    if (lLogged && sLogged) {
+      const kept = { ...head, measure: s.measure, sets: s.sets } as BlockExercise;
+      const taken = new Set(s.sets.map((st) => st.id));
+      const mine = l.sets.filter((st) => {
+        if (!st.done) return false;
+        const before = a?.sets.find((x) => x.id === st.id);
+        const there = s.sets.find((x) => x.id === st.id);
+        return !(before && deepEqual(before, st)) && !(there && deepEqual(there, st));
+      });
+      if (mine.length) {
+        const sets = mine.map((st) => (taken.has(st.id) ? { ...st, id: `${st.id.slice(0, 36)}~m` } : st));
+        const { skipped: _skip, ...rest } = l;
+        spills.set(kept, { ...rest, sets });
+      }
+      return kept;
+    }
+    const from = lLogged ? l : sLogged ? s : head.measure === l.measure ? l : s;
+    return { ...head, measure: from.measure, sets: from.sets } as BlockExercise;
+  }
   const sets = mergeList(
     a?.sets ?? null,
     l.sets,
@@ -391,7 +444,10 @@ function blockMerger(ids: Idents) {
       (x, _i, side) => ids.get(x, side),
       (x) => String(x.exerciseId),
       mergeExercise,
-    );
+    ).flatMap((x) => {
+      const apart = spills.get(x);
+      return apart ? [x, apart] : [x];
+    });
     return { ...head, id: l.id, exercises } as Block;
   };
 }

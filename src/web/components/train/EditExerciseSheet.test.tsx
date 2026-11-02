@@ -7,6 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultSettings } from "../../../shared/defaults";
 import type { Exercise, Settings } from "../../../shared/schemas";
+import { MemoryRouter } from "react-router";
 import { LiftsEditor } from "../../screens/Settings";
 
 const store = vi.hoisted(() => ({
@@ -23,6 +24,14 @@ vi.mock("../../lib/store", () => ({
 vi.mock("../Toast", () => ({ useToast: () => ({ show: store.toast, dismiss: vi.fn() }) }));
 
 const root = () => document.getElementById("root")!;
+/** The library in a router (the lock note links to the program settings). */
+const renderLibrary = () =>
+  render(
+    <MemoryRouter>
+      <LiftsEditor />
+    </MemoryRouter>,
+    { container: root() },
+  );
 const exercise = (o: Partial<Exercise> & Pick<Exercise, "id" | "name">): Exercise => ({
   category: "accessory",
   tracksMax: false,
@@ -48,17 +57,23 @@ beforeEach(() => {
 
 const open = async (name: string) => {
   const user = userEvent.setup();
-  render(<LiftsEditor />, { container: root() });
+  const r = renderLibrary();
   await user.click(screen.getByRole("button", { name: `Edit ${name}` }));
-  const dialog = screen.getByRole("dialog", { name: "Edit exercise" });
-  return { user, dialog, q: within(dialog) };
+  const dialog = screen.getByRole("dialog", { name: `Edit ${name}` });
+  const rerender = () =>
+    r.rerender(
+      <MemoryRouter>
+        <LiftsEditor />
+      </MemoryRouter>,
+    );
+  return { user, dialog, q: within(dialog), rerender };
 };
 const pressed = (group: HTMLElement, name: string) => within(group).getByRole("button", { name }).getAttribute("aria-pressed");
 
 describe("Settings' exercise library", () => {
   it("lists each exercise with its tag, archived ones on request", async () => {
     const user = userEvent.setup();
-    render(<LiftsEditor />, { container: root() });
+    renderLibrary();
     expect(screen.getByRole("button", { name: "Edit Weighted dead hang", description: "Accessory · time · weighted" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Edit Bench press", description: "Barbell · max" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Edit Pull-up", description: "Accessory" })).toBeTruthy();
@@ -128,17 +143,38 @@ describe("Edit exercise", () => {
   it("keeps a program's main lift intact: category, measure and max locked, no archiving — the name is free", async () => {
     const { user, q } = await open("Bench press");
     const note =
-      "Mon’s main lift: the program calculates it from its max, so its category, measure and max stay as they are. Change the weekly layout to free them.";
-    expect(q.getByText(note)).toBeTruthy();
+      "Mon’s main lift: the program calculates it from its max, so its category, measure and max stay as they are and it can’t be archived. Change the weekly layout to free them.";
+    expect(q.getByText((_, el) => el?.tagName === "P" && el.textContent === note)).toBeTruthy();
+    expect(q.getByRole("link", { name: "weekly layout" }).getAttribute("href")).toBe("/settings#program");
     for (const group of ["Category", "Measured in", "Max"]) {
       const g = q.getByRole("group", { name: group, description: note });
-      for (const b of within(g).getAllByRole("button")) expect(b).toHaveProperty("disabled", true);
+      // Locked, not disabled: still reached by Tab (and with them the note); a press changes nothing.
+      for (const b of within(g).getAllByRole("button")) {
+        expect(b.getAttribute("aria-disabled")).toBe("true");
+        expect(b).toHaveProperty("disabled", false);
+      }
     }
+    await user.click(within(q.getByRole("group", { name: "Category" })).getByRole("button", { name: "Core" }));
+    expect(pressed(q.getByRole("group", { name: "Category" }), "Barbell")).toBe("true");
     expect(q.queryByRole("group", { name: "Load" })).toBeNull();
-    expect(q.getByRole("button", { name: "Archive" })).toHaveProperty("disabled", true);
+    const archive = q.getByRole("button", { name: "Archive", description: note });
+    expect(archive.getAttribute("aria-disabled")).toBe("true");
+    archive.focus();
+    expect(document.activeElement).toBe(archive);
+    await user.click(archive);
+    expect(store.edit).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeTruthy();
     await user.type(q.getByRole("textbox", { name: "Name" }), " (comp)");
     await user.click(q.getByRole("button", { name: "Save" }));
     expect(store.edit).toHaveBeenCalledWith(1, { name: "Bench press (comp)" });
+  });
+
+  it("tabs through the locked chips", async () => {
+    const { user, q } = await open("Bench press");
+    q.getByRole("textbox", { name: "Name" }).focus();
+    await user.tab(); // the note's link
+    await user.tab();
+    expect(document.activeElement).toBe(within(q.getByRole("group", { name: "Category" })).getByRole("button", { name: "Accessory" }));
   });
 
   it("leaves a tracked lift the program doesn't use editable", async () => {
@@ -156,12 +192,15 @@ describe("Edit exercise", () => {
     store.settings = { ...store.settings, strengthTargets: [{ id: "t", exerciseId: 4, targetLb: 405, setOn: "2026-11-02" }] };
     const { q } = await open("Front squat");
     const max = q.getByRole("group", { name: "Max", description: "A strength target follows its max" });
-    expect(within(max).getByRole("button", { name: "Not tracked" })).toHaveProperty("disabled", true);
+    expect(within(max).getByRole("button", { name: "Not tracked" }).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("archives with an undo, and restores", async () => {
+  it("archives with an undo — sending only `archived`, whatever else the form holds — and restores", async () => {
     const { user, q } = await open("Pull-up");
+    await user.click(within(q.getByRole("group", { name: "Category" })).getByRole("button", { name: "Core" }));
+    await user.type(q.getByRole("textbox", { name: "Name" }), "s");
     await user.click(q.getByRole("button", { name: "Archive" }));
+    expect(store.edit).toHaveBeenCalledTimes(1);
     expect(store.edit).toHaveBeenCalledWith(11, { archived: true });
     const toast = store.toast.mock.calls[0]![0] as { message: string; action: { onAction: () => void } };
     expect(toast.message).toBe("Pull-up archived");
@@ -174,12 +213,71 @@ describe("Edit exercise", () => {
     expect(store.edit).toHaveBeenLastCalledWith(12, { archived: false });
   });
 
+  it("after archiving a row out of the list, focus moves to the next row (else the one before)", async () => {
+    store.edit.mockImplementation((id: number, patch: Partial<Exercise>) => {
+      store.exercises = store.exercises.map((e) => (e.id === id ? { ...e, ...patch } : e));
+    });
+    const first = await open("Weighted dead hang");
+    await first.user.click(first.q.getByRole("button", { name: "Archive" }));
+    first.rerender();
+    expect(screen.queryByRole("button", { name: "Edit Weighted dead hang" })).toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit Pull-up" })));
+
+    // The last row: the one before it.
+    await first.user.click(screen.getByRole("button", { name: "Edit Pull-up" }));
+    await first.user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Archive" }));
+    first.rerender();
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit Front squat" })));
+    store.edit.mockReset();
+  });
+
+  it("asks before dropping unsaved changes (Escape, the backdrop, Close), and keeps them on request", async () => {
+    const { user, q } = await open("Pull-up");
+    // Nothing changed: Escape just closes.
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Edit Pull-up" }));
+    const d = within(screen.getByRole("dialog", { name: "Edit Pull-up" }));
+    await user.click(within(d.getByRole("group", { name: "Category" })).getByRole("button", { name: "Core" }));
+    await user.keyboard("{Escape}");
+    const confirm = d.getByRole("group", { name: "Discard changes?" });
+    expect(document.activeElement).toBe(within(confirm).getByRole("button", { name: "Keep editing" }));
+    // Escape again (or Keep editing) goes back to the form, changes intact.
+    await user.keyboard("{Escape}");
+    expect(d.queryByRole("group", { name: "Discard changes?" })).toBeNull();
+    expect(pressed(d.getByRole("group", { name: "Category" }), "Core")).toBe("true");
+    await user.click(d.getByRole("button", { name: "Close" }));
+    await user.click(d.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(pressed(d.getByRole("group", { name: "Category" }), "Core")).toBe("true");
+    // The backdrop asks too; Discard closes without saving.
+    await user.click(document.querySelector<HTMLElement>(".backdrop-blur-sm")!);
+    await user.click(d.getByRole("button", { name: "Discard" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(store.edit).not.toHaveBeenCalled();
+    void q;
+  });
+
+  it("Enter in an unchanged name neither saves nor closes", async () => {
+    const { user, q } = await open("Pull-up");
+    await user.click(q.getByRole("textbox", { name: "Name" }));
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("dialog", { name: "Edit Pull-up" })).toBeTruthy();
+    expect(store.edit).not.toHaveBeenCalled();
+    // Changed, Enter saves.
+    await user.type(q.getByRole("textbox", { name: "Name" }), "s{Enter}");
+    expect(store.edit).toHaveBeenCalledWith(11, { name: "Pull-ups" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("starts over when closed without saving", async () => {
     const { user, q } = await open("Pull-up");
     await user.click(within(q.getByRole("group", { name: "Category" })).getByRole("button", { name: "Core" }));
     await user.click(q.getByRole("button", { name: "Close" }));
+    await user.click(q.getByRole("button", { name: "Discard" }));
     await user.click(screen.getByRole("button", { name: "Edit Pull-up" }));
-    const again = within(screen.getByRole("dialog", { name: "Edit exercise" }));
+    const again = within(screen.getByRole("dialog", { name: "Edit Pull-up" }));
     expect(pressed(again.getByRole("group", { name: "Category" }), "Accessory")).toBe("true");
     expect(store.edit).not.toHaveBeenCalled();
   });

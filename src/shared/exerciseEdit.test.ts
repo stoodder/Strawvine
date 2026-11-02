@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
-import { exerciseDraft, exerciseEditPatch, exerciseLocks } from "./exerciseEdit";
+import { exerciseDraft, exerciseEditPatch, exerciseLocks, exercisePatchRefusal, programDayList } from "./exerciseEdit";
 import type { Exercise } from "./schemas";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -92,5 +92,32 @@ describe("exerciseEditPatch", () => {
     ).toEqual({
       measure: "seconds",
     });
+  });
+});
+
+describe("exercisePatchRefusal (the server's locks)", () => {
+  const targeted = { ...settings, strengthTargets: [{ id: "t", exerciseId: 4, targetLb: 405, setOn: "2026-11-01" }] };
+
+  it("refuses what would take a program day's main lift away", () => {
+    for (const patch of [{ archived: true }, { tracksMax: false }, { category: "accessory" as const }, { measure: "seconds" as const }])
+      expect(exercisePatchRefusal(bench, patch, settings)).toMatch(/^Bench press is Mon's main lift: .*can't be archived/);
+    // A rename, the load flag or fields set to what they already are pass.
+    expect(exercisePatchRefusal(bench, { name: "Bench", category: "primary", measure: "reps", tracksMax: true }, settings)).toBeNull();
+    expect(exercisePatchRefusal(bench, { archived: false, weighted: true }, settings)).toBeNull();
+  });
+
+  it("refuses dropping the max of a lift with a strength target; anything goes for a free one", () => {
+    expect(exercisePatchRefusal(front, { tracksMax: false }, targeted)).toBe(
+      "Front squat has a strength target, so it keeps tracking its max.",
+    );
+    expect(exercisePatchRefusal(front, { archived: true, measure: "seconds" }, targeted)).toBeNull();
+    expect(exercisePatchRefusal(front, { tracksMax: false, archived: true }, settings)).toBeNull();
+    expect(exercisePatchRefusal(row, { measure: "meters", archived: true }, settings)).toBeNull();
+  });
+
+  it("names days the way the edit sheet does", () => {
+    expect(programDayList([1])).toBe("Mon");
+    expect(programDayList([1, 4])).toBe("Mon & Thu");
+    expect(programDayList([1, 3, 5])).toBe("Mon, Wed & Fri");
   });
 });

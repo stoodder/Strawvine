@@ -2,6 +2,7 @@
  * Editing an exercise in the library (§6.5): what may change, and the patch an edit sends. The
  * session side of a measure change (pre-fill, hints, the session in progress) lives in session.ts.
  */
+import { WEEKDAY_SHORT } from "./dates";
 import type { Exercise, ExerciseCategory, Measure, Settings } from "./schemas";
 import { isMainLift, isWeighted } from "./session";
 
@@ -35,6 +36,39 @@ export function exerciseLocks(
   const structure = programDays.length > 0;
   const targeted = settings.strengthTargets.some((t) => t.exerciseId === exercise.id);
   return { programDays, structure, keepsMax: exercise.tracksMax && (structure || targeted) };
+}
+
+/** Program days as words: "Mon", "Mon & Thu", "Mon, Wed & Fri". */
+export function programDayList(days: ReadonlyArray<number>): string {
+  const names = days.map((d) => WEEKDAY_SHORT[d] ?? "");
+  return names.length > 1 ? `${names.slice(0, -1).join(", ")} & ${names.at(-1)}` : (names[0] ?? "");
+}
+
+/**
+ * Why the server refuses `patch` of `exercise`, or null when it may be saved: the locks the edit
+ * sheet shows (`exerciseLocks`), enforced for every client — a stale device, an older build. A lift
+ * the program calculates can't be archived, stop tracking its max, leave the barbell category or
+ * change its measure; a lift with a strength target can't stop tracking its max. Fields set to what
+ * they already are (and anything else) pass.
+ */
+export function exercisePatchRefusal(
+  exercise: Pick<Exercise, "id" | "name" | "category" | "measure" | "tracksMax" | "archived">,
+  patch: ExerciseEditPatch,
+  settings: Pick<Settings, "program" | "strengthTargets">,
+): string | null {
+  const locks = exerciseLocks(exercise, settings);
+  const dropsMax = patch.tracksMax === false && exercise.tracksMax;
+  if (locks.structure) {
+    const breaks =
+      (patch.archived === true && !exercise.archived) ||
+      dropsMax ||
+      (patch.category !== undefined && patch.category !== exercise.category && patch.category !== "primary") ||
+      (patch.measure !== undefined && patch.measure !== exercise.measure);
+    if (breaks)
+      return `${exercise.name} is ${programDayList(locks.programDays)}'s main lift: the program calculates it, so it keeps its category, measure and max tracking and can't be archived. Change the weekly layout first.`;
+  }
+  if (dropsMax && locks.keepsMax) return `${exercise.name} has a strength target, so it keeps tracking its max.`;
+  return null;
 }
 
 /** An exercise as the edit form holds it. */

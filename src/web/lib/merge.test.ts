@@ -120,6 +120,81 @@ describe("mergeSession", () => {
   });
 });
 
+describe("mergeSession: a set logged vs a stale copy's targets, and measures", () => {
+  const rows = (measure: "reps" | "seconds", sets: SetEntry[], id = "x") => ({
+    id,
+    kind: "accessory" as const,
+    exercises: [{ exerciseId: 10, measure, sets }],
+  });
+  const ancestor = sess([rows("reps", [set("r1", { targetReps: 12 }), set("r2", { targetReps: 12 })])]);
+  const exOf = (s: Session) => s.blocks.find((b) => b.id === "x")!.exercises;
+
+  it("a set logged on either side beats a target-only edit of it on the other", () => {
+    const retargeted = sess([rows("reps", [set("r1", { targetReps: 8 }), set("r2", { targetReps: 8 })])]);
+    const loggedThere = sess([rows("reps", [logged("r1", 12, 50), set("r2", { targetReps: 12 })])]);
+    expect(setsOf(mergeSession(ancestor, retargeted, loggedThere), "x").map((x) => [x.done, x.reps, x.targetReps])).toEqual([
+      [true, 12, 5],
+      [false, null, 8],
+    ]);
+    expect(setsOf(mergeSession(ancestor, loggedThere, retargeted), "x").map((x) => [x.done, x.reps])).toEqual([
+      [true, 12],
+      [false, null],
+    ]);
+  });
+
+  it("H1: a stale device's measure rewrite never unlogs a set logged on the other device", () => {
+    // Device B logged set 1 of Rows (reps); device A, not having seen it, saved Rows rewritten to seconds.
+    const server = sess([rows("reps", [logged("r1", 12, 50), set("r2", { targetReps: 12 })])]);
+    const local = sess([rows("seconds", [set("r1", { targetReps: 30 }), set("r2", { targetReps: 30 })])]);
+    const [ex, ...rest] = exOf(mergeSession(ancestor, local, server));
+    expect(rest).toEqual([]);
+    expect(ex!.measure).toBe("reps");
+    expect(ex!.sets.map((x) => [x.id, x.done, x.reps, x.targetReps])).toEqual([
+      ["r1", true, 12, 5],
+      ["r2", false, null, 12],
+    ]);
+  });
+
+  it("H2: rep sets logged on a stale copy keep their measure over a measure rewrite on the server", () => {
+    // A's rewrite (seconds, nothing logged) landed first; B, still in reps, logged 2×12 @ 50.
+    const server = sess([rows("seconds", [set("r1", { targetReps: 30 }), set("r2", { targetReps: 30 })])]);
+    const local = sess([rows("reps", [logged("r1", 12, 50), logged("r2", 12, 50)])]);
+    const m = mergeSession(ancestor, local, server);
+    const [ex] = exOf(m);
+    expect(ex!.measure).toBe("reps");
+    expect(ex!.sets.map((x) => [x.done, x.reps, x.weight])).toEqual([
+      [true, 12, 50],
+      [true, 12, 50],
+    ]);
+  });
+
+  it("nothing logged on either side: the measure changed here wins, with this side's sets (never mixed)", () => {
+    const server = sess([rows("reps", [set("r1", { targetReps: 10 }), set("r2", { targetReps: 12 })])]);
+    const local = sess([rows("seconds", [set("r1", { targetReps: 45 }), set("r2", { targetReps: 30 })])]);
+    const [ex] = exOf(mergeSession(ancestor, local, server));
+    expect(ex!.measure).toBe("seconds");
+    expect(ex!.sets.map((x) => x.targetReps)).toEqual([45, 30]);
+  });
+
+  it("logged in different measures on both sides: the server's stands, this device's sets are kept apart", () => {
+    const server = sess([rows("reps", [logged("r1", 12, 50), set("r2", { targetReps: 12 })])]);
+    const local = sess([rows("seconds", [logged("r1", 30, 50), set("r2", { targetReps: 30 })])]);
+    const m = mergeSession(ancestor, local, server);
+    const [kept, apart, ...rest] = exOf(m);
+    expect(rest).toEqual([]);
+    expect(kept!.measure).toBe("reps");
+    expect(kept!.sets.map((x) => [x.done, x.reps])).toEqual([
+      [true, 12],
+      [false, null],
+    ]);
+    expect(apart!.measure).toBe("seconds");
+    expect(apart!.sets.map((x) => [x.done, x.reps])).toEqual([[true, 30]]);
+    // Still a valid document: no set id twice.
+    const ids = m.blocks.flatMap((b) => b.exercises.flatMap((e) => e.sets.map((x) => x.id)));
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
 describe("mergeSettings", () => {
   it("takes the keys this device changed (at any depth) and the server's for the rest", () => {
     const local = { ...settings, targets: { ...settings.targets, steps: 12_000 } };

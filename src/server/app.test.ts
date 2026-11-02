@@ -193,6 +193,46 @@ describe("api", () => {
     expect(raw?.weighted).toBe(true);
     await db.execute(sql`delete from exercises where name = 'Raw row'`);
   });
+
+  it("refuses an edit that would take a program day's main lift away, or a targeted lift's max", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const days = Object.values(b.settings.program.days);
+    const mainId = days.find((d) => d.primaryExerciseId != null)!.primaryExerciseId!;
+    const main = b.exercises.find((e) => e.id === mainId)!;
+    for (const patch of [
+      { archived: true },
+      { tracksMax: false },
+      { category: "accessory" },
+      { measure: "seconds" },
+      { name: "X", archived: true },
+    ]) {
+      const res = await req(`/api/exercises/${mainId}`, json("PATCH", patch));
+      expect(res.status, JSON.stringify(patch)).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toMatch(
+        new RegExp(`^${main.name} is .*'s main lift: .*Change the weekly layout first\\.$`),
+      );
+    }
+    // Nothing of a refused patch was written; a rename (or a field set to what it is) passes.
+    const kept = ((await (await req("/api/bootstrap")).json()) as Bootstrap).exercises.find((e) => e.id === mainId);
+    expect(kept).toEqual(main);
+    const ok = await req(
+      `/api/exercises/${mainId}`,
+      json("PATCH", { name: main.name, category: "primary", measure: main.measure, tracksMax: true }),
+    );
+    expect(ok.status).toBe(200);
+
+    // A lift the program doesn't use, with a strength target: it keeps its max (anything else goes).
+    const free = b.exercises.find((e) => e.tracksMax && !e.archived && !days.some((d) => d.primaryExerciseId === e.id))!;
+    const targets = [{ id: "t-lock", exerciseId: free.id, targetLb: 405, setOn: "2026-11-01" }];
+    expect((await req("/api/settings", json("PUT", { ...b.settings, strengthTargets: targets }))).status).toBe(200);
+    const refused = await req(`/api/exercises/${free.id}`, json("PATCH", { tracksMax: false }));
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ error: `${free.name} has a strength target, so it keeps tracking its max.` });
+    expect((await req(`/api/exercises/${free.id}`, json("PATCH", { measure: "reps", archived: false }))).status).toBe(200);
+    expect((await req("/api/settings", json("PUT", b.settings))).status).toBe(200);
+    expect((await req(`/api/exercises/${free.id}`, json("PATCH", { tracksMax: false }))).status).toBe(200);
+    expect((await req(`/api/exercises/${free.id}`, json("PATCH", { tracksMax: true }))).status).toBe(200);
+  });
 });
 
 describe("settings preferences", () => {

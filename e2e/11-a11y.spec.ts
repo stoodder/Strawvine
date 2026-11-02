@@ -125,7 +125,7 @@ test.describe("axe: no serious or critical violations", () => {
     for (const name of ["Sandbag carry", "Bench press"]) {
       await page.goto("/settings");
       await page.getByRole("button", { name: `Edit ${name}`, exact: true }).click();
-      const sheet = page.getByRole("dialog", { name: "Edit exercise" });
+      const sheet = page.getByRole("dialog", { name: `Edit ${name}` });
       await expect(sheet.getByRole("textbox", { name: "Name" })).toHaveValue(name);
       await expectNoSeriousViolations(page, `the edit exercise sheet (${name})`, { minChecked: 0 });
     }

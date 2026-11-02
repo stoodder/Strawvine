@@ -198,6 +198,22 @@ describe("sync details", () => {
     expect(again.getSyncInfo().lastSyncedAt).toBe(info.lastSyncedAt);
   });
 
+  it("shows an exercise edit the server's locks refuse (409 without a document) as a failed change, not a conflict", async () => {
+    const sync = await load();
+    const why =
+      "Bench press is Mon's main lift: the program calculates it, so it keeps its category, measure and max tracking and can't be archived. Change the weekly layout first.";
+    replies = [{ status: 409, body: { error: why } }];
+    sync.enqueue({ kind: "updateExercise", id: 1, patch: { archived: true } });
+    await sync.syncNow();
+    expect(calls.filter((c) => c.method === "PATCH").map((c) => c.path)).toEqual(["/exercises/1"]);
+    const info = sync.getSyncInfo();
+    expect(info).toMatchObject({ pending: 0, failed: 1 });
+    expect(info.items).toEqual([expect.objectContaining({ failed: true, error: why })]);
+    // Dropping it re-reads the server's copy; nothing is re-sent.
+    sync.discardFailed();
+    expect(sync.getSyncInfo()).toMatchObject({ pending: 0, failed: 0 });
+  });
+
   it("pulses a date each time the server confirms a day write for it", async () => {
     const sync = await load();
     const seen: number[] = [];

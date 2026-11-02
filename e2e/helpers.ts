@@ -72,7 +72,8 @@ export const test = base.extend<{ emptyDatabase: boolean; freshDatabase: void; n
       const control = process.env.E2E_CONTROL_URL;
       const fromPage: string[] = [];
       context.on("request", (req) => {
-        if (req.method() === "POST" && new URL(req.url()).pathname === "/api/csp-report") fromPage.push(req.postData()?.slice(0, 300) ?? "");
+        if (req.method() === "POST" && new URL(req.url()).pathname === "/api/csp-report")
+          fromPage.push(req.postData()?.slice(0, 300) ?? "");
       });
       const before = control ? (await cspLog(control)).count : 0;
       await use();
@@ -229,7 +230,7 @@ export async function serverData(page: Page): Promise<Bootstrap> {
 export async function openExerciseEditor(page: Page, name: string) {
   await page.goto("/settings");
   await page.getByRole("button", { name: `Edit ${name}`, exact: true }).click();
-  const sheet = page.getByRole("dialog", { name: "Edit exercise" });
+  const sheet = page.getByRole("dialog", { name: `Edit ${name}` });
   await expect(sheet.getByRole("textbox", { name: "Name" })).toHaveValue(name);
   return sheet;
 }

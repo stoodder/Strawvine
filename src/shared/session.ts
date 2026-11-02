@@ -28,16 +28,21 @@ export function blankSet(partial: Partial<SetEntry> = {}): SetEntry {
 }
 
 /**
- * Whether an exercise tracks a load with its sets. An unknown exercise, or one saved before the
- * flag existed, counts as weighted: a load was shown on everything then.
- */
-export const isWeighted = (ex: Pick<Exercise, "weighted"> | null | undefined): boolean => ex?.weighted !== false;
-
-/**
  * A main lift (tracks a max, or a barbell lift): its sets always carry a load, so whether it is
  * weighted isn't a choice (§6.5).
  */
-export const isMainLift = (e: Pick<Exercise, "tracksMax" | "category">): boolean => e.tracksMax || e.category === "primary";
+export const isMainLift = (e: Partial<Pick<Exercise, "tracksMax" | "category">>): boolean =>
+  e.tracksMax === true || e.category === "primary";
+
+/**
+ * Whether an exercise tracks a load with its sets. A main lift (`isMainLift`) always does, whatever
+ * its stored flag says (the rule is applied when read, so a flag saved off elsewhere can't take a
+ * main lift's load away). An unknown exercise, or one saved before the flag existed, counts as
+ * weighted: a load was shown on everything then.
+ */
+export const isWeighted = (
+  ex: (Pick<Exercise, "weighted"> & Partial<Pick<Exercise, "tracksMax" | "category">>) | null | undefined,
+): boolean => !ex || isMainLift(ex) || ex.weighted !== false;
 
 /** Target for a set of an exercise done for the first time: 10 reps, 30 seconds or 40 meters. */
 export function defaultTarget(measure: Measure): number {
@@ -553,44 +558,87 @@ export function isSessionStarted(session: Session): boolean {
 }
 
 /**
- * `session` after `exercise`'s measure changed (edited in the exercise library), or null when it
- * stays as it is. Only a session still in progress follows — not completed — and in it only the
- * accessory blocks where the exercise has nothing logged yet: those take the new measure, and every
- * set's target resets to the measure's `defaultTarget` (set count, ids and loads kept; whether a
- * load counts is read from the exercise anyway). Where a set is already logged the exercise keeps
- * the measure it was done in, as it does in every completed session: history shows what was done.
+ * An accessory exercise of a session as it is shown and logged now (§6.5). The block keeps the
+ * measure it was saved in, but while nothing of it is logged it follows the exercise's current
+ * `measure` (looked up, like `weighted`): it is presented in that measure with every set's target
+ * at the measure's `defaultTarget` (set count, ids and loads kept; reps entered in the old measure
+ * dropped). Nothing is rewritten — the saved block keeps its own measure and targets, so changing
+ * the measure back brings them back. Once a set is logged the block keeps the measure it was done
+ * in. The same object when nothing differs (an unknown exercise, the same measure, a set logged).
  */
-export function followMeasureChange(session: Session, exercise: Pick<Exercise, "id" | "measure">): Session | null {
-  if (session.completedAt) return null;
+export function effectiveBlockExercise(ex: BlockExercise, exercise: Pick<Exercise, "measure"> | null | undefined): BlockExercise {
+  if (!exercise || ex.measure === exercise.measure || ex.sets.some((x) => x.done)) return ex;
+  const targetReps = defaultTarget(exercise.measure);
+  return { ...ex, measure: exercise.measure, sets: ex.sets.map((x) => ({ ...x, targetReps, reps: null })) };
+}
+
+/** The measure an accessory exercise of a session is shown and logged in (`effectiveBlockExercise`). */
+export function effectiveMeasure(ex: BlockExercise, exercise: Pick<Exercise, "measure"> | null | undefined): Measure {
+  return effectiveBlockExercise(ex, exercise).measure;
+}
+
+const viewMemo = new WeakMap<Session, { exercises: ReadonlyArray<Pick<Exercise, "id" | "measure">>; view: Session }>();
+
+/**
+ * `session` as it is shown and logged: every accessory exercise through `effectiveBlockExercise`.
+ * A completed session is history and shows as saved; the main lift is always counted in reps.
+ * Blocks and exercises that don't change are the same objects (the whole session when nothing
+ * does), so an edit made on the view can be told apart (`savedAfterEdit`). Memoized per session
+ * and exercise list.
+ */
+export function effectiveSession(session: Session, exercises: ReadonlyArray<Pick<Exercise, "id" | "measure">>): Session {
+  if (session.completedAt) return session;
+  const memo = viewMemo.get(session);
+  if (memo && memo.exercises === exercises) return memo.view;
   let changed = false;
   const blocks = session.blocks.map((b) => {
     if (b.kind !== "accessory") return b;
-    let touched = false;
-    const exercises = b.exercises.map((e) => {
-      if (e.exerciseId !== exercise.id || e.measure === exercise.measure || e.sets.some((x) => x.done)) return e;
-      touched = true;
-      const targetReps = defaultTarget(exercise.measure);
-      return { ...e, measure: exercise.measure, sets: e.sets.map((x) => ({ ...x, targetReps, reps: null })) };
-    });
-    if (!touched) return b;
+    const xs = b.exercises.map((e) =>
+      effectiveBlockExercise(
+        e,
+        exercises.find((x) => x.id === e.exerciseId),
+      ),
+    );
+    if (xs.every((e, i) => e === b.exercises[i])) return b;
     changed = true;
-    return { ...b, exercises };
+    return { ...b, exercises: xs };
   });
-  return changed ? { ...session, blocks } : null;
+  const view = changed ? { ...session, blocks } : session;
+  viewMemo.set(session, { exercises, view });
+  return view;
 }
 
 /**
- * The saved sessions that follow a change of `exercise`'s measure (`followMeasureChange`), as they
- * should now be saved: only those dated `fromDate` (today) or later. An earlier session is history;
- * pre-fill and hints already read it against the exercise's current measure.
+ * The session to save after an edit made on `view` (`effectiveSession(stored, …)`). An exercise the
+ * edit touched (a set logged, edited, added or removed, the exercise skipped) is saved as shown: the
+ * effective measure and targets are written into the block in that same save. Every exercise it
+ * didn't touch (still the view's own object, wherever the edit moved it) is saved as it was stored,
+ * so it keeps following the exercise's measure.
  */
-export function sessionsFollowingMeasure(
-  sessions: ReadonlyArray<Session>,
-  exercise: Pick<Exercise, "id" | "measure">,
-  fromDate: ISODate,
-): Session[] {
-  return sessions.flatMap((s) => {
-    const next = s.date >= fromDate ? followMeasureChange(s, exercise) : null;
-    return next ? [next] : [];
+export function savedAfterEdit(edited: Session, view: Session, stored: Session): Session {
+  if (view === stored) return edited;
+  const blockBack = new Map<Block, Block>();
+  const exBack = new Map<BlockExercise, BlockExercise>();
+  for (const b of view.blocks) {
+    const was = stored.blocks.find((x) => x.id === b.id);
+    if (!was || was === b) continue;
+    blockBack.set(b, was);
+    b.exercises.forEach((e, i) => {
+      const s = was.exercises[i];
+      if (s && s !== e) exBack.set(e, s);
+    });
+  }
+  let changed = false;
+  const blocks = edited.blocks.map((b) => {
+    const was = blockBack.get(b);
+    if (was) {
+      changed = true;
+      return was;
+    }
+    const xs = b.exercises.map((e) => exBack.get(e) ?? e);
+    if (xs.every((e, i) => e === b.exercises[i])) return b;
+    changed = true;
+    return { ...b, exercises: xs };
   });
+  return changed ? { ...edited, blocks } : edited;
 }

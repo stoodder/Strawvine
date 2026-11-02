@@ -276,7 +276,7 @@ export type SetEntry = z.infer<typeof setEntrySchema>;
 /**
  * An exercise in a session. `measure` is snapshotted from the exercise: what the sets were counted in
  * when done, so changing the exercise's measure later leaves history as it was (pre-fill, hints and a
- * session in progress follow the exercise's current measure, see `followMeasureChange`). Whether it
+ * session in progress follow the exercise's current measure, see `effectiveSession`). Whether it
  * is weighted is not snapshotted — it is looked up on the exercise (`isWeighted`), so changing the
  * flag applies to the session in progress and to every later pre-fill.
  */

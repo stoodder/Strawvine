@@ -26,6 +26,7 @@ import {
   type Bootstrap,
   type Revs,
   type Session,
+  type Settings,
 } from "../shared/schemas";
 import {
   clearSessionCookie,
@@ -47,6 +48,7 @@ import {
   type LoginLimiterOptions,
   type SessionConfig,
 } from "./auth";
+import { exercisePatchRefusal } from "../shared/exerciseEdit";
 import { buildExport, toDay, toExercise, toMax } from "./backup";
 import type { Db } from "./db/client";
 import { dayLogs, exercises, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
@@ -304,6 +306,9 @@ export function cspViolations(body: unknown): Array<{ directive: string; blocked
 }
 
 const tooLarge = (c: Context) => c.json({ error: "Request body too large" }, 413);
+
+/** An exercise patch the locks refuse (`exercisePatchRefusal`); thrown to roll its transaction back. */
+class PatchRefused extends Error {}
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export const CSP_REPORT_PATH = "/api/csp-report";
@@ -670,13 +675,32 @@ export function createApp(opts: AppOptions) {
     if (!id.success) return c.json(badRequest(id.error), 400);
     const parsed = exercisePatchSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
-    const [row] = await write(c, (tx) =>
-      tx
-        .update(exercises)
-        .set({ ...parsed.data, updatedAt: new Date() })
-        .where(eq(exercises.id, id.data))
-        .returning(),
-    );
+    let row: typeof exercises.$inferSelect | undefined;
+    try {
+      row = await write(c, async (tx) => {
+        const [cur] = await tx.select().from(exercises).where(eq(exercises.id, id.data)).for("update");
+        if (!cur) return undefined;
+        // The edit sheet's locks, enforced for every client (a stale device, an older build): a
+        // program day's main lift stays one, a lift with a strength target keeps its max.
+        const [stored] = await tx.select({ data: settings.data }).from(settings).where(eq(settings.id, 1)).for("share");
+        const s = stored?.data as Partial<Settings> | undefined;
+        const why =
+          s?.program && s.strengthTargets
+            ? exercisePatchRefusal(toExercise(cur), parsed.data, { program: s.program, strengthTargets: s.strengthTargets })
+            : null;
+        if (why) throw new PatchRefused(why);
+        const [out] = await tx
+          .update(exercises)
+          .set({ ...parsed.data, updatedAt: new Date() })
+          .where(eq(exercises.id, id.data))
+          .returning();
+        return out;
+      });
+    } catch (err) {
+      // Nothing was written (the transaction rolled back): the client shows it as a rejected change.
+      if (err instanceof PatchRefused) return c.json({ error: err.message }, 409);
+      throw err;
+    }
     return row ? c.json(toExercise(row)) : c.json({ error: "not found" }, 404);
   });
 
