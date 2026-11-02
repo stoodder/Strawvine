@@ -14,6 +14,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactElement,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
 import { Check, Minus, Plus, X } from "lucide-react";
@@ -764,6 +765,53 @@ function unlockPage() {
   if (window.scrollY !== y) window.scrollTo(window.scrollX, y);
 }
 
+/**
+ * Keeps an open sheet's panel inside what is actually visible: above an on-screen keyboard and
+ * inside any pan the browser makes to show a focused field. iOS Safari (and Chrome on Android, by
+ * default) don't shrink the layout viewport — where `position: fixed` lives — for the keyboard:
+ * it covers the bottom of the window, and the visual viewport shrinks above it and may be panned
+ * down (`offsetTop`) to reveal the field. While the visual viewport is smaller than the overlay,
+ * the overlay carries where it is: `--sheet-bottom` (keyboard height, plus any pan) lifts the
+ * panel's bottom to the keyboard's top, `--sheet-room` caps its height to the visible height (a
+ * little short of it), and `--sheet-safe: 0px` drops the home-indicator inset the keyboard
+ * already covers. Without a keyboard none are set and the panel sits on the window's bottom as
+ * before. Pinch zoom is left alone (the visible area is then a magnified part of the page).
+ * The focused field stays in view inside the (now shorter) panel. Returns the cleanup.
+ */
+function followVisualViewport(overlay: HTMLElement): () => void {
+  const vv = window.visualViewport;
+  if (!vv) return () => {};
+  const vars = ["--sheet-bottom", "--sheet-room", "--sheet-safe"] as const;
+  const update = () => {
+    const box = overlay.getBoundingClientRect();
+    const top = Math.max(0, vv.offsetTop - box.top);
+    const bottom = Math.max(0, box.height - top - vv.height);
+    if (Math.abs(vv.scale - 1) > 0.01 || (top < 1 && bottom < 1)) {
+      vars.forEach((v) => overlay.style.removeProperty(v));
+      return;
+    }
+    overlay.style.setProperty("--sheet-bottom", `${bottom}px`);
+    overlay.style.setProperty("--sheet-room", `${Math.max(0, vv.height - 16)}px`);
+    overlay.style.setProperty("--sheet-safe", "0px");
+    // The panel may have just got shorter: keep the focused field inside its scroller.
+    const panel = overlay.querySelector<HTMLElement>('[role="dialog"]');
+    const field = document.activeElement;
+    if (panel && field instanceof HTMLElement && field !== panel && panel.contains(field)) {
+      const p = panel.getBoundingClientRect();
+      const f = field.getBoundingClientRect();
+      if (f.bottom > p.bottom) panel.scrollTop += f.bottom - p.bottom + 16;
+      else if (f.top < p.top) panel.scrollTop -= p.top - f.top + 16;
+    }
+  };
+  update();
+  vv.addEventListener("resize", update);
+  vv.addEventListener("scroll", update);
+  return () => {
+    vv.removeEventListener("resize", update);
+    vv.removeEventListener("scroll", update);
+  };
+}
+
 /** Whether any Sheet is open (for useSyncExternalStore; e.g. the dock hides behind sheets). */
 export const anySheetOpen = () => openSheets > 0;
 export function subscribeSheets(l: () => void) {
@@ -771,6 +819,10 @@ export function subscribeSheets(l: () => void) {
   return () => void sheetListeners.delete(l);
 }
 
+/**
+ * A modal bottom sheet. Sizing classes passed in `className` can use the visible room above an
+ * on-screen keyboard: `min-h-[min(80dvh,var(--sheet-room,80dvh))]` (see followVisualViewport).
+ */
 export function Sheet({
   open,
   onClose,
@@ -778,6 +830,7 @@ export function Sheet({
   children,
   className,
   ariaLabel,
+  initialFocus,
 }: {
   open: boolean;
   onClose: () => void;
@@ -787,11 +840,24 @@ export function Sheet({
   className?: string;
   /** Accessible name when there is no visible title. */
   ariaLabel?: string;
+  /**
+   * The control to focus when the sheet opens, for touch and keyboard users alike — a sheet
+   * that opens into a search field, say (a phone's keyboard comes up). Use this, not `autoFocus`,
+   * for anything inside a sheet. The panel then comes in where it will stay (a short rise and
+   * fade instead of the slide up from below) and the control is focused within the opening tap
+   * (iOS only raises the keyboard for a focus in a user gesture) with `preventScroll`. A field
+   * focused off screen mid-slide makes iOS scroll the page to reveal it above the keyboard; the
+   * panel then slides on to its place, and the field ends up above the top of the screen.
+   */
+  initialFocus?: RefObject<HTMLElement | null>;
 }) {
   const id = useId();
+  const overlayRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const initialFocusRef = useRef(initialFocus);
+  initialFocusRef.current = initialFocus;
 
   useEffect(() => {
     if (!open) return;
@@ -812,15 +878,22 @@ export function Sheet({
     }
     setOpenSheets(openSheets + 1);
 
-    // Move focus in: keep an autofocused control; keyboard users land on the first control;
-    // touch users get the panel itself (no surprise keyboard).
+    const overlay = overlayRef.current;
+    const stopFollowing = overlay ? followVisualViewport(overlay) : () => {};
+
+    // Move focus in: the sheet's initialFocus; else keyboard users land on the first control and
+    // touch users get the panel itself (no surprise keyboard). Never scroll for it: the panel is
+    // where it will be (initialFocus) or still coming in.
     const panel = panelRef.current;
-    if (panel && !panel.contains(document.activeElement)) {
+    const wanted = initialFocusRef.current?.current;
+    if (panel && wanted && panel.contains(wanted)) wanted.focus({ preventScroll: true });
+    else if (panel && !panel.contains(document.activeElement)) {
       const first = viaKeyboard ? focusables(panel)[0] : undefined;
       (first ?? panel).focus({ preventScroll: true });
     }
 
     return () => {
+      stopFollowing();
       window.removeEventListener("keydown", onKey);
       setOpenSheets(Math.max(0, openSheets - 1));
       if (root && openSheets === 0) root.inert = rootWasInert;
@@ -859,7 +932,7 @@ export function Sheet({
   return createPortal(
     <AnimatePresence>
       {open && (
-        <motion.div className="fixed inset-0 z-50" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+        <motion.div ref={overlayRef} className="fixed inset-0 z-50" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
           <motion.div
             ref={panelRef}
@@ -870,13 +943,14 @@ export function Sheet({
             tabIndex={-1}
             onKeyDown={onPanelKeyDown}
             className={clsx(
-              "absolute inset-x-0 bottom-0 mx-auto max-h-[88dvh] max-w-lg overflow-y-auto overscroll-contain rounded-t-[28px] bg-ink-850/95 px-5 pt-3 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] shadow-[0_-20px_60px_-20px_rgba(0,0,0,0.8)] outline-none backdrop-blur-xl",
+              "absolute inset-x-0 bottom-[var(--sheet-bottom,0px)] mx-auto max-h-[min(88dvh,var(--sheet-room,88dvh))] max-w-lg overflow-y-auto overscroll-contain rounded-t-[28px] bg-ink-850/95 px-5 pt-3 pb-[calc(var(--sheet-safe,env(safe-area-inset-bottom))+1.5rem)] shadow-[0_-20px_60px_-20px_rgba(0,0,0,0.8)] outline-none backdrop-blur-xl",
               className,
             )}
-            initial={{ y: "100%" }}
-            animate={{ y: 0 }}
+            // Opening into a field: in place (see initialFocus), else up from below.
+            initial={initialFocus ? { y: 24, opacity: 0 } : { y: "100%" }}
+            animate={{ y: 0, opacity: 1 }}
             exit={{ y: "100%" }}
-            transition={{ type: "spring", stiffness: 380, damping: 38 }}
+            transition={{ type: "spring", stiffness: 380, damping: 38, opacity: { duration: 0.18 } }}
             drag="y"
             dragConstraints={{ top: 0, bottom: 0 }}
             dragElastic={{ top: 0, bottom: 0.6 }}

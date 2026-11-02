@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Search } from "lucide-react";
 import type { Exercise, ExerciseCategory, Measure } from "../../../shared/schemas";
 import { isMainLift } from "../../../shared/session";
@@ -31,6 +31,7 @@ export function AddExerciseSheet({
   const loadChoice = !isMainLift({ tracksMax: false, category });
   const weighted = !loadChoice || (weightedPick ?? defaultWeighted(measure, category));
   const [busy, setBusy] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const list = useMemo(() => {
     const active = exercises.filter((e) => !e.archived);
@@ -64,7 +65,9 @@ export function AddExerciseSheet({
   };
 
   return (
-    <Sheet open={open} onClose={close} title={title} className="min-h-[80dvh]">
+    // Search first: the field has focus (and a phone's keyboard is up) as the sheet opens. Tall
+    // so the list doesn't jump as it filters, but never taller than the room above a keyboard.
+    <Sheet open={open} onClose={close} title={title} initialFocus={searchRef} className="min-h-[min(80dvh,var(--sheet-room,80dvh))]">
       <div className="box-field flex items-center gap-3 rounded-2xl bg-white/[0.05] px-4 py-3">
         <Search size={16} className="text-mute" aria-hidden />
         <input
@@ -73,7 +76,7 @@ export function AddExerciseSheet({
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search or create…"
           className="field field-plain flex-1 text-base"
-          autoFocus
+          ref={searchRef}
         />
       </div>
 
