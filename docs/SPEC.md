@@ -225,7 +225,8 @@ optional note.
   (farmer's / sandbag carry), and unloaded reps, time or distance (pull-ups, a plank, a run). The flag is chosen when the
   exercise is created (Load: "Weighted" / "Unweighted") and can be changed later (**Edit exercise**, below). Until the athlete
   picks, the default follows the choices above it: weighted for reps (except core and conditioning) and for carries,
-  unweighted otherwise. Main lifts (barbell category or tracking a max) are always weighted and offer no choice. An
+  unweighted otherwise. Main lifts (barbell category or tracking a max) are always weighted and offer no choice — the
+  rule is applied wherever the flag is read, so a main lift counts as weighted even if its stored flag says otherwise. An
   exercise created without saying (older clients, imports of backups from before the flag) is weighted. Seeds: the main
   lifts and the carries are weighted, pull-ups are not. On upgrade, existing exercises that were never logged or
   planned with a load (and aren't main lifts, max-tracked or strength targets) became unweighted, once.
@@ -243,18 +244,27 @@ optional note.
 - **Edit exercise:** every exercise can be edited — from its row in Settings → Exercise library, or from its options in a
   session — with the create card's controls: name, category, measure ("Measured in"), load (not offered on a main lift,
   which is always weighted; making an exercise a main lift turns its load on) and max tracking; it can also be
-  archived (with Undo) or restored. Saving sends only the fields that changed, as one patch, so edits of different
-  fields from two devices both survive. A lift a program day calculates as its main lift keeps its category, measure
-  and max tracking and can't be archived (the sheet says which days use it; change the weekly layout first); only its
-  name is free. A lift with a strength target keeps tracking its max.
-  - **Changing the measure** never rewrites history: each session keeps the measure its sets were done in (it is
-    stored with the session's exercise), so past sessions, their volume and PRs read as they were done. From then on
-    the exercise's current measure rules: when next week's pre-fill, an exercise added by hand or a skipped exercise
-    carries from a performance in another measure, the set count carries (and the loads, if weighted, scaled as
-    usual) but every target resets to the new measure's default (10 reps, 30 seconds, 40 meters); progression hints
-    pass over performances in another measure. A saved session from today on that isn't completed follows at once
-    where the exercise has nothing logged yet (new measure, targets reset, loads kept); where a set is already logged
-    it keeps the old measure.
+  archived (with Undo; archiving sends only that, so Undo fully reverts it) or restored. Saving sends only the fields
+  that changed, as one patch, so edits of different fields from two devices both survive. Closing the sheet with
+  unsaved changes (Escape, the backdrop, a swipe down, Close) asks "Discard changes?" first. A lift a program day
+  calculates as its main lift keeps its category, measure and max tracking and can't be archived (the sheet says which
+  days use it and links to the weekly layout; change that first); only its name is free. A lift with a strength target
+  keeps tracking its max. The server enforces both locks for every client (a stale device, an older build): a patch
+  that would archive such a lift, turn its max tracking off, move it out of the barbell category or change its measure
+  — or turn off max tracking on a lift with a strength target — is refused (409 with the reason, nothing written), and
+  the change shows as not saved in Settings → Sync.
+  - **Changing the measure** saves the exercise only; no session is rewritten. Each session's exercise keeps the
+    measure it was saved in, so past sessions, their volume and PRs read as they were done. What follows the change is
+    worked out when a session is read, the way the weighted flag is: in a session not yet finished (whatever its
+    date), an accessory exercise with **nothing logged** whose saved measure differs from the exercise's current one is
+    shown — and logged — in the current measure, every target at that measure's default (10 reps, 30 seconds, 40
+    meters; set count and loads kept). Its saved targets stay as they were, so changing the measure back before logging
+    brings them back. Logging its first set (or editing, adding or removing a set, or skipping it) writes the shown
+    measure and targets into that exercise in the same save; once a set is logged the exercise keeps that measure.
+    Elsewhere the exercise's current measure rules too: when next week's pre-fill, an exercise added by hand or a
+    skipped exercise carries from a performance in another measure, the set count carries (and the loads, if weighted,
+    scaled as usual) but every target resets to the new measure's default; progression hints are read in the measure
+    the session's exercise is shown in and pass over performances in another measure.
 - Sessions pre-fill from the last session of the same day type (exercises, sets, target reps, last weights). Reps
   carry over as **targets** — a missed rep never becomes next week's target (sets added without a target carry what was
   done). On deload weeks accessory loads pre-fill at 80% — for weighted holds and carries too; deload loads never carry
@@ -325,7 +335,10 @@ optional note.
   create's idempotency check, so one sent by an older window (which drops it) and retried by a newer one replays. When
   that saved an unweighted create as weighted, the next current window patches it back. Exercise edits are patches of
   the changed fields only: edits queued offline merge field by field (the later value of a field wins), and the server
-  sets only the fields a patch names, so another device's edit of a different field survives. Exports are version 3
+  sets only the fields a patch names, so another device's edit of a different field survives. A patch the exercise
+  locks refuse (§6.5: a program day's main lift, a lift with a strength target) is answered 409 with the reason and no
+  document — not a version conflict, so it isn't merged or re-sent: it shows as a change not saved (Retry / Discard)
+  with that reason. A measure change sends no workout: sessions follow it when read (§6.5). Exports are version 3
   (exercises carry `weighted`); older ones restore every exercise as weighted. Migration 0006 turned the flag off once
   for existing exercises with no sign of a load (not main lifts or max-tracked, no max entry, strength target, program
   day or logged/planned load).
@@ -335,9 +348,15 @@ optional note.
   carries the revision it was made on; when another device saved the document since, the server answers 409 with its
   copy and the edit is merged onto it and sent once more ("Merged changes from another device"):
   - workouts merge per set (by id; two sessions built separately on two devices are paired up main lift to main lift,
-    accessory blocks by their exercises, sets in order): a set logged or edited on this device wins; sets and blocks only
-    the other device has are kept; something one device removed stays removed unless the other changed it; the
-    workout's own fields (notes, finish, skip) merge like settings;
+    accessory blocks by their exercises, sets in order): a set logged or edited on this device wins — except that a set
+    logged on either device beats an edit of the same unlogged set's targets on the other; sets and blocks only the
+    other device has are kept; something one device removed stays removed unless the other changed it; the workout's
+    own fields (notes, finish, skip) merge like settings;
+  - sets in two measures are never mixed: when the two copies of an exercise disagree on its measure, the copy holding
+    logged sets decides (its measure and sets; the other's are unlogged targets meant for another measure); with nothing
+    logged on either, the measure this device changed (else the server's) with that copy's sets; with logged sets on
+    both in different measures, the server's copy stands and this device's logged sets are kept apart, as a second
+    entry of the exercise in their own measure right after it — never mixed in or dropped;
   - exercises are matched by the sets they hold (not their position), so splitting or joining a superset on one device
     while the other logs never duplicates an exercise or a set; a set added on both devices keeps both;
   - if the merge leaves two main lifts (a session rebuilt on one device), the one matching the session's plan is kept and

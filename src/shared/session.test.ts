@@ -10,7 +10,9 @@ import {
   buildSessionFrom,
   defaultTarget,
   effectiveTargetWeight,
-  followMeasureChange,
+  effectiveBlockExercise,
+  effectiveMeasure,
+  effectiveSession,
   isWeighted,
   logAtTargets,
   loggedWeightFor,
@@ -21,7 +23,7 @@ import {
   planMatches,
   planSignature,
   sessionCounts,
-  sessionsFollowingMeasure,
+  savedAfterEdit,
   sessionVolume,
   setsForAddedExercise,
   shownLoad,
@@ -377,7 +379,9 @@ describe("accessoryHint", () => {
         {
           id: "b",
           kind: "accessory",
-          exercises: [{ exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 12, reps: 12, targetWeight: 25, weight: null, done: true })] }],
+          exercises: [
+            { exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 12, reps: 12, targetWeight: 25, weight: null, done: true })] },
+          ],
         },
       ],
     };
@@ -389,19 +393,40 @@ describe("accessoryHint", () => {
     });
     expect(accessoryHint(10, "2026-11-16", [unloaded], 5, W)).toBeNull();
     // Some sets with a load and some without: no hint (the load progression is unclear).
-    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, 12, 40, true], [12, 12, null, true]])], 5, W)).toBeNull();
+    expect(
+      accessoryHint(
+        10,
+        "2026-11-16",
+        [
+          sess("2026-11-09", [
+            [12, 12, 40, true],
+            [12, 12, null, true],
+          ]),
+        ],
+        5,
+        W,
+      ),
+    ).toBeNull();
   });
 
   it("takes the measure from the entry that was logged when the exercise appears twice", () => {
     const twice: Session = {
       ...sess("2026-11-09", []),
       blocks: [
-        { id: "a", kind: "accessory", exercises: [{ exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 12, targetWeight: 25 })] }] },
+        {
+          id: "a",
+          kind: "accessory",
+          exercises: [{ exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 12, targetWeight: 25 })] }],
+        },
         {
           id: "b",
           kind: "accessory",
           exercises: [
-            { exerciseId: 10, measure: "seconds", sets: [blankSet({ targetReps: 30, reps: 30, targetWeight: 25, weight: 25, done: true })] },
+            {
+              exerciseId: 10,
+              measure: "seconds",
+              sets: [blankSet({ targetReps: 30, reps: 30, targetWeight: 25, weight: 25, done: true })],
+            },
           ],
         },
       ],
@@ -478,6 +503,12 @@ describe("isWeighted / setsForAddedExercise", () => {
     expect(isWeighted(null)).toBe(true);
   });
 
+  it("counts a main lift as weighted whatever its stored flag says", () => {
+    expect(isWeighted({ weighted: false, tracksMax: true, category: "accessory" })).toBe(true);
+    expect(isWeighted({ weighted: false, tracksMax: false, category: "primary" })).toBe(true);
+    expect(isWeighted({ weighted: false, tracksMax: false, category: "core" })).toBe(false);
+  });
+
   const plan = (date: string) => buildSession(date, { settings, exercises: [], maxEntries: [], sessions: [] });
   const withBlock = (date: string, exs: BlockExercise[], kind: "accessory" | "primary" = "accessory"): Session => ({
     ...plan(date),
@@ -544,7 +575,9 @@ describe("isWeighted / setsForAddedExercise", () => {
       [40, 100],
     ]);
     // Added by hand to the same day instead: the same sets (scaled back up from 80%, targets kept).
-    expect(targets(setsForAddedExercise(carry, plan("2026-12-11"), { settings, sessions: [deloadFriday] }))).toEqual(targets(prefilled.sets));
+    expect(targets(setsForAddedExercise(carry, plan("2026-12-11"), { settings, sessions: [deloadFriday] }))).toEqual(
+      targets(prefilled.sets),
+    );
   });
 
   it("deloads into a deload week, and prefers a normal week's performance", () => {
@@ -983,46 +1016,89 @@ describe("changing an exercise's measure", () => {
     });
   });
 
-  describe("the session in progress", () => {
+  describe("a saved session (shown in the current measure, never rewritten)", () => {
     const today = "2026-11-16";
     const open = withAcc(today, {
       exerciseId: 30,
       measure: "reps",
-      sets: [blankSet({ id: "a", targetReps: 12, targetWeight: 90 }), blankSet({ id: "b", targetReps: 12, targetWeight: 95 })],
+      sets: [blankSet({ id: "a", targetReps: 12, targetWeight: 90 }), blankSet({ id: "b", targetReps: 8, targetWeight: 95, reps: 7 })],
     });
+    const stored = open.blocks[0]!.exercises[0]!;
 
-    it("follows the change while nothing of it is logged: new measure, default targets, same sets and loads", () => {
-      const next = followMeasureChange(open, { id: 30, measure: "seconds" })!;
-      const ex = next.blocks[0]!.exercises[0]!;
+    it("shows an exercise with nothing logged in the new measure: default targets, same sets and loads", () => {
+      const ex = effectiveBlockExercise(stored, { measure: "seconds" });
       expect(ex.measure).toBe("seconds");
-      expect(ex.sets.map((s) => [s.id, s.targetReps, s.targetWeight])).toEqual([
-        ["a", 30, 90],
-        ["b", 30, 95],
+      expect(ex.sets.map((s) => [s.id, s.targetReps, s.targetWeight, s.reps])).toEqual([
+        ["a", 30, 90, null],
+        ["b", 30, 95, null],
       ]);
-      expect(next.date).toBe(today);
-      // Already in that measure, or another exercise: nothing to do.
-      expect(followMeasureChange(open, { id: 30, measure: "reps" })).toBeNull();
-      expect(followMeasureChange(open, { id: 31, measure: "seconds" })).toBeNull();
+      expect(effectiveMeasure(stored, { measure: "meters" })).toBe("meters");
+      // The saved block is untouched: flipping back shows its own targets again.
+      expect(stored.measure).toBe("reps");
+      expect(effectiveBlockExercise(stored, { measure: "reps" })).toBe(stored);
+      expect(effectiveBlockExercise(stored, undefined)).toBe(stored);
     });
 
-    it("leaves an exercise with a logged set, a completed session and the main lift alone", () => {
-      const started = withAcc(today, { exerciseId: 30, measure: "reps", sets: [logged(12, 12, 90), blankSet({ targetReps: 12 })] });
-      expect(followMeasureChange(started, { id: 30, measure: "seconds" })).toBeNull();
-      expect(followMeasureChange({ ...open, completedAt: "2026-11-16T18:00:00Z" }, { id: 30, measure: "seconds" })).toBeNull();
+    it("keeps the measure of an exercise with a logged set, a completed session and the main lift", () => {
+      const started: BlockExercise = { exerciseId: 30, measure: "reps", sets: [logged(12, 12, 90), blankSet({ targetReps: 12 })] };
+      expect(effectiveBlockExercise(started, { measure: "seconds" })).toBe(started);
+      const lib = library("seconds");
+      const done = { ...open, completedAt: "2026-11-16T18:00:00Z" };
+      expect(effectiveSession(done, lib)).toBe(done);
       const main: Session = { ...open, blocks: [{ ...open.blocks[0]!, kind: "primary" }] };
-      expect(followMeasureChange(main, { id: 30, measure: "seconds" })).toBeNull();
+      expect(effectiveSession(main, lib)).toBe(main);
+      expect(effectiveSession(open, library("reps"))).toBe(open);
     });
 
-    it("only touches the blocks it changes, and only sessions from today on", () => {
+    it("follows in any session not finished yet — yesterday's too — and only changes the blocks it shows differently", () => {
       const other: BlockExercise = { exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 8 })] };
-      const two: Session = { ...open, blocks: [{ id: "x", kind: "accessory", exercises: [other] }, ...open.blocks] };
-      const next = followMeasureChange(two, { id: 30, measure: "meters" })!;
-      expect(next.blocks[0]).toBe(two.blocks[0]);
-      expect(next.blocks[1]!.exercises[0]!.sets.map((s) => s.targetReps)).toEqual([40, 40]);
+      const yesterday: Session = {
+        ...open,
+        date: addDays(today, -1),
+        blocks: [{ id: "x", kind: "accessory", exercises: [other] }, ...open.blocks],
+      };
+      const lib = library("meters");
+      const view = effectiveSession(yesterday, lib);
+      expect(view.blocks[0]).toBe(yesterday.blocks[0]);
+      expect(view.blocks[1]!.exercises[0]!.measure).toBe("meters");
+      expect(view.blocks[1]!.exercises[0]!.sets.map((s) => s.targetReps)).toEqual([40, 40]);
+      // Memoized: the same view for the same session and library.
+      expect(effectiveSession(yesterday, lib)).toBe(view);
+    });
 
-      const yesterday = { ...open, date: "2026-11-15" };
-      const followed = sessionsFollowingMeasure([yesterday, open, repsMonday], { id: 30, measure: "seconds" }, today);
-      expect(followed.map((s) => s.date)).toEqual([today]);
+    it("saves the shown measure and targets only for the exercise an edit touched", () => {
+      const other: BlockExercise = { exerciseId: 30, measure: "reps", sets: [blankSet({ id: "c", targetReps: 6 })] };
+      const two: Session = { ...open, blocks: [...open.blocks, { id: "y", kind: "accessory", exercises: [other] }] };
+      const view = effectiveSession(two, library("seconds"));
+      // Untouched (notes, finishing): saved exactly as stored.
+      expect(savedAfterEdit({ ...view, notes: "felt good" }, view, two)).toEqual({ ...two, notes: "felt good" });
+      // The first set logged: that block now holds the measure and targets it was logged at.
+      const first = view.blocks[0]!.exercises[0]!;
+      const logged1: Session = {
+        ...view,
+        blocks: [
+          { ...view.blocks[0]!, exercises: [{ ...first, sets: [logAtTargets(first.sets[0]!, true), first.sets[1]!] }] },
+          view.blocks[1]!,
+        ],
+      };
+      const saved = savedAfterEdit(logged1, view, two);
+      expect(saved.blocks[0]!.exercises[0]!.measure).toBe("seconds");
+      expect(saved.blocks[0]!.exercises[0]!.sets.map((s) => [s.targetReps, s.reps, s.done])).toEqual([
+        [30, 30, true],
+        [30, null, false],
+      ]);
+      // The other block, untouched, still follows the exercise (stored as it was).
+      expect(saved.blocks[1]).toBe(two.blocks[1]);
+      // Moved by the edit (split out of a block), still untouched: stored as it was.
+      const moved: Session = {
+        ...view,
+        blocks: [view.blocks[0]!, { id: "z", kind: "accessory", exercises: [view.blocks[1]!.exercises[0]!] }],
+      };
+      expect(savedAfterEdit(moved, view, two).blocks[1]!.exercises[0]).toBe(other);
+      // Nothing shown differently: the edit as made.
+      const plain = effectiveSession(two, library("reps"));
+      const edit = { ...plain, notes: "x" };
+      expect(savedAfterEdit(edit, plain, two)).toBe(edit);
     });
   });
 });

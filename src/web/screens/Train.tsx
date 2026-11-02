@@ -27,6 +27,7 @@ import {
   blankSet,
   buildSession,
   buildSessionFrom,
+  effectiveSession,
   effectiveTargetWeight,
   isSessionStarted,
   isWeighted,
@@ -35,6 +36,7 @@ import {
   newId,
   nextSetAfter,
   planChanged,
+  savedAfterEdit,
   sessionCounts,
   sessionDoneEarly,
   sessionVolume,
@@ -182,7 +184,13 @@ export function TrainScreen() {
     draftCache.current = { sig, session: fresh };
     return fresh;
   }, [saved, fresh]);
-  const session = saved ?? draft!;
+  /** The session as saved (or the live draft). */
+  const stored = saved ?? draft!;
+  /**
+   * What the screen shows and logs: an exercise with nothing logged follows the exercise's current
+   * measure (`effectiveSession`). Edits are made on it; `commit` saves only what they touched.
+   */
+  const session = effectiveSession(stored, data.exercises);
   const isPlannedDay = !!programDay || !!saved;
   /** The cycle week the header shows: a moved session's own program day's (it may be another week). */
   const pos = cyclePosition(program, session.plannedFor ?? date);
@@ -258,9 +266,10 @@ export function TrainScreen() {
     },
   ) => {
     if (isPreview) return;
-    const before = session;
+    const before = stored;
     const wasDraft = !saved;
-    const next = settled(edited);
+    // Exercises the edit didn't touch are saved as stored: they keep following their exercise.
+    const next = settled(savedAfterEdit(edited, session, stored));
     saveSession(next);
     if (!undo) return;
     offerUndo(
@@ -524,7 +533,7 @@ export function TrainScreen() {
   const canRevert = !!saved && !!plannedFor && !isPreview && !isSessionStarted(session) && !session.completedAt;
   /** Drop a moved session: today shows its own plan again (Undo restores the moved one). */
   const revertToTodaysPlan = () => {
-    const before = session;
+    const before = stored;
     // Notes written on the moved session (or carried into it by "Replace") stay with the day.
     if (session.notes) saveSession({ ...fresh, label: programDay ? fresh.label : "Extra session", notes: session.notes });
     else deleteSession(date);
@@ -1178,8 +1187,9 @@ export function TrainScreen() {
                             ? null
                             : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, {
                                 weighted,
-                                // Only performances in the exercise's current measure (it may have been changed).
-                                measure: exById(e.exerciseId)?.measure ?? e.measure,
+                                // Only performances in the measure this block is shown and logged in:
+                                // the exercise's current one, or the one its logged sets were done in.
+                                measure: e.measure,
                               });
                         const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
                         return (
@@ -1364,7 +1374,7 @@ export function TrainScreen() {
                     type="button"
                     className="label min-h-11 px-3 text-mute"
                     onClick={() => {
-                      const before = session;
+                      const before = stored;
                       deleteSession(date);
                       offerUndo(earlyDone ? "Session discarded" : "Reset to plan", () => saveSession(before));
                     }}
@@ -1452,7 +1462,7 @@ export function TrainScreen() {
         onApply={async (gain, reps) => {
           if (!amrap || !amrapFound || !primaryMax) return;
           const g = progressionGain(program, amrapFound.set.targetReps ?? 0, reps) || gain;
-          const fromSession = cachedSession(date) ?? session;
+          const fromSession = cachedSession(date) ?? stored;
           if (findSet(fromSession, amrap)?.set.appliedProgressionLb) return; // already applied
           const loggedWeight = findSet(fromSession, amrap)?.set.weight ?? amrapFound.set.targetWeight;
           // Queue the max and record the bump on the set in the same step (no waiting for the
@@ -1493,6 +1503,23 @@ export function TrainScreen() {
       <Sheet open={!!actionsEx} onClose={() => setActions(null)} title={actionsEx ? exName(actionsEx.exerciseId) : ""}>
         {actions && actionsBlock && actionsEx && (
           <div className="pb-2">
+            {exById(actionsEx.exerciseId) && (
+              <button
+                type="button"
+                aria-haspopup="dialog"
+                className="tap mb-6 flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
+                onClick={() => {
+                  setEditingExercise({ id: actionsEx.exerciseId, ref: actions });
+                  setActions(null);
+                }}
+              >
+                <Pencil size={16} aria-hidden className="shrink-0 text-mute" />
+                <span className="min-w-0">
+                  Edit exercise
+                  <span className="block text-xs text-fg-2">Name, category, measure, load, max · every session</span>
+                </span>
+              </button>
+            )}
             {(() => {
               // "Log as planned": this exercise's open sets, and for a superset the next round / the whole block.
               const exOpen = actionsEx.sets.filter(loggable).length;
@@ -1658,23 +1685,6 @@ export function TrainScreen() {
                   <span>
                     Split out of superset
                     {blocksFull && <span className="block text-xs text-fg-2">A session holds up to {MAX_BLOCKS} blocks</span>}
-                  </span>
-                </button>
-              )}
-              {exById(actionsEx.exerciseId) && (
-                <button
-                  type="button"
-                  aria-haspopup="dialog"
-                  className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
-                  onClick={() => {
-                    setEditingExercise({ id: actionsEx.exerciseId, ref: actions });
-                    setActions(null);
-                  }}
-                >
-                  <Pencil size={16} className="shrink-0 text-mute" />
-                  <span>
-                    Edit exercise
-                    <span className="block text-xs text-fg-2">Name, category, measure, load</span>
                   </span>
                 </button>
               )}

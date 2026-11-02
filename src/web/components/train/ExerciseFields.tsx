@@ -60,12 +60,14 @@ export function ChoiceChip({
   disabled?: boolean;
   children: string;
 }) {
+  // Locked chips stay focusable (aria-disabled, not disabled): Tab reaches them, and with them the
+  // group's note saying why they're locked. Activating one does nothing.
   return (
     <button
       type="button"
       aria-pressed={on}
-      disabled={disabled}
-      onClick={onClick}
+      aria-disabled={disabled || undefined}
+      onClick={disabled ? undefined : onClick}
       className={clsx(
         "chip min-h-9 gap-1",
         on ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2",
@@ -114,7 +116,7 @@ export function ChipGroup<K extends string>({
 /**
  * Category, "Measured in" and Load chip groups (labelled `${idPrefix}-category` …). The Load
  * choice is offered only off the main lifts (`isMainLift`): a main lift is always weighted.
- * `locked` disables the category and measure (a lift the program calculates); `lockNoteId` names
+ * `locked` locks the category and measure (a lift the program calculates: aria-disabled chips); `lockNoteId` names
  * the note that says why. `measureNote` / `loadNote` add a line under those groups.
  */
 export function ExerciseFields({
