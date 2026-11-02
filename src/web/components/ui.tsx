@@ -25,17 +25,25 @@ export function Section({
   right,
   children,
   className,
+  id,
 }: {
   label: ReactNode;
   right?: ReactNode;
   children: ReactNode;
   className?: string;
+  /**
+   * Makes the section a jump target (`#id`): it scrolls in with room above it (and the safe
+   * area), and its heading can take focus (`[data-section-heading]`, tabIndex −1).
+   */
+  id?: string;
 }) {
   return (
-    <section className={clsx("mt-10", className)}>
+    <section id={id} className={clsx("mt-10", id && "scroll-mt-[calc(env(safe-area-inset-top)+1.25rem)]", className)}>
       {/* When the row runs out of room (narrow screens, zoom), `right` wraps under the label, right-aligned. */}
       <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
-        <h2 className="label shrink-0">{label}</h2>
+        <h2 className="label shrink-0" tabIndex={id ? -1 : undefined} data-section-heading={id ? "" : undefined}>
+          {label}
+        </h2>
         <div className="rule min-w-4 flex-1" />
         {right && <div className="ml-auto flex shrink-0 items-center">{right}</div>}
       </div>

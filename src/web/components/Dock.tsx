@@ -6,6 +6,7 @@
  *   <DockProvider>…app…</DockProvider>               // once, near the root
  *   <DockItem id="rest" priority={DOCK_PRIORITY.rest}>{pill}</DockItem>
  *   const reserve = useDockHeight();                  // px the stack currently takes
+ *   const top = useDockTop();                         // viewport y above which nothing floats
  *
  * Items keep their React context (they are portals), so a DockItem can live anywhere in the tree.
  * Higher priority sits closer to the nav; ties keep mount order. The stack is portaled to
@@ -51,6 +52,8 @@ interface DockApi {
 
 const DockContext = createContext<DockApi | null>(null);
 const DockHeightContext = createContext(0);
+/** null outside a provider: useDockTop falls back to the viewport height. */
+const DockTopContext = createContext<number | null>(null);
 
 let seq = 0;
 /** Gap between the nav (or the screen edge) and the stack, and between items. */
@@ -63,6 +66,7 @@ export function DockProvider({ children }: { children: ReactNode }) {
   const [anchor, setAnchorEl] = useState<HTMLElement | null>(null);
   const [base, setBase] = useState<number | null>(null);
   const [height, setHeight] = useState(0);
+  const [top, setTop] = useState<number | null>(null);
   const sheetOpen = useSyncExternalStore(subscribeSheets, anySheetOpen, anySheetOpen);
 
   const update = useCallback(() => setVersion((v) => v + 1), []);
@@ -118,25 +122,47 @@ export function DockProvider({ children }: { children: ReactNode }) {
     return () => ro.disconnect();
   }, []);
 
+  // The stack's top edge in the viewport. An empty stack has no height, so its top is where it
+  // would start (just above the nav). Re-measured when the stack or the nav changes size and on
+  // viewport resizes (rotation, the on-screen keyboard).
+  useLayoutEffect(() => {
+    const stack = stackRef.current;
+    if (!stack) return;
+    const measure = () => {
+      const r = stack.getBoundingClientRect();
+      // No layout (jsdom, display: none): fall back to the viewport's bottom edge.
+      setTop(r.top <= 0 && r.height === 0 ? window.innerHeight : Math.round(Math.min(window.innerHeight, r.top)));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    window.visualViewport?.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.visualViewport?.removeEventListener("resize", measure);
+    };
+  }, [base, height]);
+
   return (
     <DockContext.Provider value={api}>
       <DockHeightContext.Provider value={height}>
-        {children}
-        {createPortal(
-          <div
-            ref={stackRef}
-            data-dock=""
-            // A landmark, so toasts / the rest timer / the sync pill can be found outside #root.
-            role="region"
-            aria-label="Notifications"
-            className="pointer-events-none fixed inset-x-0 z-[55] mx-auto flex max-w-lg flex-col items-center px-5"
-            style={{
-              gap: GAP_PX,
-              bottom: base !== null ? `${base + GAP_PX}px` : `calc(env(safe-area-inset-bottom) + 1rem)`,
-            }}
-          />,
-          document.body,
-        )}
+        <DockTopContext.Provider value={top}>
+          {children}
+          {createPortal(
+            <div
+              ref={stackRef}
+              data-dock=""
+              // A landmark, so toasts / the rest timer / the sync pill can be found outside #root.
+              role="region"
+              aria-label="Notifications"
+              className="pointer-events-none fixed inset-x-0 z-[55] mx-auto flex max-w-lg flex-col items-center px-5"
+              style={{
+                gap: GAP_PX,
+                bottom: base !== null ? `${base + GAP_PX}px` : `calc(env(safe-area-inset-bottom) + 1rem)`,
+              }}
+            />,
+            document.body,
+          )}
+        </DockTopContext.Provider>
       </DockHeightContext.Provider>
     </DockContext.Provider>
   );
@@ -196,4 +222,15 @@ export function useDockAnchor(ref: RefObject<HTMLElement | null>) {
 /** Current height of the dock stack in px (0 when empty) — reserve it at the end of content if needed. */
 export function useDockHeight(): number {
   return useContext(DockHeightContext);
+}
+
+/**
+ * The viewport y of the dock's top edge: content below it is covered by the dock (rest pill,
+ * toasts, sync pill) or the nav under it. With nothing docked it is the top of the nav (where the
+ * stack would start); outside a <DockProvider>, `window.innerHeight`. Updates when the stack or
+ * the nav changes size and when the viewport resizes. For scroll helpers ("reveal above the dock").
+ */
+export function useDockTop(): number {
+  const top = useContext(DockTopContext);
+  return top ?? (typeof window === "undefined" ? 0 : window.innerHeight);
 }

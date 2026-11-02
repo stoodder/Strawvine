@@ -311,6 +311,7 @@ function NextUp({ current }: { current: number }) {
 /** Heatmap cell gap and the smallest cell worth showing (WCAG 2.5.8: targets ≥ 24px). */
 const HEAT_GAP = 3;
 const HEAT_MIN_CELL = 25;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
 /**
  * Up to 16 weeks of days, Monday-first columns — as many weeks as fit with cells of at least
@@ -383,62 +384,87 @@ function Heatmap() {
     (c.v >= 1 ? `closed, all ${c.total} done` : c.done ? `${c.done} of ${c.total} done` : "nothing logged") +
     (c.date === today ? " (today)" : "");
 
+  // Month names over the columns where a new month starts (by the week's Monday), not the first one.
+  const months = cols.map((col, i) => {
+    const m = col[0]!.date.slice(5, 7);
+    return i > 0 && m !== cols[i - 1]![0]!.date.slice(5, 7) ? MONTHS[Number(m) - 1]! : null;
+  });
+
   return (
-    <div
-      ref={gridRef}
-      className="mt-8 flex justify-between"
-      style={{ gap: HEAT_GAP }}
-      role="group"
-      aria-label={`${summary} Choose a day to open it.`}
-    >
-      {cols.map((col, i) => (
-        <div key={i} className="flex min-w-0 flex-1 flex-col" style={{ gap: HEAT_GAP }}>
-          {col.map((c, d) => {
-            const idx = i * 7 + d;
-            const style = {
-              background:
-                c.v < 0
-                  ? "transparent"
-                  : c.v >= 1
-                    ? "var(--color-accent)"
-                    : c.v > 0
-                      ? `rgb(183 243 106 / ${0.08 + c.v * 0.3})`
-                      : "rgba(255,255,255,0.04)",
-              boxShadow: c.v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
-            };
-            const motionProps = { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { delay: i * 0.02 } };
-            // Today's ring is drawn by ::after, so the focus outline (:focus-visible) still shows on it.
-            const cls = clsx(
-              "relative grid aspect-square w-full place-items-center rounded-[3px]",
-              c.date === today &&
-                "after:pointer-events-none after:absolute after:-inset-[2px] after:rounded-[5px] after:border after:border-white/60 after:content-['']",
-            );
-            // Today is marked by shape too, not just the outline colour.
-            const dot = c.date === today && <span className={clsx("h-1 w-1 rounded-full", c.v >= 1 ? "bg-accent-ink" : "bg-fg")} />;
-            if (c.v < 0) return <motion.div key={c.date} aria-hidden className={cls} style={style} {...motionProps} />;
-            return (
-              <motion.button
-                key={c.date}
-                ref={(el: HTMLButtonElement | null) => {
-                  cells.current[idx] = el;
-                }}
-                type="button"
-                tabIndex={idx === active ? 0 : -1}
-                aria-label={describe(c)}
-                title={describe(c)}
-                className={clsx(cls, "cursor-pointer")}
-                style={style}
-                {...motionProps}
-                onFocus={() => setFocus(idx)}
-                onKeyDown={(e) => onKey(e, idx)}
-                onClick={() => navigate(c.date === today ? "/" : `/day/${c.date}`)}
+    <div className="mt-8">
+      <div aria-hidden data-heat-months="" className="mb-1.5 flex" style={{ gap: HEAT_GAP }}>
+        {months.map((m, i) => (
+          <div key={i} className="relative h-3.5 min-w-0 flex-1">
+            {m && (
+              <span
+                className={clsx(
+                  "absolute bottom-0 font-mono text-2xs leading-none tracking-[0.08em] whitespace-nowrap text-mute uppercase",
+                  // The last column's name hangs inwards so it never runs past the edge.
+                  i === months.length - 1 ? "right-0" : "left-0",
+                )}
               >
-                {dot}
-              </motion.button>
-            );
-          })}
-        </div>
-      ))}
+                {m}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+      <div
+        ref={gridRef}
+        className="flex justify-between"
+        style={{ gap: HEAT_GAP }}
+        role="group"
+        aria-label={`${summary} Choose a day to open it.`}
+      >
+        {cols.map((col, i) => (
+          <div key={i} className="flex min-w-0 flex-1 flex-col" style={{ gap: HEAT_GAP }}>
+            {col.map((c, d) => {
+              const idx = i * 7 + d;
+              const style = {
+                background:
+                  c.v < 0
+                    ? "transparent"
+                    : c.v >= 1
+                      ? "var(--color-accent)"
+                      : c.v > 0
+                        ? `rgb(183 243 106 / ${0.08 + c.v * 0.3})`
+                        : "rgba(255,255,255,0.04)",
+                boxShadow: c.v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
+              };
+              const motionProps = { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { delay: i * 0.02 } };
+              // Today's ring is drawn by ::after, so the focus outline (:focus-visible) still shows on it.
+              const cls = clsx(
+                "relative grid aspect-square w-full place-items-center rounded-[3px]",
+                c.date === today &&
+                  "after:pointer-events-none after:absolute after:-inset-[2px] after:rounded-[5px] after:border after:border-white/60 after:content-['']",
+              );
+              // Today is marked by shape too, not just the outline colour.
+              const dot = c.date === today && <span className={clsx("h-1 w-1 rounded-full", c.v >= 1 ? "bg-accent-ink" : "bg-fg")} />;
+              if (c.v < 0) return <motion.div key={c.date} aria-hidden className={cls} style={style} {...motionProps} />;
+              return (
+                <motion.button
+                  key={c.date}
+                  ref={(el: HTMLButtonElement | null) => {
+                    cells.current[idx] = el;
+                  }}
+                  type="button"
+                  tabIndex={idx === active ? 0 : -1}
+                  aria-label={describe(c)}
+                  title={describe(c)}
+                  className={clsx(cls, "cursor-pointer")}
+                  style={style}
+                  {...motionProps}
+                  onFocus={() => setFocus(idx)}
+                  onKeyDown={(e) => onKey(e, idx)}
+                  onClick={() => navigate(c.date === today ? "/" : `/day/${c.date}`)}
+                >
+                  {dot}
+                </motion.button>
+              );
+            })}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

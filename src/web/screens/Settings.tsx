@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
-import { ChevronLeft, Download, LogOut, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ChevronLeft, Download, LogOut, Plus, RefreshCw, Trash2, UserX } from "lucide-react";
 import { isISODate, startOfWeek, WEEKDAY_SHORT } from "../../shared/dates";
 import { displayPrefs, trainingPrefs } from "../../shared/defaults";
 import { repMaxPct } from "../../shared/program";
@@ -9,10 +9,11 @@ import { settingsSchema, type Program, type ProgramWeek, type Settings } from ".
 import { InlineText } from "../components/InlineText";
 import { useToast } from "../components/Toast";
 import { useFocusAfter } from "../components/useFocusAfter";
-import { BoxNumber, Field, Section, Toggle } from "../components/ui";
+import { formatRest, parseRest } from "../components/settings/restTime";
+import { BoxNumber, Field, Section, Toggle, useFieldIds } from "../components/ui";
 import { useTitle } from "../components/useTitle";
 import { fmt } from "../lib/format";
-import { signOut, useCreateExercise, useData, useSaveSettings, useSyncInfo, useUpdateExercise } from "../lib/store";
+import { forgetDevice, signOut, useCreateExercise, useData, useSaveSettings, useSyncInfo, useUpdateExercise } from "../lib/store";
 import { noteOfflineSignOut } from "./Login";
 
 // Weekday order shown Monday-first; values are JS weekday indices.
@@ -129,6 +130,122 @@ function NumSetting({
   );
 }
 
+/** A rest time, shown and typed as m:ss ("3:00"); plain seconds ("180") work too. */
+function RestSetting({
+  label,
+  hint,
+  value,
+  onSave,
+  min,
+  max,
+}: {
+  label: string;
+  hint?: ReactNode;
+  value: number;
+  onSave: (seconds: number) => void;
+  min: number;
+  max: number;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <Field label={label} hint={hint} error={error}>
+      <RestInput
+        label={label}
+        value={value}
+        onCommit={(text) => {
+          const v = parseRest(text);
+          const e =
+            v === null
+              ? "Enter a time like 3:00, or seconds."
+              : v < min || v > max
+                ? `Between ${formatRest(min)} and ${formatRest(max)}.`
+                : null;
+          setError(e);
+          if (e || v === null) return false;
+          if (v !== value) onSave(v);
+          return true;
+        }}
+      />
+    </Field>
+  );
+}
+
+function RestInput({ label, value, onCommit }: { label: string; value: number; onCommit: (text: string) => boolean }) {
+  const field = useFieldIds();
+  const [text, setText] = useState(formatRest(value));
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focused.current) setText(formatRest(value));
+  }, [value]);
+  return (
+    <span className="box-field inline-flex rounded-xl bg-white/[0.05] px-3 py-2">
+      <input
+        aria-label={label}
+        aria-labelledby={field?.labelId}
+        aria-describedby={field?.describedBy}
+        aria-invalid={field?.invalid || undefined}
+        value={text}
+        placeholder="m:ss"
+        autoComplete="off"
+        enterKeyHint="done"
+        onFocus={(e) => {
+          focused.current = true;
+          e.currentTarget.select();
+        }}
+        onBlur={() => {
+          focused.current = false;
+          // Valid: show it tidied ("180" → "3:00"); invalid: keep what was typed next to the message.
+          if (onCommit(text)) setText(formatRest(parseRest(text)!));
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+        onChange={(e) => setText(e.target.value)}
+        className="field num w-[5.5ch] min-w-0 text-right text-base"
+      />
+    </span>
+  );
+}
+
+/** The long page's sections, as a jump list under the title. */
+const JUMPS = [
+  ["targets", "Targets"],
+  ["training", "Training"],
+  ["display", "Display"],
+  ["program", "Program"],
+  ["sync", "Sync"],
+  ["data", "Data"],
+] as const;
+
+function JumpList() {
+  return (
+    <nav aria-label="Settings sections" className="mt-4 -ml-1.5">
+      <ul className="flex flex-wrap items-center gap-x-3">
+        {JUMPS.map(([id, name]) => (
+          <li key={id}>
+            <a
+              href={`#${id}`}
+              className="label inline-flex min-h-11 items-center px-1.5 text-fg-2"
+              onClick={(e) => {
+                const section = document.getElementById(id);
+                if (!section) return;
+                e.preventDefault();
+                const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+                section.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+                // Keyboard and screen-reader users continue from the section's heading.
+                section.querySelector<HTMLElement>("[data-section-heading]")?.focus({ preventScroll: true });
+                history.replaceState(history.state, "", `#${id}`);
+              }}
+            >
+              {name}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
 export function SettingsScreen() {
   const { data } = useData();
   const saveSettings = useSaveSettings();
@@ -161,13 +278,14 @@ export function SettingsScreen() {
       </header>
       <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">The rules</h1>
       <p className="mt-3 text-sm text-mute">Nothing here is set in stone. Change it and everything recalculates.</p>
+      <JumpList />
       {error && (
         <p role="alert" className="mt-4 text-sm text-warn">
           {error}
         </p>
       )}
 
-      <Section label="Daily targets">
+      <Section label="Daily targets" id="targets">
         <div className="divide-y divide-white/[0.04]">
           <NumSetting
             label="Steps"
@@ -268,29 +386,23 @@ export function SettingsScreen() {
         </div>
       </Section>
 
-      <Section label="Training">
+      <Section label="Training" id="training">
         <div className="divide-y divide-white/[0.04]">
-          <NumSetting
+          <RestSetting
             label="Main lift rest"
             hint="Rest timer target after a main-lift set"
             value={training.restSecondsMain}
-            unit="s"
             min={10}
             max={900}
-            integer
-            unitInMessage=" s"
-            onSave={(v) => v !== null && setTraining({ restSecondsMain: v })}
+            onSave={(v) => setTraining({ restSecondsMain: v })}
           />
-          <NumSetting
+          <RestSetting
             label="Accessory rest"
             hint="After accessory and superset sets"
             value={training.restSecondsAccessory}
-            unit="s"
             min={10}
             max={900}
-            integer
-            unitInMessage=" s"
-            onSave={(v) => v !== null && setTraining({ restSecondsAccessory: v })}
+            onSave={(v) => setTraining({ restSecondsAccessory: v })}
           />
           <NumSetting
             label="Accessory increment"
@@ -306,7 +418,7 @@ export function SettingsScreen() {
         </div>
       </Section>
 
-      <Section label="Display">
+      <Section label="Display" id="display">
         <Field label="High contrast" hint="Brighter text and stronger edges for gym glare and sunlight">
           <Toggle
             label="High contrast"
@@ -322,13 +434,14 @@ export function SettingsScreen() {
 
       <SyncSection />
 
-      <Section label="Data">
+      <Section label="Data" id="data">
         <div className="flex flex-wrap gap-3">
           <a href="/api/export" className="btn-ghost" download>
             <Download size={16} /> Export JSON
           </a>
           <SignOut />
         </div>
+        <ForgetDevice />
       </Section>
       {/* decor: a sign-off, not information */}
       <p className="mt-12 text-center text-[0.6875rem] text-faint">Strawvine · built for pushing boundaries</p>
@@ -424,7 +537,7 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
 
   return (
     <>
-      <Section label="Program">
+      <Section label="Program" id="program">
         <div className="divide-y divide-white/[0.04]">
           {/* Long names need the full width: label above, the name below. */}
           <div className="py-3">
@@ -899,7 +1012,7 @@ function SyncSection() {
   const tone = info.failed ? "text-warn" : "text-fg-2";
 
   return (
-    <Section label="Sync">
+    <Section label="Sync" id="sync">
       <p className={clsx("flex items-center gap-2 text-sm", tone)} role="status" aria-live="polite">
         <span
           aria-hidden
@@ -959,6 +1072,146 @@ function SyncSection() {
         )}
       </div>
       {!info.online && <p className="mt-2 text-xs text-mute">Changes are kept on this device and sync when you're back online.</p>}
+      <RefusedEdits now={now} />
     </Section>
+  );
+}
+
+/**
+ * Edits this device refused before queuing them (they would have been rejected by the server,
+ * e.g. a value out of range from an old screen): what, why and when — the toast that said so is
+ * long gone. Clear empties the list.
+ */
+function RefusedEdits({ now }: { now: number }) {
+  const info = useSyncInfo();
+  const focusAfter = useFocusAfter();
+  const refused = info.refused;
+  if (!refused.length) return null;
+  return (
+    <div className="mt-8" role="group" aria-labelledby="refused-heading" data-refused="">
+      <div className="flex items-center justify-between gap-3">
+        <h3 id="refused-heading" className="text-sm text-warn">
+          Couldn't save
+        </h3>
+        <button
+          type="button"
+          className="label -my-3 -mr-2 inline-flex min-h-11 items-center px-2 text-mute"
+          onClick={() => {
+            info.clearRefused();
+            // The list (and this button) go away: continue from the Sync section's heading.
+            focusAfter(() => document.querySelector<HTMLElement>("#sync [data-section-heading]"));
+          }}
+        >
+          Clear
+        </button>
+      </div>
+      <p className="mt-1 text-xs text-mute">
+        These edits weren't saved: the values weren't allowed. Enter them again if you still need them.
+      </p>
+      <ul className="mt-3 divide-y divide-white/[0.04]" aria-label="Edits that couldn't be saved">
+        {[...refused].reverse().map((r) => (
+          <li key={r.id} className="flex items-baseline justify-between gap-3 py-2.5">
+            <span className="min-w-0 text-sm text-fg-2">
+              {r.label}
+              <span className="mt-0.5 block text-xs text-mute">{r.reason}</span>
+            </span>
+            <span className="label shrink-0">{ago(r.at, now)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * "Forget this device": the server signs this browser out and drops its known-device mark, so
+ * the next sign-in is treated like a new device's; this device's copy (and anything not yet
+ * synced) is wiped. Asks first, inline, saying how many unsynced edits would be lost. On
+ * success the app is at the sign-in screen (landing on Today afterwards); offline or refused,
+ * nothing changes and it says so.
+ */
+function ForgetDevice() {
+  const info = useSyncInfo();
+  const navigate = useNavigate();
+  const [asking, setAsking] = useState(false);
+  const [state, setState] = useState<"idle" | "busy" | "failed">("idle");
+  const focusAfter = useFocusAfter();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const questionId = useId();
+  const unsynced = info.unsynced ?? info.pending;
+
+  if (asking)
+    return (
+      <div role="group" aria-labelledby={questionId} className="mt-4 w-full rounded-2xl bg-white/[0.03] p-4">
+        <p id={questionId} className="text-sm text-fg-2">
+          Forget this device?
+        </p>
+        <p className="mt-1 text-xs leading-relaxed text-mute">
+          This signs this device out and removes its copy of your data. It will be treated as a new device at the next sign-in. Everything
+          stays on the server, and your other devices stay signed in.
+        </p>
+        {unsynced > 0 && (
+          <p className="mt-2 text-xs text-warn">
+            {unsynced} {unsynced === 1 ? "change hasn't synced and will be discarded" : "changes haven't synced and will be discarded"}{" "}
+            (unless {unsynced === 1 ? "it goes" : "they go"} through first).
+          </p>
+        )}
+        <div className="mt-4 flex flex-wrap gap-3">
+          <button
+            ref={confirmRef}
+            type="button"
+            className="btn-ghost text-warn"
+            disabled={state === "busy"}
+            onClick={async () => {
+              setState("busy");
+              try {
+                await forgetDevice();
+              } catch {
+                setState("failed");
+                return;
+              }
+              // Signed out: land on Today after the next sign-in, not here.
+              navigate("/", { replace: true });
+            }}
+          >
+            {state === "busy" ? "Forgetting…" : "Forget"}
+          </button>
+          <button
+            type="button"
+            className="btn text-mute"
+            disabled={state === "busy"}
+            onClick={() => {
+              setAsking(false);
+              setState("idle");
+              focusAfter(() => triggerRef.current);
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+        {state === "failed" && (
+          <p role="alert" className="mt-3 text-xs text-warn">
+            Couldn't reach Strawvine — try again when online. Nothing changed.
+          </p>
+        )}
+      </div>
+    );
+
+  return (
+    <div className="mt-4">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="btn-ghost"
+        onClick={() => {
+          setAsking(true);
+          setState("idle");
+          focusAfter(() => confirmRef.current);
+        }}
+      >
+        <UserX size={16} aria-hidden /> Forget this device
+      </button>
+    </div>
   );
 }

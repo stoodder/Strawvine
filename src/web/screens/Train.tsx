@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Link2,
+  CalendarCheck,
   ListChecks,
   MoreHorizontal,
   Plus,
@@ -13,6 +14,7 @@ import {
   SkipForward,
   Trash2,
   Unlink2,
+  X,
 } from "lucide-react";
 import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { trainingPrefs } from "../../shared/defaults";
@@ -23,6 +25,7 @@ import {
   accessoryHint,
   blankSet,
   buildSession,
+  buildSessionFrom,
   isSessionStarted,
   newId,
   planChanged,
@@ -36,7 +39,8 @@ import { DateJump } from "../components/today/DateJump";
 import { AddExerciseSheet } from "../components/train/AddExerciseSheet";
 import { FinishPanel } from "../components/train/FinishPanel";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
-import { afterLayout, focusWhenReady, revealAboveDock, whenReady } from "../components/train/reveal";
+import { useDismissedHints } from "../components/train/hintDismiss";
+import { afterLayout, useRevealAboveDock, whenReady } from "../components/train/reveal";
 import { MainSetButton, PlannedChip, SetChip } from "../components/train/SetControls";
 import { AmrapSheet, measureUnit, Plates, SetEditSheet, type AmrapRepPr } from "../components/train/SetSheets";
 import {
@@ -45,16 +49,21 @@ import {
   mapBlock,
   mapExercise,
   mapSet,
+  nextOpenSet,
   planSignature,
   replaceSetAndPropagate,
   repScheme,
+  resolveExRef,
+  resolveSetRef,
   type ExRef,
+  type HeldEx,
   type SetRef,
 } from "../components/train/sessionEdit";
 import { MaxSheet } from "../components/MaxSheet";
 import { JournalText } from "../components/TextArea";
 import { fmt } from "../lib/format";
 import { success, tick } from "../lib/haptics";
+import { currentData } from "../lib/sync";
 import {
   cachedSession,
   useAddMax,
@@ -65,6 +74,7 @@ import {
   usePendingDates,
   useSaveSession,
 } from "../lib/store";
+import { useFocusAfter } from "../components/useFocusAfter";
 import { useTitle } from "../components/useTitle";
 
 /** Server limits (sessionSchema): sets per exercise, exercises per superset, blocks per session. */
@@ -83,8 +93,12 @@ const lb = (v: number) => fmt(v, v % 1 ? 1 : 0);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 type Hint = NonNullable<ReturnType<typeof accessoryHint>>;
-/** Whether a progression hint would still change something: a pending set isn't at the suggestion yet. */
+/**
+ * Whether a progression hint still says something: a "hold" while there are sets to do; an
+ * increase while a pending set isn't at the suggestion yet.
+ */
 function hintApplies(hint: Hint, sets: ReadonlyArray<SetEntry>): boolean {
+  if (hint.kind === "hold") return sets.some(loggable);
   const up = hint.suggestedWeight >= hint.lastWeight;
   return sets.some(
     (s) => loggable(s) && (s.targetWeight === null || (up ? s.targetWeight < hint.suggestedWeight : s.targetWeight > hint.suggestedWeight)),
@@ -116,6 +130,10 @@ export function TrainScreen() {
   const rest = useRestTimer();
   const hintId = useId();
   const dockHeight = useDockHeight();
+  const revealAboveDock = useRevealAboveDock();
+  const focusAfter = useFocusAfter();
+  /** Focus hand-offs wait for an edit that reaches the screen through the store (a frame or more). */
+  const focusWhenReady = (find: () => HTMLElement | null) => focusAfter(find, 20);
   const pending = usePendingDates().has(date);
 
   const saved = data.sessions.find((s) => s.date === date) ?? null;
@@ -149,11 +167,24 @@ export function TrainScreen() {
   const session = saved ?? draft!;
   const isPlannedDay = !!programDay || !!saved;
 
-  const [editing, setEditing] = useState<SetRef | null>(null);
-  const [amrap, setAmrap] = useState<SetRef | null>(null);
+  // What the open sheets hold, re-located in the latest session on every render: a merge with
+  // another device's edit (or a revalidation) can move or remove what a sheet points at. A ref
+  // whose target is gone closes its sheet instead of pointing at a neighbour.
+  const [editingHeld, setEditing] = useState<SetRef | null>(null);
+  const [amrapHeld, setAmrap] = useState<SetRef | null>(null);
   const [adding, setAdding] = useState<{ mode: "new" } | { mode: "pair"; blockId: string } | null>(null);
-  const [actions, setActions] = useState<ExRef | null>(null);
+  const [actionsHeld, setActions] = useState<HeldEx | null>(null);
+  const editing = resolveSetRef(session, editingHeld);
+  const amrap = resolveSetRef(session, amrapHeld);
+  const actions = resolveExRef(session, actionsHeld);
+  if (editingHeld && editing !== editingHeld) setEditing(editing);
+  if (amrapHeld && amrap !== amrapHeld) setAmrap(amrap);
+  if (actionsHeld && actions !== actionsHeld) setActions(actions);
+  if (adding?.mode === "pair" && !session.blocks.some((b) => b.id === adding.blockId)) setAdding(null);
   const [maxFor, setMaxFor] = useState<Exercise | null>(null);
+  /** The set whose logging started the current rest: the rest pill shows the plates for the one after it. */
+  const [lastLogged, setLastLogged] = useState<SetRef | null>(null);
+  const { isDismissed: hintDismissed, dismiss: dismissHint } = useDismissedHints(date);
 
   const exById = (id: number) => data.exercises.find((e) => e.id === id);
   const exName = (id: number) => exById(id)?.name ?? "Exercise";
@@ -181,7 +212,18 @@ export function TrainScreen() {
    * whole session. Undoing the only change to a draft drops it back to the live plan.
    * A preview never saves.
    */
-  const commit = (next: Session, undo?: { message: string; scope?: ExRef | { blockId: string }; duration?: number }) => {
+  const commit = (
+    next: Session,
+    undo?: {
+      message: string;
+      scope?: ExRef | { blockId: string };
+      /** Custom revert on top of the latest saved session (instead of `scope`). */
+      revert?: (cur: Session) => Session;
+      duration?: number;
+      /** After the Undo is applied: where focus should go (the toast's button is gone). */
+      onUndone?: () => void;
+    },
+  ) => {
     if (isPreview) return;
     const before = session;
     const wasDraft = !saved;
@@ -193,7 +235,8 @@ export function TrainScreen() {
         const cur = cachedSession(date) ?? next;
         let restored = before;
         const scope = undo.scope;
-        if (scope) {
+        if (undo.revert) restored = undo.revert(cur);
+        else if (scope) {
           const prevBlock = before.blocks.find((b) => b.id === scope.blockId);
           const curBlock = cur.blocks.find((b) => b.id === scope.blockId);
           const same = (i: number) => {
@@ -208,6 +251,7 @@ export function TrainScreen() {
         }
         if (wasDraft && JSON.stringify(restored) === JSON.stringify(before)) deleteSession(date);
         else saveSession(restored);
+        undo.onUndone?.();
       },
       undo.duration,
     );
@@ -242,7 +286,7 @@ export function TrainScreen() {
 
   const toggleDone = (ref: SetRef) => {
     const found = findSet(session, ref);
-    if (!found) return;
+    if (!found || found.block.skipped) return;
     if (found.set.amrap && !found.set.done) return setAmrap(ref);
     const logging = !found.set.done;
     const next = mapSet(session, ref, (x) =>
@@ -256,6 +300,7 @@ export function TrainScreen() {
     else commit(next, { message: `${setLabel(ref)} ${logging ? "logged" : "unlogged"}`, scope: ref, duration: 4000 });
     if (logging) {
       rest.start(restFor(found.block.kind));
+      setLastLogged(ref);
       revealNextOpen(ref.setId);
     }
   };
@@ -275,29 +320,44 @@ export function TrainScreen() {
   const primaryName = primaryExId != null ? exName(primaryExId) : "";
   const primaryMax = primaryExId != null ? currentMax(data.maxEntries, primaryExId) : null;
   const primaryStarted = primaryEx?.sets.some((s) => s.done) ?? false;
+  /** Main lift skipped today (injury, fatigue): collapsed, counts toward nothing, the day can still finish. */
+  const primarySkipped = !!primaryBlock?.skipped;
   /** Sets the program prescribed for this session's week; any beyond are added back-off sets. */
   const plannedCount =
     session.week !== null ? (program.weeks[session.week - 1]?.reps.length ?? primaryEx?.sets.length ?? 0) : (primaryEx?.sets.length ?? 0);
-  const freshPrimary = fresh.blocks.find((b) => b.kind === "primary");
+  /**
+   * The plan this session follows: today's, or — for a session moved here from another day
+   * ("Do this session today") — that day's, rebuilt for this date.
+   */
+  const plannedFor = session.plannedFor ?? null;
+  const planFresh = useMemo(
+    () => (plannedFor ? buildSessionFrom(plannedFor, date, data) : fresh),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [plannedFor, fresh],
+  );
+  const freshPrimary = planFresh.blocks.find((b) => b.kind === "primary");
 
   const maxChanged = !!saved && !!primaryBlock && !!primaryMax && session.primaryMaxLb !== primaryMax.valueLb && !primaryStarted;
   // A saved session nothing has been logged in yet, whose program prescription changed since it
   // was built (the same test Today uses). Editing its own targets isn't a plan change.
+  // (`planChanged` follows a moved session's own program day.)
   const programMoved = !!saved && !session.completedAt && !isSessionStarted(session) && planChanged(session, data);
   const missingPrimary = !!saved && !primaryBlock && !!freshPrimary && !session.completedAt;
   const offerRecalc = !isPreview && (programMoved || maxChanged || missingPrimary);
 
   const recalcPrimary = () => {
+    // A skipped main lift stays skipped through a recalculation.
+    const nextPrimary = freshPrimary && (primarySkipped ? { ...freshPrimary, skipped: true } : freshPrimary);
     commit(
       {
         ...session,
-        label: fresh.label,
-        cycle: fresh.cycle,
-        week: fresh.week,
-        deload: fresh.deload,
-        primaryMaxLb: fresh.primaryMaxLb ?? session.primaryMaxLb,
-        planSig: fresh.planSig,
-        blocks: [...(freshPrimary ? [freshPrimary] : []), ...session.blocks.filter((b) => b.kind !== "primary")],
+        label: planFresh.label,
+        cycle: planFresh.cycle,
+        week: planFresh.week,
+        deload: planFresh.deload,
+        primaryMaxLb: planFresh.primaryMaxLb ?? session.primaryMaxLb,
+        planSig: planFresh.planSig,
+        blocks: [...(nextPrimary ? [nextPrimary] : []), ...session.blocks.filter((b) => b.kind !== "primary")],
       },
       { message: "Main lift recalculated" },
     );
@@ -313,6 +373,74 @@ export function TrainScreen() {
       })),
     );
     tick();
+  };
+
+  /** The main lift's Skip / Unskip control (whichever the row shows now). */
+  const mainControl = (which: "skip" | "unskip") => () => document.querySelector<HTMLElement>(`[data-main-control="${which}"]`);
+
+  /**
+   * Skip the main lift for today (injury, fatigue): its sets leave the counts, no AMRAP or
+   * progression is offered, and the session can still be finished. Undo / Unskip bring it back.
+   */
+  const setPrimarySkipped = (skip: boolean) => {
+    if (!primaryBlock) return;
+    const id = primaryBlock.id;
+    const withFlag = (s: Session, on: boolean) =>
+      mapBlock(s, id, (b) => {
+        if (on) return { ...b, skipped: true };
+        const { skipped: _unskip, ...kept } = b;
+        return kept;
+      });
+    tick();
+    commit(
+      withFlag(session, skip),
+      skip
+        ? {
+            message: "Main lift skipped today",
+            revert: (cur) => withFlag(cur, false),
+            onUndone: () => focusWhenReady(mainControl("skip")),
+          }
+        : undefined,
+    );
+    if (primaryBlock.id === amrap?.blockId) setAmrap(null);
+    focusWhenReady(mainControl(skip ? "unskip" : "skip"));
+  };
+
+  // --- Do this session today ----------------------------------------------------------------
+  const todaySaved = data.sessions.find((s) => s.date === today) ?? null;
+  /** Today already holds logged work (or is finished): a previewed day can't replace it. */
+  const todayBusy = !!todaySaved && (isSessionStarted(todaySaved) || !!todaySaved.completedAt);
+  const [confirmMove, setConfirmMove] = useState(false);
+  const [confirmFor, setConfirmFor] = useState(date);
+  if (confirmFor !== date) {
+    setConfirmFor(date);
+    setConfirmMove(false);
+  }
+
+  /** Save the previewed day's plan under today (travel, a moved rest day) and go there. */
+  const doThisToday = () => {
+    if (!isPreview || todayBusy) return;
+    const before = todaySaved;
+    saveSession(buildSessionFrom(date, today, data));
+    setConfirmMove(false);
+    tick();
+    navigate("/train");
+    offerUndo(`${weekday}'s session is today's`, () => {
+      if (before) saveSession(before);
+      else deleteSession(today);
+    });
+    // The button that was pressed is gone with the preview: land on the moved session's header.
+    focusWhenReady(() => document.querySelector<HTMLElement>("[data-train-title]"));
+  };
+
+  /** A moved session nothing has been logged in yet can go back to this date's own plan. */
+  const canRevert = !!saved && !!plannedFor && !isPreview && !isSessionStarted(session) && !session.completedAt;
+  /** Drop a moved session: today shows its own plan again (Undo restores the moved one). */
+  const revertToTodaysPlan = () => {
+    const before = session;
+    deleteSession(date);
+    offerUndo("Back to today's plan", () => saveSession(before));
+    focusWhenReady(() => document.querySelector<HTMLElement>("[data-train-title]"));
   };
 
   // --- Accessories --------------------------------------------------------------------------
@@ -359,6 +487,7 @@ export function TrainScreen() {
     tick();
     commit(next, { message: `${what} · ${plural(n, "set")} logged`, scope });
     rest.start(restFor("accessory"));
+    setLastLogged(null);
   };
 
   /** After a sheet action logged sets: show the next open set below the block, if covered. */
@@ -390,6 +519,7 @@ export function TrainScreen() {
     tick();
     commit(next, { message: `${what} · round logged`, scope: { blockId } });
     rest.start(restFor("accessory"));
+    setLastLogged(null);
   };
 
   /**
@@ -404,7 +534,13 @@ export function TrainScreen() {
         return kept;
       }),
       // The exercise is named by the row that just changed; keep the toast short.
-      skipped ? { message: `Skipped today · stays in next ${weekday}'s plan`, scope: ref } : undefined,
+      skipped
+        ? {
+            message: `Skipped today · stays in next ${weekday}'s plan`,
+            scope: ref,
+            onUndone: () => focusWhenReady(exControl(ref, "options")),
+          }
+        : undefined,
     );
   /** The skipped row's Unskip button, or (once unskipped) that exercise's options button. */
   const exControl = (ref: ExRef, which: "unskip" | "options") => () =>
@@ -442,6 +578,20 @@ export function TrainScreen() {
   // Exercises skipped today count toward nothing (the same counts Today shows).
   const { done: doneSets, total: totalSets } = sessionCounts(session);
   const blocksFull = session.blocks.length >= MAX_BLOCKS;
+  /** A previewed day with planned work can be done today instead (not once today holds logged work). */
+  const canMove = isPreview && !todayBusy && totalSets > 0 && todaySaved?.plannedFor !== date;
+
+  // The rest pill's "next 225 · 45 45": the set after the one that started the rest (without one —
+  // a rest restored after a reload — the first open set of a session in progress), barbell lifts only.
+  const [restDate, setRestDate] = useState(date);
+  if (restDate !== date) {
+    setRestDate(date);
+    setLastLogged(null);
+  }
+  const nextUp = isPreview || session.completedAt || (!lastLogged && !isSessionStarted(session)) ? null : nextOpenSet(session, lastLogged);
+  const nextIsBarbell =
+    !!nextUp && nextUp.ex.measure === "reps" && (nextUp.block.kind === "primary" || exById(nextUp.ex.exerciseId)?.category === "primary");
+  const nextWeightLb = nextIsBarbell ? nextUp.set.targetWeight : null;
 
   /** Edited set can be deleted: any accessory set, or a main-lift set added beyond the plan. */
   const canDelete = (f: NonNullable<ReturnType<typeof findSet>>) =>
@@ -463,8 +613,8 @@ export function TrainScreen() {
           >
             <ChevronLeft size={18} />
           </button>
-          {/* Jump to any day, up to the last previewable one (DateJump's `today` is its upper bound). */}
-          <DateJump date={date} today={lastPreview} pending={pending} onPick={go} />
+          {/* Jump to any day, up to the last previewable one. */}
+          <DateJump date={date} today={today} max={lastPreview} pending={pending} onPick={go} />
           <button
             type="button"
             aria-label="Next day"
@@ -488,7 +638,9 @@ export function TrainScreen() {
       </header>
 
       <div className="mt-6">
-        <h1 className="text-[clamp(2.125rem,11vw,2.75rem)] leading-none font-light tracking-tight">{session.label}</h1>
+        <h1 data-train-title tabIndex={-1} className="text-[clamp(2.125rem,11vw,2.75rem)] leading-none font-light tracking-tight">
+          {session.label}
+        </h1>
         <p className="mt-3 text-sm text-mute">
           {isPreview ? (
             <>
@@ -523,6 +675,21 @@ export function TrainScreen() {
             "Rest day."
           )}
         </p>
+        {plannedFor && (
+          <div className="mt-1 flex flex-wrap items-center gap-x-3">
+            <span className="text-sm text-mute">
+              Planned for{" "}
+              <span className="text-fg-2">
+                {weekdayName(plannedFor, true)} · {session.label}
+              </span>
+            </span>
+            {canRevert && (
+              <button type="button" className="tap label -mx-2 min-h-11 px-2 text-accent" onClick={revertToTodaysPlan}>
+                {isToday ? "Revert to today's plan" : `Revert to ${weekday}'s plan`}
+              </button>
+            )}
+          </div>
+        )}
         {(!isToday || offerRecalc) && (
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
             {!isToday && (
@@ -530,6 +697,44 @@ export function TrainScreen() {
                 ← Today
               </Link>
             )}
+            {canMove &&
+              (confirmMove ? (
+                <div role="group" aria-labelledby={`${hintId}-move`} className="flex w-full flex-wrap items-center gap-x-3 gap-y-1">
+                  <span id={`${hintId}-move`} className="text-sm text-fg-2">
+                    Replace today's saved session?
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <button
+                      type="button"
+                      className="tap label -ml-2 min-h-11 px-2 text-mute"
+                      onClick={() => {
+                        setConfirmMove(false);
+                        focusAfter(() => document.querySelector<HTMLElement>("[data-move-start]"));
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button type="button" data-move-confirm className="chip min-h-9 bg-accent/10 text-accent" onClick={doThisToday}>
+                      Replace
+                    </button>
+                  </span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  data-move-start
+                  className="chip min-h-9 bg-accent/10 text-accent"
+                  onClick={() => {
+                    if (todaySaved) {
+                      setConfirmMove(true);
+                      focusAfter(() => document.querySelector<HTMLElement>("[data-move-confirm]"));
+                    } else doThisToday();
+                  }}
+                >
+                  <CalendarCheck size={12} className="mr-1.5" />
+                  Do this session today
+                </button>
+              ))}
             {offerRecalc && (
               <button type="button" onClick={recalcPrimary} className="chip min-h-9 bg-accent/10 text-accent">
                 <RefreshCw size={12} className="mr-1.5" />
@@ -586,99 +791,147 @@ export function TrainScreen() {
                 )
               }
             >
-              <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-3">
-                <div className="text-2xl font-light">{primaryName}</div>
-                {session.deload && (
-                  <span className="label whitespace-nowrap text-fg-2">
-                    deload · {repScheme(primaryEx.sets.slice(0, plannedCount).map((s) => s.targetReps))}
-                  </span>
-                )}
-              </div>
-              <div>
-                {primaryEx.sets.map((s, i) => {
-                  const ref = { blockId: primaryBlock.id, exIdx: 0, setId: s.id };
-                  const over = s.amrap && s.done && s.reps !== null && s.targetReps !== null ? s.reps - s.targetReps : 0;
-                  const beat = over > 0;
-                  const extra = i >= plannedCount;
-                  const tag = s.amrap
-                    ? beat
-                      ? `+${over} reps${s.appliedProgressionLb ? ` · +${s.appliedProgressionLb} lb` : ""}`
-                      : "AMRAP"
-                    : extra
-                      ? "back-off"
-                      : null;
-                  if (isPreview)
-                    return (
-                      <div key={s.id} className="flex min-h-11 items-center gap-4 py-2">
-                        <span className="label w-5" aria-hidden>
-                          {i + 1}
+              {primarySkipped ? (
+                // Skipped today: one dimmed row; its sets count toward nothing until it's unskipped.
+                <div className="flex min-h-11 items-center justify-between gap-3">
+                  <div className="min-w-0 truncate text-[0.9375rem] text-mute">{primaryName}</div>
+                  <div className="flex shrink-0 items-center">
+                    <span className="label">Skipped today</span>
+                    {!isPreview && (
+                      <>
+                        <span className="label px-1.5" aria-hidden>
+                          ·
                         </span>
-                        <span className="sr-only">{`Set ${i + 1}: ${describeSet(s, "reps")}${s.amrap ? ", AMRAP" : ""}`}</span>
-                        <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-1" aria-hidden>
-                          <span className="num text-3xl font-light tracking-tight text-fg-2">{s.targetWeight}</span>
-                          <span className="text-sm whitespace-nowrap text-mute">
-                            × {s.targetReps}
-                            {s.amrap && "+"}
-                          </span>
-                          {tag && <span className={clsx("label whitespace-nowrap", s.amrap ? "text-accent" : "text-mute")}>{tag}</span>}
-                        </span>
-                      </div>
-                    );
-                  return (
-                    <div key={s.id} data-set={s.id} data-open={s.done ? undefined : ""} className="flex items-center gap-4 py-2">
-                      <span className="label w-5" aria-hidden>
-                        {i + 1}
-                      </span>
-                      <MainSetButton
-                        srPrefix={`${primaryName} set ${i + 1}:`}
-                        pressed={s.done}
-                        describedBy={hintId}
-                        onTap={() => toggleDone(ref)}
-                        onHold={() => (s.amrap ? setAmrap(ref) : setEditing(ref))}
-                      >
-                        <span className={clsx("num text-3xl font-light tracking-tight", s.done ? "text-fg" : "text-fg-2")}>
-                          {s.done ? s.weight : s.targetWeight}
-                        </span>
-                        {/* Flex items drop the spaces between them; keep them in the accessible name. */}
-                        <span className="sr-only">{"\u00a0"}</span>
-                        <span className="text-sm whitespace-nowrap text-mute">
-                          × {s.done ? s.reps : s.targetReps}
-                          {s.amrap && !s.done && "+"}
-                        </span>
-                        {tag && (
-                          <>
-                            <span className="sr-only">{"\u00a0"}</span>
-                            <span className={clsx("label whitespace-nowrap", s.amrap ? (beat ? "text-gold" : "text-accent") : "text-mute")}>
-                              {tag}
-                            </span>
-                          </>
-                        )}
-                      </MainSetButton>
-                      <CheckDot
-                        done={s.done}
-                        tone={beat ? "gold" : "accent"}
-                        onClick={() => toggleDone(ref)}
-                        label={`${primaryName} set ${i + 1} logged`}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="mt-1 flex min-h-11 flex-wrap items-center justify-between gap-x-4 gap-y-1">
-                <div className="min-h-6">
-                  <Plates weight={primaryEx.sets.find((s) => !s.done)?.targetWeight ?? null} />
+                        <button
+                          type="button"
+                          aria-label={`Unskip ${primaryName}`}
+                          data-main-control="unskip"
+                          className="tap label -mr-2 min-h-11 px-2 text-accent"
+                          onClick={() => setPrimarySkipped(false)}
+                        >
+                          Unskip
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                {!isPreview && primaryEx.sets.length < MAX_SETS && (
-                  <button
-                    type="button"
-                    onClick={addMainSet}
-                    aria-label={`Add a back-off set of ${primaryName}`}
-                    className="tap label -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                  >
-                    <Plus size={12} /> set
-                  </button>
-                )}
-              </div>
+              ) : (
+                <>
+                  <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3">
+                    <div className="flex flex-wrap items-baseline gap-x-3">
+                      <div className="text-2xl font-light">{primaryName}</div>
+                      {session.deload && (
+                        <span className="label whitespace-nowrap text-fg-2">
+                          deload · {repScheme(primaryEx.sets.slice(0, plannedCount).map((s) => s.targetReps))}
+                        </span>
+                      )}
+                    </div>
+                    {/* Injury or fatigue: skip the main lift for today (nothing logged in it yet). */}
+                    {!isPreview && !primaryStarted && !session.completedAt && (
+                      <button
+                        type="button"
+                        onClick={() => setPrimarySkipped(true)}
+                        aria-label={`Skip ${primaryName} today`}
+                        data-main-control="skip"
+                        className="tap label -my-2 -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                      >
+                        <SkipForward size={12} /> skip
+                      </button>
+                    )}
+                  </div>
+                  <div>
+                    {primaryEx.sets.map((s, i) => {
+                      const ref = { blockId: primaryBlock.id, exIdx: 0, setId: s.id };
+                      const over = s.amrap && s.done && s.reps !== null && s.targetReps !== null ? s.reps - s.targetReps : 0;
+                      const beat = over > 0;
+                      const extra = i >= plannedCount;
+                      const tag = s.amrap
+                        ? beat
+                          ? `+${over} reps${s.appliedProgressionLb ? ` · +${s.appliedProgressionLb} lb` : ""}`
+                          : "AMRAP"
+                        : extra
+                          ? "back-off"
+                          : null;
+                      if (isPreview)
+                        return (
+                          <div key={s.id} className="flex min-h-11 items-center gap-4 py-2">
+                            <span className="label w-5" aria-hidden>
+                              {i + 1}
+                            </span>
+                            <span className="sr-only">{`Set ${i + 1}: ${describeSet(s, "reps")}${s.amrap ? ", AMRAP" : ""}`}</span>
+                            <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-1" aria-hidden>
+                              <span className="num text-3xl font-light tracking-tight text-fg-2">{s.targetWeight}</span>
+                              <span className="text-sm whitespace-nowrap text-mute">
+                                × {s.targetReps}
+                                {s.amrap && "+"}
+                              </span>
+                              {tag && <span className={clsx("label whitespace-nowrap", s.amrap ? "text-accent" : "text-mute")}>{tag}</span>}
+                            </span>
+                          </div>
+                        );
+                      return (
+                        <div key={s.id} data-set={s.id} data-open={s.done ? undefined : ""} className="flex items-center gap-4 py-2">
+                          <span className="label w-5" aria-hidden>
+                            {i + 1}
+                          </span>
+                          <MainSetButton
+                            srPrefix={`${primaryName} set ${i + 1}:`}
+                            pressed={s.done}
+                            describedBy={hintId}
+                            onTap={() => toggleDone(ref)}
+                            onHold={() => (s.amrap ? setAmrap(ref) : setEditing(ref))}
+                          >
+                            <span className={clsx("num text-3xl font-light tracking-tight", s.done ? "text-fg" : "text-fg-2")}>
+                              {s.done ? s.weight : s.targetWeight}
+                            </span>
+                            {/* Flex items drop the spaces between them; keep them in the accessible name. */}
+                            <span className="sr-only">{"\u00a0"}</span>
+                            <span className="text-sm whitespace-nowrap text-mute">
+                              × {s.done ? s.reps : s.targetReps}
+                              {s.amrap && !s.done && "+"}
+                            </span>
+                            {tag && (
+                              <>
+                                <span className="sr-only">{"\u00a0"}</span>
+                                <span
+                                  className={clsx("label whitespace-nowrap", s.amrap ? (beat ? "text-gold" : "text-accent") : "text-mute")}
+                                >
+                                  {tag}
+                                </span>
+                              </>
+                            )}
+                          </MainSetButton>
+                          <CheckDot
+                            done={s.done}
+                            tone={beat ? "gold" : "accent"}
+                            onClick={() => toggleDone(ref)}
+                            label={`${primaryName} set ${i + 1} logged`}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1 flex min-h-11 flex-wrap items-center justify-between gap-x-4 gap-y-1">
+                    <div className="min-h-6">
+                      <Plates weight={primaryEx.sets.find((s) => !s.done)?.targetWeight ?? null} />
+                    </div>
+                    {!isPreview && (
+                      <div className="-mr-2 flex items-center">
+                        {primaryEx.sets.length < MAX_SETS && (
+                          <button
+                            type="button"
+                            onClick={addMainSet}
+                            aria-label={`Add a back-off set of ${primaryName}`}
+                            className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                          >
+                            <Plus size={12} /> set
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </Section>
           )}
 
@@ -751,7 +1004,7 @@ export function TrainScreen() {
                           isPreview || session.deload || session.completedAt || e.measure !== "reps"
                             ? null
                             : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb);
-                        const showHint = !!hint && hintApplies(hint, e.sets);
+                        const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
                         return (
                           <div key={exIdx} className={clsx(exIdx > 0 && "mt-5")}>
                             <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
@@ -767,7 +1020,7 @@ export function TrainScreen() {
                                   data-ex={`${b.id}:${exIdx}`}
                                   data-control="options"
                                   className="tap -mr-3 grid h-11 w-11 place-items-center text-mute"
-                                  onClick={() => setActions(ref)}
+                                  onClick={() => setActions({ ...ref, exerciseId: e.exerciseId })}
                                 >
                                   <MoreHorizontal size={16} />
                                 </button>
@@ -775,17 +1028,38 @@ export function TrainScreen() {
                             </div>
                             {showHint && hint && (
                               <div className="-mt-1 mb-1 flex flex-wrap items-center gap-x-2 text-xs text-mute">
-                                <span title={hint.reason}>
-                                  Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb · all reps → try{" "}
-                                  <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
-                                </span>
+                                {hint.kind === "hold" ? (
+                                  // Calmer than an increase: nothing to apply, just "stay here".
+                                  <span title={hint.reason}>
+                                    Missed reps at <span className="num">{lb(hint.lastWeight)}</span> lb · hold
+                                  </span>
+                                ) : (
+                                  <>
+                                    <span title={hint.reason}>
+                                      Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb
+                                      <span className="max-[359px]:hidden"> · all reps</span> → try{" "}
+                                      <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
+                                    </span>
+                                    <button
+                                      type="button"
+                                      aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
+                                      className="tap label -my-2 min-h-11 px-1.5 text-accent"
+                                      onClick={() => applyHint(ref, hint.suggestedWeight, name)}
+                                    >
+                                      Apply
+                                    </button>
+                                  </>
+                                )}
                                 <button
                                   type="button"
-                                  aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
-                                  className="tap label -my-2 min-h-11 px-1.5 text-accent"
-                                  onClick={() => applyHint(ref, hint.suggestedWeight, name)}
+                                  aria-label={`Dismiss the ${name} hint for today`}
+                                  className="tap -my-2 -ml-1 grid min-h-11 w-8 place-items-center text-mute"
+                                  onClick={() => {
+                                    dismissHint(e.exerciseId);
+                                    focusAfter(exControl(ref, "options"));
+                                  }}
                                 >
-                                  Apply
+                                  <X size={12} />
                                 </button>
                               </div>
                             )}
@@ -887,6 +1161,7 @@ export function TrainScreen() {
               <div className="mt-10 flex flex-col items-center gap-4">
                 <FinishPanel
                   session={session}
+                  allowEmpty={primarySkipped}
                   doneSets={doneSets}
                   totalSets={totalSets}
                   volume={volume}
@@ -898,7 +1173,7 @@ export function TrainScreen() {
                   }}
                   onReopen={() => commit({ ...session, completedAt: null })}
                 />
-                {saved && !isSessionStarted(session) && !session.completedAt && (
+                {saved && !plannedFor && !isSessionStarted(session) && !session.completedAt && (
                   <button
                     type="button"
                     className="label min-h-11 px-3 text-mute"
@@ -919,7 +1194,14 @@ export function TrainScreen() {
 
       {/* Room for whatever the bottom dock holds (rest pill, toasts, sync), so it never covers the last controls. */}
       <div aria-hidden style={{ height: dockHeight }} />
-      <RestTimer from={rest.from} target={rest.target} base={rest.base} onTarget={rest.setTarget} onDismiss={rest.stop} />
+      <RestTimer
+        from={rest.from}
+        target={rest.target}
+        base={rest.base}
+        onTarget={rest.setTarget}
+        onDismiss={rest.stop}
+        nextWeightLb={nextWeightLb}
+      />
 
       <SetEditSheet
         open={!!editingFound}
@@ -940,7 +1222,10 @@ export function TrainScreen() {
             mapExercise(session, editing, (e) => replaceSetAndPropagate(e, prev, s)),
             { message: `${setLabel(editing)} ${logged ? "logged" : "updated"}`, scope: editing, duration: 4000 },
           );
-          if (logged) rest.start(restFor(editingFound.block.kind));
+          if (logged) {
+            rest.start(restFor(editingFound.block.kind));
+            setLastLogged(editing);
+          }
           setEditing(null);
         }}
         onDelete={
@@ -973,6 +1258,7 @@ export function TrainScreen() {
           if (pr) markSeen([key]);
           commit(next);
           rest.start(restFor("primary"));
+          setLastLogged(amrap);
           return pr && { reps: pr.reps, weightLb: pr.weightLb, previousReps: pr.previousReps };
         }}
         onApply={async (gain, reps) => {
@@ -984,15 +1270,24 @@ export function TrainScreen() {
           // Queue the max and record the bump on the set in the same step (no waiting for the
           // server's row in between), so the set can never show the AMRAP as unapplied while the
           // max is already raised — which would offer the bump twice.
-          const entry = addMax({
-            exerciseId: amrapFound.ex.exerciseId,
-            valueLb: primaryMax.valueLb + g,
-            date,
-            source: "amrap",
-            note: `${reps} reps vs ${amrapFound.set.targetReps} @ ${loggedWeight} lb`,
-          });
-          saveSession(mapSet(fromSession, amrap, (x) => ({ ...x, done: true, reps, appliedProgressionLb: g })));
-          // The sheet just showed the bump: don't celebrate it again (a temp id is remapped on sync).
+          const exerciseId = amrapFound.ex.exerciseId;
+          const valueLb = primaryMax.valueLb + g;
+          // The sheet just showed the bump (and any rep PR): no full-screen celebration may follow
+          // it. The store marks the server's entry seen as it is acknowledged; the local entry's
+          // temporary key is marked now, in the same step as the write, so the celebrations never
+          // see it unseen (the outbox swaps the temp id in the key for the real one).
+          const entry = addMax(
+            { exerciseId, valueLb, date, source: "amrap", note: `${reps} reps vs ${amrapFound.set.targetReps} @ ${loggedWeight} lb` },
+            { markSeenOnAck: true },
+          );
+          const applied = mapSet(fromSession, amrap, (x) => ({ ...x, done: true, reps, appliedProgressionLb: g }));
+          const temp = currentData()?.maxEntries.find(
+            (e) => e.id < 0 && e.exerciseId === exerciseId && e.source === "amrap" && e.date === date && e.valueLb === valueLb,
+          );
+          const repKey = `amrap-${date}-${exerciseId}`;
+          const repPr = amrapPrs([...data.sessions.filter((x) => x.date !== date), applied], date).some((p) => p.key === repKey);
+          markSeen([...(temp ? [`max-${temp.id}`] : []), ...(repPr ? [repKey] : [])]);
+          saveSession(applied);
           markSeen([`max-${(await entry).id}`]);
         }}
       />

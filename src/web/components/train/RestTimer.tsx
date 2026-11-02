@@ -2,6 +2,7 @@ import clsx from "clsx";
 import { motion } from "motion/react";
 import { useCallback, useEffect, useId, useState } from "react";
 import { Check, Timer, X } from "lucide-react";
+import { platesPerSide } from "../../../shared/program";
 import { success } from "../../lib/haptics";
 import { DOCK_PRIORITY, DockItem } from "../Dock";
 
@@ -77,6 +78,61 @@ export function nextTarget(t: number, base: number): number {
 
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
+type PlateGroup = { plate: number; count: number };
+
+/**
+ * Plates per side as compact chips: runs of three or more read "45×3"; a load needing more than
+ * four chips also folds pairs ("45×2"), so the pill stays short.
+ */
+export function plateChips(plates: number[]): PlateGroup[] {
+  const runs: PlateGroup[] = [];
+  for (const p of plates) {
+    const last = runs[runs.length - 1];
+    if (last && last.plate === p) last.count++;
+    else runs.push({ plate: p, count: 1 });
+  }
+  const spread = (min: number) =>
+    runs.flatMap((g) => (g.count >= min ? [g] : Array.from({ length: g.count }, () => ({ plate: g.plate, count: 1 }))));
+  const loose = spread(3);
+  return loose.length > 4 ? spread(2) : loose;
+}
+
+/** The next barbell set's load and plates per side, for the pill (null: nothing to show). */
+function nextLoad(weightLb: number | null) {
+  if (weightLb === null || weightLb <= 45) return null;
+  const { plates, remainder } = platesPerSide(weightLb);
+  if (!plates.length) return null;
+  const chips = plateChips(plates);
+  return { weightLb, plates, remainder, chips, crowded: chips.length + (remainder > 0 ? 1 : 0) > 4 };
+}
+
+/** "next 225 · 45 45": what to load for the coming barbell set. */
+function NextPlates({ load }: { load: NonNullable<ReturnType<typeof nextLoad>> }) {
+  const { weightLb, plates, remainder, chips } = load;
+  const spoken = `Next set ${weightLb} lb: ${plates.join(", ")} per side${remainder > 0 ? `, plus ${remainder} lb` : ""}.`;
+  return (
+    <span className="flex items-center gap-1.5 pr-1 pl-1.5 whitespace-nowrap">
+      <span className="sr-only">{spoken}</span>
+      {/* On narrow phones (or for a load with many plates) the pill drops the word and keeps the numbers. */}
+      <span aria-hidden className={clsx("label text-mute max-[359px]:hidden", load.crowded && "hidden")}>
+        next
+      </span>
+      <span aria-hidden className={clsx("num text-[0.8125rem] text-fg-2", load.crowded && "max-[399px]:hidden")}>
+        {weightLb}
+      </span>
+      <span aria-hidden className="flex items-center gap-0.5">
+        {chips.map((g, i) => (
+          <span key={i} className="num rounded-[4px] bg-white/[0.07] px-[3px] text-[0.625rem] leading-4 text-fg-2">
+            {g.plate}
+            {g.count > 1 && <span className="text-mute">×{g.count}</span>}
+          </span>
+        ))}
+        {remainder > 0 && <span className="num text-[0.625rem] text-warn">+{remainder}</span>}
+      </span>
+    </span>
+  );
+}
+
 /**
  * Rest pill in the bottom dock: counts down to the rest's target (tap to cycle 60/90/120/180 s
  * and the Settings value for this rest), then flips to "Ready" with a check and counts the overtime.
@@ -87,6 +143,7 @@ export function RestTimer({
   base,
   onTarget,
   onDismiss,
+  nextWeightLb = null,
 }: {
   from: number | null;
   target: number;
@@ -94,6 +151,8 @@ export function RestTimer({
   base: number;
   onTarget: (s: number) => void;
   onDismiss: () => void;
+  /** Load of the next barbell set, shown as plates per side; null hides it. */
+  nextWeightLb?: number | null;
 }) {
   const [now, setNow] = useState(Date.now());
   const hintId = useId();
@@ -121,6 +180,8 @@ export function RestTimer({
   }, [ready, from, target, announced]);
 
   const cycle = () => onTarget(nextTarget(target, base));
+  const next = nextLoad(nextWeightLb);
+  const showNext = !!next;
 
   return (
     <>
@@ -148,20 +209,29 @@ export function RestTimer({
               className="tap flex min-h-11 items-center gap-2 py-2 pr-1 pl-4 whitespace-nowrap"
             >
               {ready ? <Check size={14} strokeWidth={3} className="text-accent" /> : <Timer size={14} className="text-fg-2" />}
-              <span className={clsx("label", ready ? "text-accent" : "text-fg-2")}>{ready ? "Ready" : "Rest"}</span>
+              {/* With the next set's plates shown, the word goes (icon and colour still say rest / ready). */}
+              <span className={clsx("label", ready ? "text-accent" : "text-fg-2", showNext && "sr-only")}>{ready ? "Ready" : "Rest"}</span>
               <span className={clsx("num min-w-[4ch]", ready ? "text-accent" : "text-fg")}>
                 {ready ? `+${clock(secs - target)}` : clock(target - secs)}
               </span>
-              {/* The target only says something new once the countdown has moved off it. */}
-              {secs > 0 && (
-                <span className="num text-[0.6875rem] text-fg-2">
-                  <span className="sr-only">target </span>/{clock(target)}
-                </span>
-              )}
+              {/* The target only says something new once the countdown has moved off it; its
+                  space is kept from the start so the pill doesn't widen when it appears. */}
+              <span
+                aria-hidden={secs > 0 ? undefined : true}
+                className={clsx(
+                  "num text-[0.6875rem] text-fg-2 transition-opacity duration-300",
+                  secs > 0 ? "opacity-100" : "opacity-0",
+                  // A load with many plates needs the room on the narrowest phones.
+                  next?.crowded && "max-[399px]:hidden",
+                )}
+              >
+                <span className="sr-only">target </span>/{clock(target)}
+              </span>
             </button>
             <span id={hintId} className="sr-only">
               Tap to change the target rest.
             </span>
+            {next && <NextPlates load={next} />}
             <button
               type="button"
               onClick={onDismiss}

@@ -10,6 +10,7 @@ import { useToast } from "../Toast";
 import { BoxNumber, DotScale, NumberInput } from "../ui";
 import { useFocusAfter } from "../useFocusAfter";
 import { JournalText } from "../TextArea";
+import { BenchmarkHistorySheet } from "./BenchmarkHistory";
 import { SleepField, TextField } from "./fields";
 import { filledCount, parseNutrition } from "./parseNutrition";
 import { PasteTotals, readClipboard, type PasteState } from "./PasteTotals";
@@ -277,6 +278,7 @@ export function MetconEditor({ day, patch }: EditorProps) {
     () => (day.metconBenchmark ? benchmarkBest(data.days, day.metconBenchmark, day.date) : null),
     [data.days, day.metconBenchmark, day.date],
   );
+  const [historyOpen, setHistoryOpen] = useState(false);
   const score = day.metconScore ? parseScore(day.metconScore) : null;
   const verdict = best?.parsed && score ? compareScore(score, best.parsed) : null;
 
@@ -316,10 +318,17 @@ export function MetconEditor({ day, patch }: EditorProps) {
       {day.metconBenchmark && (
         <div id={bestId} className="-mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs" aria-live="polite">
           {best ? (
-            <span className="text-mute">
+            // Opens every result for this benchmark.
+            <button
+              type="button"
+              aria-haspopup="dialog"
+              onClick={() => setHistoryOpen(true)}
+              className="hit -my-1 rounded-sm py-1 text-left text-mute underline decoration-white/20 decoration-dotted underline-offset-4"
+            >
               Best <span className="num text-fg-2">{best.score}</span> ·{" "}
               {formatShortDate(best.date, best.date.slice(0, 4) !== day.date.slice(0, 4))}
-            </span>
+              <span className="sr-only">. Show all results</span>
+            </button>
           ) : (
             <span className="text-mute">First time logged — this sets the mark.</span>
           )}
@@ -334,6 +343,15 @@ export function MetconEditor({ day, patch }: EditorProps) {
             </button>
           ))}
         </div>
+      )}
+      {day.metconBenchmark && (
+        <BenchmarkHistorySheet
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          name={day.metconBenchmark}
+          days={data.days}
+          date={day.date}
+        />
       )}
       <JournalText
         ariaLabel="Metcon notes"

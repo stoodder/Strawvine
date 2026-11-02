@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
-import { DockItem, DockProvider } from "./Dock";
+import { describe, expect, it, vi } from "vitest";
+import { DockItem, DockProvider, useDockTop } from "./Dock";
 import { Sheet } from "./ui";
 
 const stack = () => document.querySelector<HTMLElement>("[data-dock]")!;
@@ -107,5 +107,40 @@ describe("Dock", () => {
     );
     expect(item("rest").style.display).toBe("none");
     expect(item("toast").style.display).toBe("contents");
+  });
+
+  it("useDockTop: the stack's top edge, the viewport height outside a provider or without layout", () => {
+    function Probe() {
+      return <output>{useDockTop()}</output>;
+    }
+    const { unmount } = render(<Probe />);
+    expect(screen.getByRole("status").textContent).toBe(String(window.innerHeight));
+    unmount();
+
+    // jsdom has no layout: an all-zero rect reads as "unmeasured".
+    render(
+      <DockProvider>
+        <Probe />
+      </DockProvider>,
+    );
+    expect(screen.getByRole("status").textContent).toBe(String(window.innerHeight));
+  });
+
+  it("useDockTop follows the measured stack (rounded, never below the viewport)", () => {
+    const spy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.dock !== undefined
+        ? ({ top: 640.4, height: 40, bottom: 680.4, left: 0, right: 0, width: 0, x: 0, y: 640.4 } as DOMRect)
+        : new DOMRect();
+    });
+    function Probe() {
+      return <output>{useDockTop()}</output>;
+    }
+    render(
+      <DockProvider>
+        <Probe />
+      </DockProvider>,
+    );
+    expect(screen.getByRole("status").textContent).toBe(String(Math.min(window.innerHeight, 640)));
+    spy.mockRestore();
   });
 });

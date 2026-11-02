@@ -4,7 +4,7 @@ import { useCallback, useId, useRef, useState } from "react";
 import type { Session } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
 import { useDockHeight } from "../Dock";
-import { afterLayout, revealAboveDock } from "./reveal";
+import { afterLayout, useRevealAboveDock } from "./reveal";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -13,10 +13,18 @@ export interface RecapLine {
   gold: boolean;
 }
 
-/** AMRAP results and applied max bumps, for the recap (exercises skipped today don't count). */
+/**
+ * AMRAP results and applied max bumps, for the recap (exercises skipped today don't count; a
+ * skipped main lift gets a quiet line of its own).
+ */
 export function recapLines(session: Session, exName: (id: number) => string): RecapLine[] {
   const out: RecapLine[] = [];
-  for (const b of session.blocks)
+  for (const b of session.blocks) {
+    if (b.skipped) {
+      const main = b.exercises[0];
+      if (b.kind === "primary" && main) out.push({ text: `${exName(main.exerciseId)} skipped today`, gold: false });
+      continue;
+    }
     for (const e of b.exercises) {
       if (e.skipped) continue;
       for (const s of e.sets) {
@@ -30,6 +38,7 @@ export function recapLines(session: Session, exName: (id: number) => string): Re
         if (s.appliedProgressionLb) out.push({ text: `New max · +${s.appliedProgressionLb} lb`, gold: true });
       }
     }
+  }
   return out;
 }
 
@@ -78,6 +87,7 @@ export function FinishPanel({
   exName,
   onFinish,
   onReopen,
+  allowEmpty = false,
 }: {
   session: Session;
   doneSets: number;
@@ -86,11 +96,14 @@ export function FinishPanel({
   exName: (id: number) => string;
   onFinish: () => void;
   onReopen: () => void;
+  /** Finishing needs no logged set (the main lift was skipped today: the day can still close). */
+  allowEmpty?: boolean;
 }) {
   const [confirming, setConfirming] = useState(false);
   const hintId = useId();
   const unlogged = totalSets - doneSets;
   const dockHeight = useDockHeight();
+  const revealAboveDock = useRevealAboveDock();
   /**
    * Where focus goes once the next view mounts: the control that was pressed (Finish, Keep
    * logging, Reopen) is replaced, so without this focus would drop to <body>. Only set by a
@@ -101,9 +114,12 @@ export function FinishPanel({
    * The question card, as it mounts (after the Finish button's exit): bring it clear of the dock
    * (rest timer, toasts).
    */
-  const confirmCard = useCallback((el: HTMLDivElement | null) => {
-    if (el) afterLayout(() => revealAboveDock(el, { center: true }));
-  }, []);
+  const confirmCard = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (el) afterLayout(() => revealAboveDock(el, { center: true }));
+    },
+    [revealAboveDock],
+  );
 
   const finish = () => {
     focusNext.current = "recap";
@@ -184,7 +200,7 @@ export function FinishPanel({
     );
   }
 
-  if (doneSets === 0)
+  if (doneSets === 0 && !allowEmpty)
     return (
       <div className="flex w-full flex-col items-center gap-2">
         <button type="button" disabled aria-describedby={hintId} className="btn-ghost w-full py-3.5 text-base">

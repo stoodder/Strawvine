@@ -882,8 +882,9 @@ export function validateOp(op: Op): string | null {
         if (b.exercises.length > MAX_SUPERSET) return `A superset can have at most ${MAX_SUPERSET} exercises.`;
         for (const x of b.exercises) if (x.sets.length > MAX_SETS) return `An exercise can have at most ${MAX_SETS} sets.`;
       }
-      if (doc.notes.length > 20_000) return "Workout notes are too long (20,000 characters max).";
-      if (doc.label.length > 60) return "The workout name is too long (60 characters max).";
+      // Sessions saved by older builds can carry null notes/labels: never throw while validating.
+      if ((doc.notes ?? "").length > 20_000) return "Workout notes are too long (20,000 characters max).";
+      if ((doc.label ?? "").length > 60) return "The workout name is too long (60 characters max).";
       return null;
     }
     case "day": {

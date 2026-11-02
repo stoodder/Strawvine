@@ -2,6 +2,7 @@ import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
 import { useId, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
+import { weekdayName } from "../../../shared/dates";
 import type { ChecklistItem } from "../../../shared/gamify";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { compactSteps, fmt, minutesToHM } from "../../lib/format";
@@ -15,6 +16,11 @@ export interface LiftSummary {
   primaryName: string | null | undefined;
   setsDone: number;
   setsTotal: number;
+  /** The session was planned for another day and done on this one ("Do this session today"). */
+  plannedFor?: string | null;
+  /** The day the checklist is for (`plannedFor` reads "done today" when it's today). */
+  date?: string;
+  today?: string;
 }
 
 /**
@@ -143,9 +149,17 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
     case "lift":
       return {
         value: lift.setsTotal ? <Value n={`${lift.setsDone}/${lift.setsTotal}`} unit="sets" /> : null,
-        sub: [lift.label, lift.primaryName].filter(Boolean).join(" · ") || "Session",
+        sub: [movedLabel(lift) ?? lift.label, lift.primaryName].filter(Boolean).join(" · ") || "Session",
       };
   }
+}
+
+/** "Wed's Pull, done today" for a session moved here from another day; null otherwise. */
+function movedLabel(lift: LiftSummary): string | null {
+  const from = lift.plannedFor;
+  if (!from || !lift.date || from === lift.date) return null;
+  const name = lift.label ? `${weekdayName(from, true)}'s ${lift.label}` : `${weekdayName(from, true)}'s session`;
+  return `${name}, done ${lift.date === lift.today ? "today" : weekdayName(lift.date, true)}`;
 }
 
 /** Status-only dot: hidden from assistive tech (the row says done / not done), tap forwards to the row. */

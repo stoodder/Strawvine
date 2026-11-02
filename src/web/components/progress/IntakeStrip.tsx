@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { motion, useReducedMotion } from "motion/react";
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { addDays, dateRange, formatShortDate, weekdayName } from "../../../shared/dates";
 import type { EnergyDay } from "../../../shared/energy";
 import type { AppData } from "../../../shared/gamify";
@@ -24,17 +24,19 @@ interface StripDay {
  * with the excess in warn; a day without calories or a target is a dim stub. Today is still in
  * progress and says so.
  */
-export function IntakeStrip({ data, series, today }: { data: AppData; series: ReadonlyArray<EnergyDay>; today: string }) {
+export const IntakeStrip = memo(function IntakeStrip({
+  data,
+  series,
+  today,
+}: {
+  data: AppData;
+  series: ReadonlyArray<EnergyDay>;
+  today: string;
+}) {
   const reduce = useReducedMotion();
-  const days = useMemo<StripDay[]>(
-    () =>
-      dateRange(addDays(today, -6), today).map((date) => ({
-        date,
-        eaten: data.days.find((d) => d.date === date)?.calories ?? null,
-        target: targetsFor(date, series, data).recommendation?.calories ?? null,
-      })),
-    [data, series, today],
-  );
+  // Memoised on the data itself (not every Progress render: the range toggle, the chart's
+  // table…). Calories come from one pass over the days instead of a scan per column.
+  const days = useMemo<StripDay[]>(() => stripDays(data, series, today), [data, series, today]);
   if (days.every((d) => d.eaten === null)) return null;
 
   const describe = (d: StripDay) => {
@@ -106,6 +108,18 @@ export function IntakeStrip({ data, series, today }: { data: AppData; series: Re
       </ul>
     </div>
   );
+});
+
+/** The last seven days: calories eaten and each day's own target. */
+export function stripDays(data: AppData, series: ReadonlyArray<EnergyDay>, today: string): StripDay[] {
+  const from = addDays(today, -6);
+  const eaten = new Map<string, number | null>();
+  for (const d of data.days) if (d.date >= from && d.date <= today) eaten.set(d.date, d.calories);
+  return dateRange(from, today).map((date) => ({
+    date,
+    eaten: eaten.get(date) ?? null,
+    target: targetsFor(date, series, data).recommendation?.calories ?? null,
+  }));
 }
 
 /** "+340", "−85", "+1.2k": fits a narrow column at 320px. */

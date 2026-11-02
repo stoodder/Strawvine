@@ -95,3 +95,64 @@ export function planSignature(s: Session): string {
     })),
   });
 }
+
+/** A set in page order: the main lift first, then the accessory blocks as listed. */
+export interface OrderedSet {
+  block: Block;
+  ex: BlockExercise;
+  ref: SetRef;
+  set: SetEntry;
+}
+
+/** Every set the screen shows as loggable, in page order (skipped exercises and a skipped main lift left out). */
+export function setsInPageOrder(session: Session): OrderedSet[] {
+  const blocks = [...session.blocks.filter((b) => b.kind === "primary"), ...session.blocks.filter((b) => b.kind !== "primary")];
+  const out: OrderedSet[] = [];
+  for (const block of blocks) {
+    if (block.skipped) continue;
+    block.exercises.forEach((ex, exIdx) => {
+      if (ex.skipped) return;
+      for (const set of ex.sets) out.push({ block, ex, set, ref: { blockId: block.id, exIdx, setId: set.id } });
+    });
+  }
+  return out;
+}
+
+/**
+ * The set that comes next after `after` was logged: the next open set of the same exercise, else
+ * the first open set after it in page order. Without `after` (e.g. a rest restored after a
+ * reload), the first open set of the session.
+ */
+export function nextOpenSet(session: Session, after: SetRef | null): OrderedSet | null {
+  const all = setsInPageOrder(session);
+  const at = after ? all.findIndex((x) => x.ref.setId === after.setId) : -1;
+  if (at === -1) return all.find((x) => !x.set.done) ?? null;
+  const rest = all.slice(at + 1).filter((x) => !x.set.done);
+  return rest.find((x) => x.ref.blockId === after!.blockId && x.ref.exIdx === after!.exIdx) ?? rest[0] ?? null;
+}
+
+/**
+ * Re-locate a set held by an open sheet in the latest session (it may have moved: a merge with
+ * another device's edit can insert or remove an exercise before it). The same ref when nothing
+ * moved; null when the set is gone.
+ */
+export function resolveSetRef(session: Session, ref: SetRef | null): SetRef | null {
+  if (!ref) return null;
+  const block = session.blocks.find((b) => b.id === ref.blockId);
+  if (!block) return null;
+  if (block.exercises[ref.exIdx]?.sets.some((s) => s.id === ref.setId)) return ref;
+  const exIdx = block.exercises.findIndex((e) => e.sets.some((s) => s.id === ref.setId));
+  return exIdx === -1 ? null : { ...ref, exIdx };
+}
+
+/** An exercise held by an open sheet, by block and exercise id (see `resolveSetRef`). */
+export type HeldEx = ExRef & { exerciseId: number };
+
+export function resolveExRef(session: Session, ref: HeldEx | null): HeldEx | null {
+  if (!ref) return null;
+  const block = session.blocks.find((b) => b.id === ref.blockId);
+  if (!block) return null;
+  if (block.exercises[ref.exIdx]?.exerciseId === ref.exerciseId) return ref;
+  const exIdx = block.exercises.findIndex((e) => e.exerciseId === ref.exerciseId);
+  return exIdx === -1 ? null : { ...ref, exIdx };
+}

@@ -2,21 +2,27 @@ import { formatShortDate, isISODate, weekdayName } from "../../../shared/dates";
 
 /**
  * The header date ("SUN · NOV 1"). Tapping it opens the platform's own date picker — an
- * invisible native <input type="date"> laid over the label — to jump to any past day.
- * A quiet dot after the date says this day still has edits waiting to sync.
+ * invisible native <input type="date"> laid over the label — to jump to any day up to `max`
+ * (default: `today`). With `pending`, a quiet dot after the date says this day still has edits
+ * waiting to sync (Today shows a tappable `PendingSyncChip` instead).
  */
 export function DateJump({
   date,
   today,
-  pending,
+  max,
+  pending = false,
   onPick,
 }: {
   date: string;
+  /** The real today: the year is spelled out for dates in another year. */
   today: string;
+  /** The latest day that can be picked (e.g. the last previewable day on Train). Default `today`. */
+  max?: string;
   /** This day has writes the server hasn't confirmed yet. */
-  pending: boolean;
+  pending?: boolean;
   onPick: (date: string) => void;
 }) {
+  const upper = max ?? today;
   const visible = `${weekdayName(date, true)} · ${formatShortDate(date)}`;
   const otherYear = date.slice(0, 4) !== today.slice(0, 4);
   // The name starts with the visible text (so "tap Mon · Nov 2" works for voice control).
@@ -39,7 +45,7 @@ export function DateJump({
         type="date"
         aria-label={pending ? `${name}. Changes waiting to sync.` : name}
         value={date}
-        max={today}
+        max={upper}
         required
         onClick={(e) => {
           // Desktop browsers only open the calendar from its icon; open it from anywhere.
@@ -51,7 +57,7 @@ export function DateJump({
         }}
         onChange={(e) => {
           const v = e.target.value;
-          if (v && isISODate(v) && v <= today && v !== date) onPick(v);
+          if (v && isISODate(v) && v <= upper && v !== date) onPick(v);
         }}
         className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
         style={{ colorScheme: "dark" }}

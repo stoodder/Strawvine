@@ -1,4 +1,5 @@
 import clsx from "clsx";
+import { useMemo } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ChevronLeft, ChevronRight, Flame, Settings2, Sparkles, TriangleAlert, Info } from "lucide-react";
 import { addDays, isISODate, weekdayName } from "../../shared/dates";
@@ -8,13 +9,15 @@ import { targetsFor } from "../../shared/insights";
 import { cyclePosition, programDayFor } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
-import { buildSession, sessionCounts } from "../../shared/session";
+import { buildSession, nextSession, sessionCounts } from "../../shared/session";
 import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { JournalText } from "../components/TextArea";
 import { DayChecklist } from "../components/today/Checklist";
 import { DateJump } from "../components/today/DateJump";
 import { DayRing } from "../components/today/DayRing";
+import { NextSession } from "../components/today/NextSession";
+import { PendingSyncChip } from "../components/today/PendingSyncChip";
 import { SavedTick, useSavedFlash } from "../components/today/saved";
 import { fmt, minutesToHM, signed } from "../lib/format";
 import { success } from "../lib/haptics";
@@ -59,6 +62,8 @@ export function TodayScreen() {
   const primaryName = primaryEx ? data.exercises.find((e) => e.id === primaryEx.exerciseId)?.name : null;
   // Same count as Train's header: skipped exercises don't count.
   const { done: setsDone, total: setsTotal } = sess ? sessionCounts(sess) : { done: 0, total: 0 };
+  // Only on today: what's coming up next on the program (links to its preview on Train).
+  const upcoming = useMemo(() => (isToday ? nextSession(today, data) : null), [isToday, today, data]);
 
   const loggedCount = energy?.loggedCount ?? 0;
   const calibrating = loggedCount < CALIBRATION_DAYS;
@@ -72,7 +77,7 @@ export function TodayScreen() {
   return (
     <div>
       {/* Header */}
-      <header className="flex items-center justify-between pt-2">
+      <header className="flex flex-wrap items-center justify-between pt-2">
         <div className="flex items-center">
           <button
             type="button"
@@ -82,7 +87,7 @@ export function TodayScreen() {
           >
             <ChevronLeft size={18} />
           </button>
-          <DateJump date={date} today={today} pending={pending} onPick={go} />
+          <DateJump date={date} today={today} onPick={go} />
           <button
             type="button"
             aria-label="Next day"
@@ -93,9 +98,13 @@ export function TodayScreen() {
             <ChevronRight size={18} />
           </button>
         </div>
-        <Link to="/settings" aria-label="Settings" className="tap -mr-3 grid h-11 w-11 place-items-center text-mute">
-          <Settings2 size={18} />
-        </Link>
+        {/* Wraps under the date when there's no room (very narrow / zoomed in), right-aligned. */}
+        <div className="ml-auto flex items-center gap-1">
+          <PendingSyncChip pending={pending} />
+          <Link to="/settings" aria-label="Settings" className="tap -mr-3 grid h-11 w-11 place-items-center text-mute">
+            <Settings2 size={18} />
+          </Link>
+        </div>
       </header>
 
       {/* Hero */}
@@ -221,9 +230,13 @@ export function TodayScreen() {
             primaryName,
             setsDone,
             setsTotal,
+            plannedFor: sess?.plannedFor,
+            date,
+            today,
           }}
           saved={saved}
         />
+        {upcoming && <NextSession next={upcoming} today={today} />}
       </Section>
 
       {/* Recovery snapshot */}

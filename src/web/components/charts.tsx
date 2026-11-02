@@ -4,7 +4,7 @@
 import clsx from "clsx";
 import { ChevronDown } from "lucide-react";
 import { useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { formatShortDate } from "../../shared/dates";
+import { formatShortDate, startOfWeek } from "../../shared/dates";
 
 export interface Point {
   x: string; // ISO date
@@ -63,6 +63,41 @@ export interface Series {
   color: string;
   kind: "line" | "dots";
   format?: (v: number) => string;
+  /**
+   * Dots only: when the chart spans more than this many days, draw one dot per week (the mean
+   * of that week's values, at the middle of its points) instead of one per day. Reading the
+   * chart (scrubbing, the table) still shows each day's own value.
+   */
+  weeklyOver?: number;
+}
+
+/**
+ * Weekly means of `points` (Monday-start weeks), each placed at the mean index of the points
+ * it summarises. `index` maps a date to its x index.
+ */
+export function weeklyMeans(points: ReadonlyArray<Point>, index: (date: string) => number): Array<{ i: number; y: number }> {
+  const out: Array<{ i: number; y: number }> = [];
+  let week: string | null = null;
+  let n = 0;
+  let sumI = 0;
+  let sumY = 0;
+  const flush = () => {
+    if (n) out.push({ i: sumI / n, y: sumY / n });
+    n = sumI = sumY = 0;
+  };
+  for (const p of points) {
+    if (p.y === null) continue;
+    const w = startOfWeek(p.x);
+    if (w !== week) {
+      flush();
+      week = w;
+    }
+    n++;
+    sumI += index(p.x);
+    sumY += p.y;
+  }
+  flush();
+  return out;
 }
 
 export function LineChart({
@@ -137,8 +172,13 @@ export function LineChart({
     const idx = new Map(dates.map((d, i) => [d, i]));
     // One path per series. Dots are zero-length segments drawn with round caps, so a decade of
     // daily weigh-ins is one element instead of thousands of <circle>s.
-    const paths = series.map((s) => {
+    const weekly = series.map((s) => s.kind === "dots" && s.weeklyOver !== undefined && dates.length > s.weeklyOver);
+    const paths = series.map((s, si) => {
       let d = "";
+      if (weekly[si]) {
+        for (const p of weeklyMeans(s.points, (x) => idx.get(x)!)) d += `M${xOf(p.i).toFixed(1)},${yOf(p.y).toFixed(1)}h0`;
+        return d;
+      }
       for (const p of s.points) {
         if (p.y === null) continue;
         const x = xOf(idx.get(p.x)!).toFixed(1);
@@ -147,7 +187,7 @@ export function LineChart({
       }
       return d;
     });
-    return { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths };
+    return { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- pad / plotW are constants
   }, [series, height, refLine?.y]);
 
@@ -163,7 +203,7 @@ export function LineChart({
   }, [table, geo]);
 
   if (!geo) return <div className="grid h-28 place-items-center text-sm text-mute">{emptyText}</div>;
-  const { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths } = geo;
+  const { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly } = geo;
 
   const onMove = (clientX: number) => {
     const el = ref.current;
@@ -203,6 +243,7 @@ export function LineChart({
       const b = lastOf(s);
       return a && b ? `${s.label} ${fmtOf(s)(a.y!)} to ${fmtOf(s)(b.y!)}.` : `${s.label}: no data.`;
     }),
+    ...series.filter((_, si) => weekly[si]).map((s) => `${s.label} drawn as weekly averages.`),
     refLine ? `${refLine.label}.` : "",
     "Use the left and right arrow keys to read each day.",
   ]

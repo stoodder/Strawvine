@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { addDays, formatShortDate } from "../../shared/dates";
-import { LineChart, type Series } from "./charts";
+import { LineChart, weeklyMeans, type Series } from "./charts";
 
 /** Ten years of daily points: a weigh-in on most days, a smooth trend line on every day. */
 function decade(): Series[] {
@@ -61,5 +61,52 @@ describe("LineChart", () => {
       />,
     );
     expect(screen.getByText("Nothing yet")).toBeTruthy();
+  });
+
+  it("draws the dots as weekly means past `weeklyOver` days, keeping the line and the readout daily", () => {
+    const series = decade();
+    series[0] = { ...series[0]!, weeklyOver: 400 };
+    const { container } = render(<LineChart series={series} title="Bodyweight" />);
+    const path = (stroke: string) => [...container.querySelectorAll("svg path")].find((p) => p.getAttribute("stroke") === stroke)!;
+    const dotCount = path("gray").getAttribute("d")!.match(/M/g)!.length;
+    // 3,650 days ≈ 522 Monday-start weeks (the first and last partial).
+    expect(dotCount).toBeGreaterThanOrEqual(521);
+    expect(dotCount).toBeLessThanOrEqual(523);
+    // The trend line still has every day.
+    const line = [...container.querySelectorAll("svg path")].filter((p) => p.getAttribute("stroke") === "lime").at(-1)!;
+    expect(line.getAttribute("d")!.match(/L/g)!.length).toBe(3649);
+    expect(screen.getByRole("img").getAttribute("aria-label")).toContain("Scale drawn as weekly averages.");
+    // Scrubbing reads the day's own value.
+    const chart = screen.getByRole("img");
+    fireEvent.keyDown(chart, { key: "End" });
+    const lastRaw = series[0]!.points.findLast((p) => p.y !== null)!;
+    if (lastRaw.x === series[0]!.points.at(-1)!.x) expect(container.textContent).toContain(lastRaw.y!.toFixed(1));
+  });
+
+  it("keeps one dot per day for short ranges even with weeklyOver set", () => {
+    const series = decade().map((s) => ({ ...s, points: s.points.slice(-90) }));
+    series[0] = { ...series[0]!, weeklyOver: 400 };
+    const { container } = render(<LineChart series={series} title="Bodyweight" />);
+    const dots = [...container.querySelectorAll("svg path")].find((p) => p.getAttribute("stroke") === "gray")!;
+    expect(dots.getAttribute("d")!.match(/M/g)!.length).toBe(series[0]!.points.filter((p) => p.y !== null).length);
+  });
+});
+
+describe("weeklyMeans", () => {
+  it("averages each Monday-start week at the mean index of its points, skipping gaps", () => {
+    // 2026-11-02 is a Monday.
+    const pts = [
+      { x: "2026-11-01", y: 10 }, // Sun: previous week
+      { x: "2026-11-02", y: 1 },
+      { x: "2026-11-03", y: null },
+      { x: "2026-11-04", y: 3 },
+      { x: "2026-11-09", y: 5 },
+    ];
+    const index = (d: string) => pts.findIndex((p) => p.x === d);
+    expect(weeklyMeans(pts, index)).toEqual([
+      { i: 0, y: 10 },
+      { i: 2, y: 2 },
+      { i: 4, y: 5 },
+    ]);
   });
 });

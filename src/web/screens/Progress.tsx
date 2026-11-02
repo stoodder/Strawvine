@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { useMemo, useState } from "react";
-import { Check } from "lucide-react";
+import { Check, Share } from "lucide-react";
 import { addDays, formatShortDate } from "../../shared/dates";
 import { displayPrefs } from "../../shared/defaults";
 import { CALIBRATION_DAYS, computeEnergySeries } from "../../shared/energy";
@@ -11,6 +11,8 @@ import { MaxSheet } from "../components/MaxSheet";
 import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { IntakeStrip } from "../components/progress/IntakeStrip";
+import { checkinText, shareText } from "../components/progress/shareCheckin";
+import { useToast } from "../components/Toast";
 import { formatProjectedRange } from "../components/projection";
 import { useTitle } from "../components/useTitle";
 import { fmt, minutesToHM, signed } from "../lib/format";
@@ -49,6 +51,8 @@ export function ProgressScreen() {
         color: "var(--color-fg-2)",
         points: series.map((d) => ({ x: d.date, y: d.weightLb })),
         format: (v) => v.toFixed(1),
+        // Past ~a year, a dot per day is a smear: one per week (the trend line stays daily).
+        weeklyOver: 400,
       },
       {
         key: "avg",
@@ -87,6 +91,13 @@ export function ProgressScreen() {
   const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
   const goal = data.settings.weightGoal;
   const strong = displayPrefs(data.settings).highContrast;
+  const toast = useToast();
+  const hasCheckin = !(c.daysLogged === 0 && c.tdee === null);
+  const share = async () => {
+    const outcome = await shareText(checkinText(c, { today, goalLb: goal?.targetLb ?? null }), "Weekly check-in");
+    if (outcome === "copied") toast.show({ message: "Check-in copied", tone: "good" });
+    else if (outcome === "failed") toast.show({ message: "Couldn't share or copy the check-in", tone: "warn" });
+  };
 
   return (
     <div>
@@ -99,12 +110,24 @@ export function ProgressScreen() {
       <Section
         label="Weekly check-in"
         right={
-          <span className="label">
-            {formatShortDate(c.from)} – {formatShortDate(c.to)}
-          </span>
+          <>
+            <span className="label">
+              {formatShortDate(c.from)} – {formatShortDate(c.to)}
+            </span>
+            {hasCheckin && (
+              <button
+                type="button"
+                aria-label="Share check-in"
+                onClick={() => void share()}
+                className="tap -my-3.5 -mr-3 ml-1 grid h-11 w-11 place-items-center text-mute"
+              >
+                <Share size={15} aria-hidden />
+              </button>
+            )}
+          </>
         }
       >
-        {c.daysLogged === 0 && c.tdee === null ? (
+        {!hasCheckin ? (
           <p className="text-sm leading-relaxed text-mute">
             Your first check-in builds itself from a week of mornings and meals. Log weight and calories daily and it lands here on{" "}
             <span className="text-fg-2">{formatShortDate(addDays(firstLoggedOr(data.days, today), 7))}</span>.

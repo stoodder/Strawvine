@@ -271,6 +271,12 @@ describe("rejected entries", () => {
     expect(validateOp({ kind: "session", date: "2026-01-01", doc: doc(6) })).toBeNull();
     expect(validateOp({ kind: "session", date: "2026-01-01", doc: doc(7) })).toMatch(/superset/);
     expect(validateOp({ kind: "day", date: "2026-01-01", patch: { steps: 1 } })).toBeNull();
+    // Legacy sessions with null notes/label must validate instead of throwing (finishing such a session was lost).
+    const legacy = { ...doc(1), notes: null, label: null } as unknown as Parameters<typeof validateOp>[0] extends { doc?: infer D }
+      ? D
+      : never;
+    expect(() => validateOp({ kind: "session", date: "2026-01-01", doc: legacy })).not.toThrow();
+    expect(validateOp({ kind: "session", date: "2026-01-01", doc: legacy })).toBeNull();
   });
 });
 
