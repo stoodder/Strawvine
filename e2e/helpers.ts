@@ -1,4 +1,5 @@
 import { test as base, expect, type Page } from "@playwright/test";
+import type { Bootstrap } from "../src/shared/schemas";
 
 export { expect };
 export const PASSWORD = process.env.E2E_PASSWORD ?? "e2e-password-not-secret";
@@ -134,3 +135,61 @@ export async function startClockAt(page: Page, time: Date) {
   await page.clock.install({ time });
   await page.clock.resume();
 }
+
+/**
+ * Onboard on Sunday 2026-10-25 (fresh database) with a running clock, then move the clock to
+ * `day` (default: stay on Sunday) and open the app there. Celebrations are dismissed as they come.
+ */
+export async function onboardedOn(page: Page, day: Date = SUNDAY): Promise<string[]> {
+  await startClockAt(page, SUNDAY);
+  const celebrated = await dismissCelebrations(page);
+  await login(page);
+  if (day !== SUNDAY) {
+    await page.clock.setSystemTime(day);
+    await page.goto("/");
+    await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+  }
+  return celebrated;
+}
+
+/** What the server holds now (GET /api/bootstrap with this page's session cookie). */
+export async function serverData(page: Page): Promise<Bootstrap> {
+  const res = await page.request.get("/api/bootstrap", { headers: { "cache-control": "no-cache" } });
+  expect(res.ok(), `GET /api/bootstrap → ${res.status()}`).toBe(true);
+  return res.json();
+}
+
+/** Wait until nothing is waiting to sync on this page (the dock's pending pill is gone). */
+export async function expectSynced(page: Page) {
+  await expect(page.getByRole("button", { name: /pending/ })).toHaveCount(0, { timeout: 20_000 });
+}
+
+/**
+ * Focus must land somewhere useful after an action that replaces the control that was pressed:
+ * polls until `document.activeElement` is neither <body> nor missing, and returns a short
+ * description of it (tag, accessible name) for further checks.
+ */
+export async function expectFocusNotOnBody(page: Page, what: string): Promise<string> {
+  const describe = () =>
+    page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body || el === document.documentElement) return "body";
+      const name = el.getAttribute("aria-label") ?? el.textContent?.trim().slice(0, 60) ?? "";
+      return `${el.tagName.toLowerCase()} "${name}"`;
+    });
+  let last = "body";
+  await expect
+    .poll(async () => (last = await describe()), { message: `focus after ${what} should not be on <body>`, timeout: 5_000 })
+    .not.toBe("body");
+  return last;
+}
+
+/** The dock's toasts (outside #root, so they stay usable while a sheet is open). */
+export const notifications = (page: Page) => page.getByRole("region", { name: "Notifications" });
+
+/**
+ * A visible toast's message. (The same text is also in the sr-only live region — a `status` —
+ * which this skips.)
+ */
+export const toastMessage = (page: Page, text: string | RegExp) =>
+  notifications(page).locator(":not([role=status]) > span").filter({ hasText: text });

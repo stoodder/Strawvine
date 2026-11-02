@@ -14,13 +14,18 @@
  * server, drop and recreate the database and start the server again before each test — so
  * tests don't depend on each other and a retry starts clean.
  *
+ * At the end it prints a summary table (one row per test: result, duration, retries; skipped and
+ * fixme tests included) from Playwright's JSON report.
+ *
  * E2E_DATABASE_URL (default postgres://postgres@localhost:5432/strawvine_e2e) is dropped and
  * recreated, so its name must contain "e2e" and its host must be local (CI=true lifts the host
  * check) — a guard against wiping a real database. E2E_KEEP_DB doesn't lift the guard.
  */
 import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
@@ -114,10 +119,51 @@ function startServer(port) {
 function stopServer(server) {
   return new Promise((resolve) => {
     if (server.exitCode !== null || server.signalCode !== null) return resolve();
-    const force = setTimeout(() => server.kill("SIGKILL"), 10_000);
+    // The database is dropped next anyway: a server slow to drain its connections is killed.
+    const force = setTimeout(() => server.kill("SIGKILL"), 3_000);
     server.once("exit", () => (clearTimeout(force), resolve()));
     server.kill("SIGTERM");
   });
+}
+
+/** One row per test from Playwright's JSON report: file › title, result, time, retries, note. */
+function printSummary(file) {
+  if (!existsSync(file)) return;
+  let report;
+  try {
+    report = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return;
+  }
+  const rows = [];
+  const visit = (suite, prefix) => {
+    for (const spec of suite.specs ?? [])
+      for (const t of spec.tests ?? []) {
+        const results = t.results ?? [];
+        const last = results.at(-1);
+        // fixme/skip annotations explain why a test didn't run.
+        const note = (t.annotations ?? []).find((a) => a.type === "fixme" || a.type === "skip")?.description ?? "";
+        const status =
+          t.status === "skipped" ? ((t.annotations ?? []).some((a) => a.type === "fixme") ? "fixme" : "skipped")
+          : t.status === "flaky" ? "flaky"
+          : t.status === "expected" ? "passed"
+          : last?.status === "timedOut" ? "timed out"
+          : "FAILED";
+        const ms = results.reduce((a, r) => a + (r.duration ?? 0), 0);
+        rows.push([`${spec.file} › ${[...prefix, spec.title].join(" › ")}`, status, ms ? `${(ms / 1000).toFixed(1)}s` : "", results.length > 1 ? String(results.length - 1) : "", note]);
+      }
+    for (const child of suite.suites ?? []) visit(child, child.title && child.title !== child.file ? [...prefix, child.title] : prefix);
+  };
+  for (const s of report.suites ?? []) visit(s, []);
+  if (!rows.length) return;
+  const head = ["test", "result", "time", "retries", "note"];
+  const clip = (v, n) => (v.length > n ? v.slice(0, n - 1) + "…" : v);
+  const cols = head.map((h, i) => Math.min(i === 0 ? 72 : i === 4 ? 60 : 12, Math.max(h.length, ...rows.map((r) => r[i].length))));
+  const line = (r) => r.map((v, i) => clip(v, cols[i]).padEnd(cols[i])).join("  ").trimEnd();
+  const count = (s) => rows.filter((r) => r[1] === s).length;
+  const totals = ["passed", "flaky", "FAILED", "timed out", "fixme", "skipped"].map((s) => [s, count(s)]).filter(([, n]) => n);
+  console.log(`\ne2e summary\n${line(head)}\n${cols.map((n) => "-".repeat(n)).join("  ")}\n${rows.map(line).join("\n")}`);
+  console.log(`\n${totals.map(([s, n]) => `${n} ${s.toLowerCase()}`).join(" · ")}`);
 }
 
 async function main() {
@@ -157,11 +203,13 @@ async function main() {
   process.on("SIGTERM", () => (stop(), process.exit(143)));
 
   let code = 1;
+  const summaryDir = mkdtempSync(path.join(tmpdir(), "strawvine-e2e-"));
+  const summaryFile = path.join(summaryDir, "results.json");
   try {
     await waitForHealth(base, server);
     console.log(`e2e: server on ${base}, database ${new URL(dbUrl).pathname.slice(1)}`);
     await run("npx", ["playwright", "test", "-c", "e2e/playwright.config.ts", ...process.argv.slice(2)], {
-      env: { ...process.env, E2E_BASE_URL: base, E2E_PASSWORD: PASSWORD, E2E_CONTROL_URL: controlUrl },
+      env: { ...process.env, E2E_BASE_URL: base, E2E_PASSWORD: PASSWORD, E2E_CONTROL_URL: controlUrl, E2E_SUMMARY_FILE: summaryFile },
     });
     code = 0;
   } catch (err) {
@@ -170,6 +218,8 @@ async function main() {
     control.close();
     await stopServer(server);
   }
+  printSummary(summaryFile);
+  rmSync(summaryDir, { recursive: true, force: true });
   process.exit(code);
 }
 

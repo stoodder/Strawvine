@@ -20,7 +20,11 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   timeout: 60_000,
   expect: { timeout: 10_000 },
-  reporter: process.env.CI ? [["github"], ["list"], ["html", { open: "never", outputFolder: ".report" }]] : "list",
+  reporter: [
+    ...(process.env.CI ? ([["github"], ["list"], ["html", { open: "never", outputFolder: ".report" }]] as const) : ([["list"]] as const)),
+    // scripts/e2e.mjs reads this to print its summary table.
+    ...(process.env.E2E_SUMMARY_FILE ? ([["json", { outputFile: process.env.E2E_SUMMARY_FILE }]] as const) : []),
+  ],
   outputDir: ".results",
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://localhost:3114",

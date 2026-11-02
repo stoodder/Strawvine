@@ -7,7 +7,8 @@ on:
     branches: [main, master, "claude/**"]
   pull_request:
   schedule:
-    # Weekly dependency audit (see the `audit` job), independent of code changes.
+    # Weekly, independent of code changes: the dependency audit (`audit`) and the export →
+    # restore round trip (`restore-check`).
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
@@ -18,8 +19,10 @@ concurrency:
 permissions:
   contents: read
 
-# Actions are pinned to major versions. For stricter supply-chain hygiene pin each to a full
-# commit SHA (with the version in a comment) — Dependabot's github-actions updates keep SHAs current.
+# Every action is pinned to a full commit SHA (the tag it was resolved from in the comment), so a
+# moved or compromised tag can't change what runs. To update one: resolve the new tag with
+#   git ls-remote https://github.com/<owner>/<repo> refs/tags/<tag>
+# and replace both the SHA and the comment (Dependabot's github-actions updates do the same).
 
 jobs:
   check:
@@ -44,9 +47,9 @@ jobs:
       TEST_DATABASE_URL: postgres://postgres@localhost:5432/strawvine_test
       E2E_DATABASE_URL: postgres://postgres@localhost:5432/strawvine_e2e
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -79,7 +82,7 @@ jobs:
 
       - name: Cache Playwright browsers
         id: playwright-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
@@ -99,7 +102,7 @@ jobs:
 
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-report
           path: |
@@ -114,9 +117,9 @@ jobs:
     timeout-minutes: 10
     continue-on-error: ${{ github.event_name != 'schedule' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -142,6 +145,53 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build the production image
         run: docker build --build-arg BUILD_ID=${{ github.sha }} -t strawvine:ci .
+
+  # Weekly (and on demand): an export must restore into a fresh database and export again
+  # unchanged — seeds a small dataset through the API, GET /api/export, restores it with
+  # dist/server/restore.js into a second database, exports again and diffs (ignoring exportedAt).
+  restore-check:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      RESTORE_CHECK_DATABASE_URL: postgres://postgres@localhost:5432/strawvine_restore_check
+      RESTORE_CHECK_OUT: ${{ github.workspace }}/restore-check
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Export → restore → export round trip
+        run: node scripts/restore-check.mjs
+
+      - name: Upload the exports
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: restore-check-exports
+          path: restore-check
+          retention-days: 7

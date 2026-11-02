@@ -20,7 +20,7 @@ export function Plates({ weight }: { weight: number | null }) {
   return (
     <div
       role="img"
-      className="flex items-center gap-1.5"
+      className="flex flex-wrap items-center gap-1.5"
       aria-label={`Plates per side: ${plates.join(", ")}${remainder > 0 ? `, plus ${remainder} lb` : ""}`}
     >
       <span className="label mr-1 whitespace-nowrap" aria-hidden>
@@ -49,7 +49,7 @@ function FineLoad({ weight, onChange }: { weight: number; onChange: (v: number) 
           key={d}
           type="button"
           aria-label={`${d > 0 ? "Add" : "Remove"} 2.5 lb`}
-          className="chip min-h-11 bg-white/[0.04] px-4 text-mute"
+          className="chip min-h-11 bg-white/[0.04] px-4 text-fg-2"
           onClick={() => onChange(Math.max(0, weight + d))}
         >
           {d > 0 ? "+" : "−"}2.5
