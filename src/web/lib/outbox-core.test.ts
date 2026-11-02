@@ -46,6 +46,31 @@ describe("outbox", () => {
     expect(s.entries[1]!.op).toMatchObject({ patch: { steps: 1, calories: 2 } });
   });
 
+  it("merges exercise edits queued offline field by field (measure, category, …), the later value winning", () => {
+    let s: OutboxState = emptyOutbox();
+    s = addOp(s, { kind: "updateExercise", id: 1, patch: { measure: "seconds", name: "Hang" } }, null);
+    s = addOp(s, { kind: "updateExercise", id: 1, patch: { category: "core" } }, null);
+    s = addOp(s, { kind: "updateExercise", id: 1, patch: { measure: "meters" } }, null);
+    expect(s.entries.map((e) => e.op)).toEqual([
+      { kind: "updateExercise", id: 1, patch: { measure: "meters", name: "Hang", category: "core" } },
+    ]);
+    // Shown at once, over the server's copy (whose other fields stay).
+    expect(overlay(boot(), s.entries, {}).exercises[0]).toMatchObject({
+      name: "Hang",
+      category: "core",
+      measure: "meters",
+      tracksMax: true,
+      weighted: true,
+    });
+    // One in flight is left alone: the next edit queues behind it.
+    const flying = s.entries[0]!.seq;
+    s = addOp(s, { kind: "updateExercise", id: 1, patch: { category: "carry" } }, flying);
+    expect(s.entries.map((e) => (e.op as { patch: object }).patch)).toEqual([
+      { measure: "meters", name: "Hang", category: "core" },
+      { category: "carry" },
+    ]);
+  });
+
   it("never touches the entry in flight", () => {
     let s = addOp(emptyOutbox(), { kind: "session", date: "2026-01-01", doc: session("2026-01-01", 1, "a") }, null);
     const flying = s.entries[0]!.seq;

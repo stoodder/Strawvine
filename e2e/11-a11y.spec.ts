@@ -121,6 +121,16 @@ test.describe("axe: no serious or critical violations", () => {
     await expectNoSeriousViolations(page, "the new strength target sheet", { minChecked: 0 });
   });
 
+  test("Settings: edit exercise sheet (an accessory, and a main lift the program locks)", async ({ page }) => {
+    for (const name of ["Sandbag carry", "Bench press"]) {
+      await page.goto("/settings");
+      await page.getByRole("button", { name: `Edit ${name}`, exact: true }).click();
+      const sheet = page.getByRole("dialog", { name: "Edit exercise" });
+      await expect(sheet.getByRole("textbox", { name: "Name" })).toHaveValue(name);
+      await expectNoSeriousViolations(page, `the edit exercise sheet (${name})`, { minChecked: 0 });
+    }
+  });
+
   test("Train: add exercise sheet and the AMRAP sheet", async ({ page }) => {
     await page.goto("/train");
     await page.getByRole("button", { name: "Exercise", exact: true }).click();

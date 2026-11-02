@@ -1,67 +1,9 @@
-import clsx from "clsx";
 import { useEffect, useMemo, useState } from "react";
-import { Check, Plus, Search } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 import type { Exercise, ExerciseCategory, Measure } from "../../../shared/schemas";
-import { isWeighted } from "../../../shared/session";
+import { isMainLift } from "../../../shared/session";
 import { Sheet } from "../ui";
-
-/** One name per category, used for both the create chips and the list tags. */
-const CATEGORIES: Array<[ExerciseCategory, string]> = [
-  ["accessory", "Accessory"],
-  ["core", "Core"],
-  ["carry", "Carry"],
-  ["primary", "Barbell"],
-  ["conditioning", "Conditioning"],
-];
-const CATEGORY_LABEL = Object.fromEntries(CATEGORIES) as Record<ExerciseCategory, string>;
-const MEASURES: Array<[Measure, string]> = [
-  ["reps", "Reps"],
-  ["seconds", "Time"],
-  ["meters", "Distance"],
-];
-const MEASURE_WORD: Record<Measure, string> = { reps: "reps", seconds: "time", meters: "distance" };
-
-/** A main lift (tracks a max, or a barbell lift): its sets always carry a load, so weighted isn't a choice. */
-export const isMainLift = (e: Pick<Exercise, "tracksMax" | "category">) => e.tracksMax || e.category === "primary";
-
-/**
- * List tag: the category, then the measure when it isn't reps, then "weighted" when the exercise
- * tracks a load — never on a main lift, whose sets always carry one ("Barbell", "Accessory ·
- * weighted", "Core · time", "Carry · distance · weighted").
- */
-export const exerciseTag = (e: Exercise) =>
-  [
-    CATEGORY_LABEL[e.category] ?? e.category,
-    e.measure === "reps" ? null : MEASURE_WORD[e.measure],
-    isWeighted(e) && !isMainLift(e) ? "weighted" : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-/**
- * What "weighted" starts as in the create card, until the person picks: loaded for rep work
- * (curls, rows) and carries; unloaded for holds, runs and core or conditioning reps (a plank, a
- * shuttle run, a sit-up) — a weighted dead hang is one tap away. (A barbell lift is always
- * weighted: the card offers no choice for it.)
- */
-export function defaultWeighted(measure: Measure, category: ExerciseCategory): boolean {
-  if (category === "carry") return true;
-  return measure === "reps" && category !== "core" && category !== "conditioning";
-}
-
-function ChoiceChip({ on, onClick, children }: { on: boolean; onClick: () => void; children: string }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={on}
-      onClick={onClick}
-      className={clsx("chip min-h-9 gap-1", on ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2")}
-    >
-      {on && <Check size={12} strokeWidth={3} aria-hidden />}
-      {children}
-    </button>
-  );
-}
+import { defaultWeighted, ExerciseFields, exerciseTag } from "./ExerciseFields";
 
 export function AddExerciseSheet({
   open,
@@ -140,49 +82,15 @@ export function AddExerciseSheet({
           <div className="text-sm">
             Create <span className="text-accent">“{q.trim()}”</span>
           </div>
-          <div className="label mt-3 mb-1.5" id="new-ex-category">
-            Category
-          </div>
-          <div className="flex flex-wrap gap-2" role="group" aria-labelledby="new-ex-category">
-            {CATEGORIES.map(([k, l]) => (
-              <ChoiceChip key={k} on={category === k} onClick={() => setCategory(k)}>
-                {l}
-              </ChoiceChip>
-            ))}
-          </div>
-          <div className="label mt-3 mb-1.5" id="new-ex-measure">
-            Measured in
-          </div>
-          <div className="flex flex-wrap gap-2" role="group" aria-labelledby="new-ex-measure">
-            {MEASURES.map(([k, l]) => (
-              <ChoiceChip key={k} on={measure === k} onClick={() => setMeasure(k)}>
-                {l}
-              </ChoiceChip>
-            ))}
-          </div>
-          {loadChoice && (
-            <>
-              <div className="label mt-3 mb-1.5" id="new-ex-load">
-                Load
-              </div>
-              <div
-                className="flex flex-wrap gap-2"
-                role="group"
-                aria-labelledby="new-ex-load"
-                aria-describedby="new-ex-load-hint"
-              >
-                <ChoiceChip on={weighted} onClick={() => setWeightedPick(true)}>
-                  Weighted
-                </ChoiceChip>
-                <ChoiceChip on={!weighted} onClick={() => setWeightedPick(false)}>
-                  Unweighted
-                </ChoiceChip>
-              </div>
-              <p id="new-ex-load-hint" className="mt-1.5 text-xs text-fg-2">
-                {weighted ? "Log a load (lb) with each set" : `No load — just the ${MEASURE_WORD[measure]}`}
-              </p>
-            </>
-          )}
+          <ExerciseFields
+            idPrefix="new-ex"
+            category={category}
+            measure={measure}
+            weighted={weighted}
+            onCategory={setCategory}
+            onMeasure={setMeasure}
+            onWeighted={setWeightedPick}
+          />
           <button
             type="button"
             disabled={busy}

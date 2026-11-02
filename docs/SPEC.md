@@ -195,7 +195,7 @@ optional note.
 - Sets measure reps, seconds or distance. Independently, an exercise is **weighted** (tracks a load in lb) or not, so
   every combination exists: reps + load (rows, curls), time + load (weighted dead hang, weighted plank), distance + load
   (farmer's / sandbag carry), and unloaded reps, time or distance (pull-ups, a plank, a run). The flag is chosen when the
-  exercise is created (Load: "Weighted" / "Unweighted") and can be changed in the exercise library. Until the athlete
+  exercise is created (Load: "Weighted" / "Unweighted") and can be changed later (**Edit exercise**, below). Until the athlete
   picks, the default follows the choices above it: weighted for reps (except core and conditioning) and for carries,
   unweighted otherwise. Main lifts (barbell category or tracking a max) are always weighted and offer no choice. An
   exercise created without saying (older clients, imports of backups from before the flag) is weighted. Seeds: the main
@@ -212,6 +212,21 @@ optional note.
     targeted), which opens the set editor instead, so a weighted set is never logged without a load by accident.
   - Volume counts weight × reps of rep-measured sets only; time and distance never count. A set's load is the one it
     was logged with (never a target it still holds), so a set logged without a load adds 0.
+- **Edit exercise:** every exercise can be edited — from its row in Settings → Exercise library, or from its options in a
+  session — with the create card's controls: name, category, measure ("Measured in"), load (not offered on a main lift,
+  which is always weighted; making an exercise a main lift turns its load on) and max tracking; it can also be
+  archived (with Undo) or restored. Saving sends only the fields that changed, as one patch, so edits of different
+  fields from two devices both survive. A lift a program day calculates as its main lift keeps its category, measure
+  and max tracking and can't be archived (the sheet says which days use it; change the weekly layout first); only its
+  name is free. A lift with a strength target keeps tracking its max.
+  - **Changing the measure** never rewrites history: each session keeps the measure its sets were done in (it is
+    stored with the session's exercise), so past sessions, their volume and PRs read as they were done. From then on
+    the exercise's current measure rules: when next week's pre-fill, an exercise added by hand or a skipped exercise
+    carries from a performance in another measure, the set count carries (and the loads, if weighted, scaled as
+    usual) but every target resets to the new measure's default (10 reps, 30 seconds, 40 meters); progression hints
+    pass over performances in another measure. A saved session from today on that isn't completed follows at once
+    where the exercise has nothing logged yet (new measure, targets reset, loads kept); where a set is already logged
+    it keeps the old measure.
 - Sessions pre-fill from the last session of the same day type (exercises, sets, target reps, last weights). Reps
   carry over as **targets** — a missed rep never becomes next week's target (sets added without a target carry what was
   done). On deload weeks accessory loads pre-fill at 80% — for weighted holds and carries too; deload loads never carry
@@ -280,7 +295,9 @@ optional note.
 - Exercise creates and the `weighted` flag (§6.5), with windows of different app versions sharing one queue: a weighted
   create is sent without the flag (absent = weighted, as servers before it accept), and the flag doesn't count toward a
   create's idempotency check, so one sent by an older window (which drops it) and retried by a newer one replays. When
-  that saved an unweighted create as weighted, the next current window patches it back. Exports are version 3
+  that saved an unweighted create as weighted, the next current window patches it back. Exercise edits are patches of
+  the changed fields only: edits queued offline merge field by field (the later value of a field wins), and the server
+  sets only the fields a patch names, so another device's edit of a different field survives. Exports are version 3
   (exercises carry `weighted`); older ones restore every exercise as weighted. Migration 0006 turned the flag off once
   for existing exercises with no sign of a load (not main lifts or max-tracked, no max entry, strength target, program
   day or logged/planned load).

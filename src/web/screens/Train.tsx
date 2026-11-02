@@ -9,6 +9,7 @@ import {
   CalendarCheck,
   ListChecks,
   MoreHorizontal,
+  Pencil,
   Plus,
   RefreshCw,
   SkipForward,
@@ -46,6 +47,7 @@ import { CheckDot, Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
 import { DateJump } from "../components/today/DateJump";
 import { AddExerciseSheet } from "../components/train/AddExerciseSheet";
+import { EditExerciseSheet } from "../components/train/EditExerciseSheet";
 import { FinishPanel } from "../components/train/FinishPanel";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
 import { useDismissedHints } from "../components/train/hintDismiss";
@@ -207,6 +209,8 @@ export function TrainScreen() {
   if (actionsHeld && actions !== actionsHeld) setActions(actions);
   if (adding?.mode === "pair" && !session.blocks.some((b) => b.id === adding.blockId)) setAdding(null);
   const [maxFor, setMaxFor] = useState<Exercise | null>(null);
+  /** The exercise in the Edit exercise sheet, and the row whose options opened it (for focus after). */
+  const [editingExercise, setEditingExercise] = useState<{ id: number; ref: ExRef } | null>(null);
   /** The set whose logging started the current rest: the rest pill shows the plates for the one after it. */
   const [lastLogged, setLastLogged] = useState<SetRef | null>(null);
   const { isDismissed: hintDismissed, dismiss: dismissHint } = useDismissedHints(date);
@@ -227,7 +231,7 @@ export function TrainScreen() {
 
   // A sheet makes the app (and its toasts) inert and the toast would sit over the sheet's
   // buttons: retire the last undo offer when one opens.
-  const sheetOpen = !!(editing || amrap || adding || actions || maxFor);
+  const sheetOpen = !!(editing || amrap || adding || actions || maxFor || editingExercise);
   useEffect(() => {
     if (sheetOpen && lastToast.current !== null) {
       toast.dismiss(lastToast.current);
@@ -1172,7 +1176,11 @@ export function TrainScreen() {
                         const hint =
                           isPreview || session.deload || session.completedAt
                             ? null
-                            : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, { weighted });
+                            : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, {
+                                weighted,
+                                // Only performances in the exercise's current measure (it may have been changed).
+                                measure: exById(e.exerciseId)?.measure ?? e.measure,
+                              });
                         const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
                         return (
                           <div key={exIdx} className={clsx(exIdx > 0 && "mt-5")}>
@@ -1653,6 +1661,23 @@ export function TrainScreen() {
                   </span>
                 </button>
               )}
+              {exById(actionsEx.exerciseId) && (
+                <button
+                  type="button"
+                  aria-haspopup="dialog"
+                  className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
+                  onClick={() => {
+                    setEditingExercise({ id: actionsEx.exerciseId, ref: actions });
+                    setActions(null);
+                  }}
+                >
+                  <Pencil size={16} className="shrink-0 text-mute" />
+                  <span>
+                    Edit exercise
+                    <span className="block text-xs text-fg-2">Name, category, measure, load</span>
+                  </span>
+                </button>
+              )}
               <button
                 type="button"
                 className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
@@ -1691,6 +1716,17 @@ export function TrainScreen() {
       </Sheet>
 
       <MaxSheet key={maxFor?.id ?? "none"} exercise={maxFor} open={!!maxFor} onClose={() => setMaxFor(null)} />
+
+      <EditExerciseSheet
+        exercise={editingExercise ? (exById(editingExercise.id) ?? null) : null}
+        open={!!editingExercise}
+        onClose={() => {
+          const ref = editingExercise?.ref;
+          setEditingExercise(null);
+          // The options button that opened the options sheet (gone with it) gets focus back.
+          if (ref) focusWhenReady(exControl(ref, "options"));
+        }}
+      />
     </div>
   );
 }

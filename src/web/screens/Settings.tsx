@@ -1,21 +1,21 @@
 import clsx from "clsx";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
-import { ChevronLeft, Download, LogOut, Plus, RefreshCw, Trash2, UserX } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, LogOut, Plus, RefreshCw, Trash2, UserX } from "lucide-react";
 import { isISODate, startOfWeek, WEEKDAY_SHORT } from "../../shared/dates";
 import { displayPrefs, trainingPrefs } from "../../shared/defaults";
 import { repMaxPct } from "../../shared/program";
-import { isWeighted } from "../../shared/session";
-import { settingsSchema, type Program, type ProgramWeek, type Settings } from "../../shared/schemas";
+import { settingsSchema, type Exercise, type Program, type ProgramWeek, type Settings } from "../../shared/schemas";
 import { InlineText } from "../components/InlineText";
 import { useToast } from "../components/Toast";
 import { useFocusAfter } from "../components/useFocusAfter";
 import { formatRest, parseRest } from "../components/settings/restTime";
-import { isMainLift } from "../components/train/AddExerciseSheet";
+import { EditExerciseSheet } from "../components/train/EditExerciseSheet";
+import { exerciseTag } from "../components/train/ExerciseFields";
 import { BoxNumber, Field, Section, Toggle, useFieldIds } from "../components/ui";
 import { useTitle } from "../components/useTitle";
 import { fmt } from "../lib/format";
-import { forgetDevice, signOut, useCreateExercise, useData, useSaveSettings, useSyncInfo, useUpdateExercise } from "../lib/store";
+import { forgetDevice, signOut, useCreateExercise, useData, useSaveSettings, useSyncInfo } from "../lib/store";
 import { noteOfflineSignOut } from "./Login";
 
 // Weekday order shown Monday-first; values are JS weekday indices.
@@ -819,13 +819,17 @@ function ProgramEditor({ program, setProgram }: { program: Program; setProgram: 
   );
 }
 
+/** The library row's tag: the exercise's tag (`exerciseTag`), then "max" when it tracks one and "archived". */
+const libraryTag = (e: Exercise) =>
+  [exerciseTag(e), e.tracksMax ? "max" : null, e.archived ? "archived" : null].filter(Boolean).join(" · ");
+
 export function LiftsEditor() {
   const { data } = useData();
-  const toast = useToast();
-  const updateExercise = useUpdateExercise();
   const createExercise = useCreateExercise();
   const [name, setName] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const editing = editingId === null ? null : (data.exercises.find((e) => e.id === editingId) ?? null);
   const list = data.exercises.filter((e) => showArchived || !e.archived);
   return (
     <Section
@@ -841,74 +845,35 @@ export function LiftsEditor() {
         </button>
       }
     >
-      <div className="divide-y divide-white/[0.04]">
+      <ul className="divide-y divide-white/[0.04]">
         {list.map((e) => (
-          // The chips wrap under the name when they don't fit beside it (narrow screens, zoom). The
-          // name's basis is its own length (Inter averages ≈0.5em a character; 0.55em leaves a
-          // margin), so the chips wrap before the name gets cut off; a name longer than the row
-          // still truncates.
-          <div key={e.id} className={clsx("flex flex-wrap items-center gap-x-3 gap-y-1 py-2", e.archived && "opacity-50")}>
-            <div className="min-w-0 shrink grow text-sm" style={{ flexBasis: `min(100%, ${e.name.length * 0.55 + 0.25}em)` }}>
-              <InlineText
-                ariaLabel={`Rename ${e.name}`}
-                value={e.name}
-                maxLength={80}
-                required
-                requiredMessage="A lift needs a name."
-                onCommit={(name) => void updateExercise(e.id, { name })}
-                inputClassName="text-sm"
-              />
-            </div>
-            <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1">
-              {/* A main lift's sets always carry a load: no choice to offer. */}
-              {!isMainLift(e) && (
-                <button
-                  type="button"
-                  aria-pressed={isWeighted(e)}
-                  aria-label={`${e.name}: weighted`}
-                  onClick={() => {
-                    const weighted = !isWeighted(e);
-                    void updateExercise(e.id, { weighted });
-                    if (!weighted)
-                      toast.show({
-                        message: `${e.name} no longer tracks load — logged loads are kept`,
-                        action: { label: "Undo", onAction: () => void updateExercise(e.id, { weighted: true }) },
-                      });
-                  }}
-                  className={clsx("chip", isWeighted(e) ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-fg-2")}
-                >
-                  weighted
-                </button>
-              )}
-              <button
-                type="button"
-                aria-pressed={e.tracksMax}
-                aria-label={`${e.name}: track max`}
-                onClick={() => void updateExercise(e.id, { tracksMax: !e.tracksMax })}
-                className={clsx("chip", e.tracksMax ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-fg-2")}
-              >
-                max
-              </button>
-              <button
-                type="button"
-                aria-label={`${e.name}: ${e.archived ? "restore" : "archive"}`}
-                onClick={() => {
-                  const archived = !e.archived;
-                  void updateExercise(e.id, { archived });
-                  if (archived && !showArchived)
-                    toast.show({
-                      message: `${e.name} archived`,
-                      action: { label: "Undo", onAction: () => void updateExercise(e.id, { archived: false }) },
-                    });
-                }}
-                className="chip bg-white/[0.04] text-fg-2"
-              >
-                {e.archived ? "restore" : "archive"}
-              </button>
-            </div>
-          </div>
+          <li key={e.id}>
+            {/* One tap opens the Edit exercise sheet (name, category, measure, load, max, archive). */}
+            <button
+              type="button"
+              aria-describedby={`lib-tag-${e.id}`}
+              aria-haspopup="dialog"
+              data-exercise={e.id}
+              className={clsx("tap flex min-h-12 w-full items-center gap-2 py-2.5 text-left", e.archived && "opacity-50")}
+              onClick={() => setEditingId(e.id)}
+            >
+              {/* The tag drops under the name (right-aligned) when both don't fit on one line. */}
+              <span className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
+                {/* Named "Edit <name>"; the tag is its description rather than part of its name. */}
+                <span className="min-w-0 text-sm [overflow-wrap:anywhere]">
+                  <span className="sr-only">Edit</span> {e.name}
+                </span>
+                <span id={`lib-tag-${e.id}`} aria-hidden className="label ml-auto text-right">
+                  {libraryTag(e)}
+                </span>
+              </span>
+              <ChevronRight size={14} className="shrink-0 text-mute" aria-hidden />
+            </button>
+          </li>
         ))}
-      </div>
+      </ul>
+      {/* Closing returns focus to the row that opened it (the sheet does that). */}
+      <EditExerciseSheet exercise={editing} open={!!editing} onClose={() => setEditingId(null)} />
       <div className="mt-4 flex gap-3">
         <input
           aria-label="New lift name"
