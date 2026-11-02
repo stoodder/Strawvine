@@ -214,3 +214,37 @@ test("a field low in a sheet (the max form) stays visible above the keyboard whe
   await page.keyboard.press("Escape");
   await expect(sheet).toHaveCount(0);
 });
+
+test("a sheet that opens while another's keyboard is going down stays on the bottom (Add another exercise → pick)", async ({ page }) => {
+  await onboardedOn(page, MONDAY);
+  await page.getByRole("link", { name: "Train" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(/Push/);
+  await page.getByRole("button", { name: "Exercise", exact: true }).click();
+  const first = page.getByRole("dialog", { name: "Add exercise" });
+  await first.getByRole("textbox", { name: "Search or create exercise" }).fill("Rows");
+  await first.getByRole("button", { name: /Create & add/ }).click();
+  await expect(first).toHaveCount(0);
+  await page.getByRole("button", { name: "Rows options" }).click();
+  await page
+    .getByRole("dialog", { name: "Rows" })
+    .getByRole("button", { name: /^Superset with another exercise/ })
+    .click();
+  await page.getByRole("dialog", { name: "New superset" }).getByRole("button", { name: "Add another exercise" }).click();
+  const add = page.getByRole("dialog", { name: "Add to superset" });
+  await expect(add.getByRole("textbox", { name: "Search or create exercise" })).toBeFocused();
+  // The search's keyboard is up: the Add sheet sits on it.
+  await keyboard(page, { height: 508, offsetTop: 0 });
+  await page.waitForTimeout(500); // the panel's entrance (a 24 px rise)
+  const lifted = (await add.boundingBox())!;
+  expect(lifted.y + lifted.height).toBeLessThanOrEqual(508.5);
+  // Pick: the superset sheet comes back while the keyboard (still reported up) goes down. Nothing
+  // in it that raises a keyboard has focus, so it sits on the window's bottom, not mid-screen.
+  await add.getByRole("button", { name: /^Pull-up/ }).click();
+  const sheet = page.getByRole("dialog", { name: "Superset A" });
+  await expect(sheet.getByRole("button", { name: "Move Pull-up up in Superset A" })).toBeFocused();
+  await keyboard(page, { height: 508, offsetTop: 0 });
+  await page.waitForTimeout(500); // the panel's entrance
+  const back = (await sheet.boundingBox())!;
+  expect(Math.round(back.y + back.height)).toBe(844);
+  await keyboard(page, null);
+});

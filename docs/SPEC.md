@@ -243,17 +243,26 @@ optional note.
   - A superset's exercises are done in order (A1, A2, …): "Log next round" logs the next open set of each, in that
     order, then the accessory rest starts. Letters follow the page (the first superset is A).
   - **Superset sheet** (from the "Superset A" header, or the exercise options' "Manage Superset A" / "Superset with
-    another exercise"): the members in order, each with Move up / Move down and **Remove from superset**, then **Add
-    from this workout** (another accessory of the session moves in at the end, with all its sets, logged or not — out of
-    its own block, which disappears, or out of another superset, which a member of two leaves as a single exercise) and
-    **Add new exercise** (from the library or created; pre-filled like an exercise added by hand).
-  - **Remove from superset** keeps the exercise in the workout, in a block of its own right after the superset (Undo
-    from the exercise's options). Removing an exercise from the workout is separate ("Remove — also from future
-    Mondays" on a Monday).
+    another exercise"): the members in order, each with Move up / Move down and a visible **Remove** (from the
+    superset), then **Add from this workout** (another accessory of the session moves in at the end, with all its sets,
+    logged or not — out of its own block, which disappears, or out of another superset, which a member of two leaves as
+    a single exercise) and **Add another exercise** (from the library or created; pre-filled like an exercise added by
+    hand). That list doesn't offer what can't join: an exercise already in this superset ("Already in Superset A") or
+    the main lift ("Main lift · stays on its own") show disabled. An exercise elsewhere in this workout shows "In this
+    workout · moves here" (or "In Superset B · moves here") and picking it moves it in with its sets, as Add from this
+    workout does — it's never added a second time. The superset sheet comes back with the new member, announced and
+    focused. A full superset says "A superset holds up to 6 exercises" in place of what could join, and Add another
+    exercise is disabled.
+  - **Remove from superset** keeps the exercise in the workout, in a block of its own right after the superset. It can
+    be undone: from the exercise's options with the toast's Undo; in the superset sheet with the sheet's own Undo (its
+    toast follows once the sheet closes). Undo puts it back at its old position (A1 again), wherever it is by then; if
+    it no longer can (the superset filled up or is gone, or the exercise was removed), the toast says so. Removing an
+    exercise from the workout is separate ("Remove — also from future Mondays" on a Monday).
   - **Reorder** (the Accessories header) moves the accessory blocks — a superset as one — up or down. The main lift
     always comes first, holds the main lift alone and never joins a superset.
   - Moves are buttons (keyboard and screen-reader friendly; each move is announced with the new position), not drag:
-    the sheet drags down to close and holding a set edits it. Limits as the server's: 6 exercises per superset (nothing
+    a swipe down closes the sheet (from its handle or title, or from content scrolled to its top; content otherwise
+    scrolls by touch both ways) and holding a set edits it. Limits as the server's: 6 exercises per superset (nothing
     more can join a full one) and 30 blocks (nothing can be taken out while a session holds 30).
   - Structure and order are part of the session, so next week's pre-fill carries them (supersets, members' order, block
     order).

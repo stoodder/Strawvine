@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { AnimatePresence, motion } from "motion/react";
+import { animate, AnimatePresence, motion, useMotionValue, type MotionValue } from "motion/react";
 import {
   cloneElement,
   createContext,
@@ -10,6 +10,7 @@ import {
   useId,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactElement,
@@ -765,50 +766,213 @@ function unlockPage() {
   if (window.scrollY !== y) window.scrollTo(window.scrollX, y);
 }
 
+/** A control that raises a phone's keyboard: a text-like input, a textarea, contenteditable. */
+const NOT_TYPED = new Set(["button", "checkbox", "radio", "range", "submit", "reset", "file", "color", "image", "hidden"]);
+function isEditable(el: Element | null): el is HTMLElement {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el instanceof HTMLTextAreaElement) return !el.readOnly && !el.disabled;
+  if (el instanceof HTMLInputElement) return !NOT_TYPED.has(el.type) && !el.readOnly && !el.disabled;
+  return el.isContentEditable;
+}
+
 /**
  * Keeps an open sheet's panel inside what is actually visible: above an on-screen keyboard and
  * inside any pan the browser makes to show a focused field. iOS Safari (and Chrome on Android, by
  * default) don't shrink the layout viewport — where `position: fixed` lives — for the keyboard:
  * it covers the bottom of the window, and the visual viewport shrinks above it and may be panned
- * down (`offsetTop`) to reveal the field. While the visual viewport is smaller than the overlay,
- * the overlay carries where it is: `--sheet-bottom` (keyboard height, plus any pan) lifts the
- * panel's bottom to the keyboard's top, `--sheet-room` caps its height to the visible height (a
- * little short of it), and `--sheet-safe: 0px` drops the home-indicator inset the keyboard
- * already covers. Without a keyboard none are set and the panel sits on the window's bottom as
- * before. Pinch zoom is left alone (the visible area is then a magnified part of the page).
- * The focused field stays in view inside the (now shorter) panel. Returns the cleanup.
+ * down (`offsetTop`) to reveal the field. While a keyboard is up for a field in this sheet, the
+ * overlay carries where the visible area is: `--sheet-bottom` (keyboard height, less any pan)
+ * lifts the panel's bottom to the keyboard's top, `--sheet-room` caps its height to the visible
+ * height (a little short of it), and `--sheet-safe: 0px` drops the home-indicator inset the
+ * keyboard already covers.
+ *
+ * Only then: "a keyboard is up" means the visual viewport is shorter than the overlay (a pan left
+ * over after the keyboard went down, with the full height visible, isn't one), and it has to be
+ * for a field in this sheet (re-checked when one takes focus; focus leaving it waits for the keyboard to go) — a sheet that opens while
+ * another sheet's keyboard is still going down stays on the window's bottom. Without that none
+ * are set and the panel sits on the window's bottom as before. Pinch zoom is left alone (the
+ * visible area is then a magnified part of the page). When the visible area just got shorter,
+ * the focused field — if it was in view in the panel — is kept in view inside the now shorter
+ * panel; otherwise the panel's scroll is the person's. Returns the cleanup.
  */
 function followVisualViewport(overlay: HTMLElement): () => void {
   const vv = window.visualViewport;
   if (!vv) return () => {};
   const vars = ["--sheet-bottom", "--sheet-room", "--sheet-safe"] as const;
-  const update = () => {
+  /** The visible height at the last update (none yet: the first one with a keyboard counts as a shrink). */
+  let lastHeight = Infinity;
+  const update = (focused: Element | null = document.activeElement) => {
+    const shrank = vv.height < lastHeight - 0.5;
+    lastHeight = vv.height;
     const box = overlay.getBoundingClientRect();
-    const top = Math.max(0, vv.offsetTop - box.top);
-    const bottom = Math.max(0, box.height - top - vv.height);
-    if (Math.abs(vv.scale - 1) > 0.01 || (top < 1 && bottom < 1)) {
+    const field = isEditable(focused) && overlay.contains(focused) ? focused : null;
+    const keyboard = box.height - vv.height >= 1;
+    if (Math.abs(vv.scale - 1) > 0.01 || !keyboard || !field) {
       vars.forEach((v) => overlay.style.removeProperty(v));
       return;
     }
+    const top = Math.max(0, vv.offsetTop - box.top);
+    const bottom = Math.max(0, box.height - top - vv.height);
+    // Whether the field was in view in the panel before it gets shorter (the person may have
+    // scrolled it away on purpose).
+    const panel = overlay.querySelector<HTMLElement>('[role="dialog"]');
+    const inView = (() => {
+      if (!panel || !shrank || !panel.contains(field)) return false;
+      const p = panel.getBoundingClientRect();
+      const f = field.getBoundingClientRect();
+      return f.bottom > p.top && f.top < p.bottom;
+    })();
     overlay.style.setProperty("--sheet-bottom", `${bottom}px`);
     overlay.style.setProperty("--sheet-room", `${Math.max(0, vv.height - 16)}px`);
     overlay.style.setProperty("--sheet-safe", "0px");
-    // The panel may have just got shorter: keep the focused field inside its scroller.
-    const panel = overlay.querySelector<HTMLElement>('[role="dialog"]');
-    const field = document.activeElement;
-    if (panel && field instanceof HTMLElement && field !== panel && panel.contains(field)) {
+    if (panel && inView) {
       const p = panel.getBoundingClientRect();
       const f = field.getBoundingClientRect();
       if (f.bottom > p.bottom) panel.scrollTop += f.bottom - p.bottom + 16;
       else if (f.top < p.top) panel.scrollTop -= p.top - f.top + 16;
     }
   };
+  const onViewport = () => update();
+  // A field taking focus may lift the panel at once (a keyboard already up). Focus leaving one
+  // doesn't drop it: the keyboard going down (a viewport resize) does. Dropping it on the
+  // focusout would move the panel between a press and its release on a button (Android and
+  // desktop focus a pressed button), and the press would miss.
+  const onFocusIn = (e: FocusEvent) => {
+    if (isEditable(e.target as Element | null)) update();
+  };
   update();
-  vv.addEventListener("resize", update);
-  vv.addEventListener("scroll", update);
+  vv.addEventListener("resize", onViewport);
+  vv.addEventListener("scroll", onViewport);
+  overlay.addEventListener("focusin", onFocusIn);
   return () => {
-    vv.removeEventListener("resize", update);
-    vv.removeEventListener("scroll", update);
+    vv.removeEventListener("resize", onViewport);
+    vv.removeEventListener("scroll", onViewport);
+    overlay.removeEventListener("focusin", onFocusIn);
+  };
+}
+
+/** A swipe down that far (px), or this fast at the end (px/s), closes a sheet. */
+export const SWIPE_CLOSE_PX = 120;
+export const SWIPE_CLOSE_SPEED = 600;
+
+/** Whether `el` (up to and including `panel`) is scrolled away from its top. */
+function scrolledDown(el: Element | null, panel: HTMLElement): boolean {
+  for (let n = el; n; n = n.parentElement) {
+    if (n.scrollTop > 0) return true;
+    if (n === panel) break;
+  }
+  return false;
+}
+
+/**
+ * Swipe down to close, without taking the panel's own scrolling away. Motion's `drag="y"` on the
+ * panel set `touch-action: pan-x` on it, so a finger could never scroll a sheet's content (a
+ * swipe down dragged it closed, a swipe up was clamped): only the wheel scrolled. Instead the
+ * panel keeps native touch scrolling (with momentum), and the panel's `y` follows the finger:
+ * - from the grab area (handle and title row, `touch-action: none`) always — pointer events, so
+ *   a mouse can drag it too; a press on a button there stays a press;
+ * - from the content only for a swipe that starts downward while the content is at its top
+ *   (nothing under the finger scrolled down): that touch is the sheet's (its moves are
+ *   prevented, so no rubber band); any other touch is a scroll, which stops at the top and never
+ *   closes. Two fingers and range inputs (sliders) are left alone.
+ * Let go past SWIPE_CLOSE_PX, or faster than SWIPE_CLOSE_SPEED, and it closes; otherwise it
+ * springs back. Returns the cleanup.
+ */
+function swipeToClose(panel: HTMLElement, grab: HTMLElement | null, y: MotionValue<number | string>, close: () => void): () => void {
+  /** Where the drag started, and its recent positions (for the speed at the end: the last 100 ms). */
+  let drag: { y0: number; samples: { y: number; t: number }[]; pointer?: number } | null = null;
+  const begin = (clientY: number, pointer?: number) => {
+    drag = { y0: clientY, samples: [{ y: clientY, t: performance.now() }], pointer };
+  };
+  const follow = (clientY: number) => {
+    if (!drag) return;
+    const t = performance.now();
+    drag.samples = [...drag.samples.filter((s) => t - s.t <= 100), { y: clientY, t }];
+    y.set(Math.max(0, clientY - drag.y0));
+  };
+  const release = (cancelled = false) => {
+    const d = drag;
+    drag = null;
+    if (!d) return;
+    const first = d.samples[0]!;
+    const last = d.samples[d.samples.length - 1]!;
+    const offset = last.y - d.y0;
+    // At least a frame's time, so two events in the same instant don't read as a flick.
+    const speed = ((last.y - first.y) / Math.max(16, last.t - first.t)) * 1000;
+    if (!cancelled && (offset > SWIPE_CLOSE_PX || (offset > 0 && speed > SWIPE_CLOSE_SPEED))) close();
+    else animate(y, 0, { type: "spring", stiffness: 500, damping: 40 });
+  };
+
+  // The grab area: pointer events (touch-action none there, so the browser leaves them to us).
+  const onPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0 || drag || (e.target instanceof Element && e.target.closest("button, a, input, select, textarea"))) return;
+    begin(e.clientY, e.pointerId);
+    try {
+      grab?.setPointerCapture?.(e.pointerId);
+    } catch {
+      /* not capturable (synthetic event) */
+    }
+  };
+  const onPointerMove = (e: PointerEvent) => {
+    if (drag && drag.pointer === e.pointerId) follow(e.clientY);
+  };
+  const onPointerEnd = (e: PointerEvent) => {
+    if (drag && drag.pointer === e.pointerId) release(e.type === "pointercancel");
+  };
+
+  // The content: touch events, so a scroll stays the browser's.
+  let touch: { x: number; y: number; mode: "pending" | "drag" | "scroll" } | null = null;
+  const onTouchStart = (e: TouchEvent) => {
+    const t = e.touches[0];
+    const target = e.target instanceof Element ? e.target : null;
+    if (!t || e.touches.length > 1 || (target && grab?.contains(target)) || target?.closest('input[type="range"]')) {
+      if (touch?.mode === "drag") release(true);
+      touch = null;
+      return;
+    }
+    touch = { x: t.clientX, y: t.clientY, mode: scrolledDown(target, panel) ? "scroll" : "pending" };
+  };
+  const onTouchMove = (e: TouchEvent) => {
+    const t = e.touches[0];
+    if (!touch || !t || touch.mode === "scroll") return;
+    if (touch.mode === "pending") {
+      const dx = t.clientX - touch.x;
+      const dy = t.clientY - touch.y;
+      if (dx === 0 && dy === 0) return;
+      // Down (more than sideways) from the top: the sheet's. Anything else: a scroll.
+      if (dy > 0 && dy >= Math.abs(dx) && panel.scrollTop <= 0) {
+        touch.mode = "drag";
+        begin(touch.y);
+      } else {
+        touch.mode = "scroll";
+        return;
+      }
+    }
+    if (e.cancelable) e.preventDefault();
+    follow(t.clientY);
+  };
+  const onTouchEnd = (e: TouchEvent) => {
+    if (touch?.mode === "drag") release(e.type === "touchcancel");
+    touch = null;
+  };
+
+  grab?.addEventListener("pointerdown", onPointerDown);
+  grab?.addEventListener("pointermove", onPointerMove);
+  grab?.addEventListener("pointerup", onPointerEnd);
+  grab?.addEventListener("pointercancel", onPointerEnd);
+  panel.addEventListener("touchstart", onTouchStart, { passive: true });
+  panel.addEventListener("touchmove", onTouchMove, { passive: false });
+  panel.addEventListener("touchend", onTouchEnd);
+  panel.addEventListener("touchcancel", onTouchEnd);
+  return () => {
+    grab?.removeEventListener("pointerdown", onPointerDown);
+    grab?.removeEventListener("pointermove", onPointerMove);
+    grab?.removeEventListener("pointerup", onPointerEnd);
+    grab?.removeEventListener("pointercancel", onPointerEnd);
+    panel.removeEventListener("touchstart", onTouchStart);
+    panel.removeEventListener("touchmove", onTouchMove);
+    panel.removeEventListener("touchend", onTouchEnd);
+    panel.removeEventListener("touchcancel", onTouchEnd);
   };
 }
 
@@ -817,6 +981,22 @@ export const anySheetOpen = () => openSheets > 0;
 export function subscribeSheets(l: () => void) {
   sheetListeners.add(l);
   return () => void sheetListeners.delete(l);
+}
+
+/**
+ * The sheet's panel, mounted per open, with its own `y` (handed to the Sheet through `yRef` for
+ * swipeToClose). The value starts where the entrance does (`initial.y`): a value that started at
+ * 0 would jump to it as the panel mounts, and that jump's speed would carry into the entrance
+ * spring (the panel dipped ~10 px below its start before rising). No `drag`: see swipeToClose.
+ */
+function SheetPanel({
+  yRef,
+  initial,
+  ...props
+}: ComponentProps<typeof motion.div> & { yRef: RefObject<MotionValue<number | string> | null>; initial: { y: number | string; opacity?: number } }) {
+  const y = useMotionValue<number | string>(initial.y);
+  yRef.current = y;
+  return <motion.div {...props} initial={initial} style={{ ...(props.style as object), y }} />;
 }
 
 /**
@@ -854,6 +1034,9 @@ export function Sheet({
   const id = useId();
   const overlayRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const grabRef = useRef<HTMLDivElement>(null);
+  /** The open panel's offset (SheetPanel): its entrance and exit, and a swipe down (swipeToClose). */
+  const yRef = useRef<MotionValue<number | string> | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const initialFocusRef = useRef(initialFocus);
@@ -878,9 +1061,6 @@ export function Sheet({
     }
     setOpenSheets(openSheets + 1);
 
-    const overlay = overlayRef.current;
-    const stopFollowing = overlay ? followVisualViewport(overlay) : () => {};
-
     // Move focus in: the sheet's initialFocus; else keyboard users land on the first control and
     // touch users get the panel itself (no surprise keyboard). Never scroll for it: the panel is
     // where it will be (initialFocus) or still coming in.
@@ -891,9 +1071,15 @@ export function Sheet({
       const first = viaKeyboard ? focusables(panel)[0] : undefined;
       (first ?? panel).focus({ preventScroll: true });
     }
+    // After focus is in: a keyboard already up for the initialFocus field lifts the panel at once.
+    const overlay = overlayRef.current;
+    const stopFollowing = overlay ? followVisualViewport(overlay) : () => {};
+    const y = yRef.current;
+    const stopSwipe = panel && y ? swipeToClose(panel, grabRef.current, y, () => onCloseRef.current()) : () => {};
 
     return () => {
       stopFollowing();
+      stopSwipe();
       window.removeEventListener("keydown", onKey);
       setOpenSheets(Math.max(0, openSheets - 1));
       if (root && openSheets === 0) root.inert = rootWasInert;
@@ -934,8 +1120,9 @@ export function Sheet({
       {open && (
         <motion.div ref={overlayRef} className="fixed inset-0 z-50" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-          <motion.div
+          <SheetPanel
             ref={panelRef}
+            yRef={yRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby={title ? id : undefined}
@@ -951,31 +1138,28 @@ export function Sheet({
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: "100%" }}
             transition={{ type: "spring", stiffness: 380, damping: 38, opacity: { duration: 0.18 } }}
-            drag="y"
-            dragConstraints={{ top: 0, bottom: 0 }}
-            dragElastic={{ top: 0, bottom: 0.6 }}
-            onDragEnd={(_, info) => {
-              if (info.offset.y > 120 || info.velocity.y > 600) onClose();
-            }}
           >
-            <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-white/15" />
-            {title && (
-              <div className="mb-5 flex items-center justify-between">
-                <h3 id={id} className="min-w-0 text-lg font-medium wrap-anywhere">
-                  {title}
-                </h3>
-                <button
-                  type="button"
-                  onClick={onClose}
-                  aria-label="Close"
-                  className="tap -my-2.5 -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-            )}
+            {/* The grab area (handle + title row): a swipe down here always drags the sheet. */}
+            <div ref={grabRef} data-sheet-grab="" className="-mx-5 -mt-3 touch-none px-5 pt-3 select-none">
+              <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-white/15" />
+              {title && (
+                <div className="mb-5 flex items-center justify-between">
+                  <h3 id={id} className="min-w-0 text-lg font-medium wrap-anywhere">
+                    {title}
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    aria-label="Close"
+                    className="tap -my-2.5 -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              )}
+            </div>
             {children}
-          </motion.div>
+          </SheetPanel>
         </motion.div>
       )}
     </AnimatePresence>,

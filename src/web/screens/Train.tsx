@@ -47,7 +47,6 @@ import {
 } from "../../shared/session";
 import {
   accessoryBlocks,
-  locateExercise,
   MAX_BLOCKS,
   MAX_SETS,
   MAX_SUPERSET,
@@ -63,7 +62,8 @@ import { useDockHeight, useDockTop } from "../components/Dock";
 import { CheckDot, Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
 import { DateJump } from "../components/today/DateJump";
-import { AddExerciseSheet } from "../components/train/AddExerciseSheet";
+import { addStandings, rejoinSuperset } from "../../shared/sessionStructureUndo";
+import { AddExerciseSheet, type ExerciseMark } from "../components/train/AddExerciseSheet";
 import { EditExerciseSheet } from "../components/train/EditExerciseSheet";
 import { FinishPanel } from "../components/train/FinishPanel";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
@@ -124,8 +124,17 @@ const settled = (s: Session): Session =>
     ? { ...s, completedAt: null }
     : s;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-/** A stable React key for an exercise in its block: its first set travels with it through any move or reorder. */
-const exKey = (e: BlockExercise, i: number) => e.sets[0]?.id ?? `e${e.exerciseId}-${i}`;
+/**
+ * A stable React key for an exercise in its block: its first set travels with it through any move
+ * or reorder. One with no sets is keyed by its block and place (two such copies never collide).
+ */
+const exKey = (e: BlockExercise, i: number, blockId: string) => e.sets[0]?.id ?? `e${blockId}-${e.exerciseId}-${i}`;
+
+/** An edit's Undo (see `commit`): apply it now, or offer it in a toast. */
+interface UndoHandle {
+  run: () => void;
+  offer: () => void;
+}
 
 type Hint = NonNullable<ReturnType<typeof accessoryHint>>;
 /**
@@ -221,8 +230,8 @@ export function TrainScreen() {
   // whose target is gone closes its sheet instead of pointing at a neighbour.
   const [editingHeld, setEditing] = useState<SetRef | null>(null);
   const [amrapHeld, setAmrap] = useState<SetRef | null>(null);
-  /** `back`: opened from the superset sheet, which comes back once the exercise is added (or not). */
-  const [adding, setAdding] = useState<{ mode: "new" } | { mode: "pair"; blockId: string; back?: boolean } | null>(null);
+  /** "pair": opened from the superset sheet, which comes back once the exercise is added (or not). */
+  const [adding, setAdding] = useState<{ mode: "new" } | { mode: "pair"; blockId: string } | null>(null);
   const [actionsHeld, setActions] = useState<HeldEx | null>(null);
   const editing = resolveSetRef(session, editingHeld);
   const amrap = resolveSetRef(session, amrapHeld);
@@ -236,8 +245,13 @@ export function TrainScreen() {
   const [ordering, setOrdering] = useState(false);
   /** What the last structure edit did: the open sheet's live region announces it. */
   const [structureStatus, setStructureStatus] = useState("");
+  /** The superset sheet's last Remove, undoable from the sheet (its toast waits for the sheet to close). */
+  const [sheetUndo, setSheetUndo] = useState<{ blockId: string; label: string; name: string; undo: UndoHandle } | null>(null);
+  /** The superset sheet open right now, for an Undo applied later (from the toast or the sheet). */
+  const managingNow = useRef<string | null>(null);
   const managed = managingId ? session.blocks.find((b) => b.id === managingId && b.kind === "accessory") : undefined;
   if (managingId && !managed) setManaging(null);
+  managingNow.current = managed?.id ?? null;
   const [maxFor, setMaxFor] = useState<Exercise | null>(null);
   /** The exercise in the Edit exercise sheet, and the row whose options opened it (for focus after). */
   const [editingExercise, setEditingExercise] = useState<{ id: number; ref: ExRef } | null>(null);
@@ -257,6 +271,7 @@ export function TrainScreen() {
   const offerUndo = (message: string, onUndo: () => void, duration = 7000) => {
     if (lastToast.current !== null) toast.dismiss(lastToast.current);
     lastToast.current = toast.show({ message, duration, action: { label: "Undo", onAction: onUndo } });
+    return lastToast.current;
   };
 
   // A sheet makes the app (and its toasts) inert and the toast would sit over the sheet's
@@ -273,20 +288,26 @@ export function TrainScreen() {
    * Save a change (the first one persists a draft). With `undo`, offer to revert it: just the
    * touched exercise (or block) when `scope` is given (later edits elsewhere survive), else the
    * whole session. Undoing the only change to a draft drops it back to the live plan.
-   * A preview never saves.
+   * A preview never saves. Returns the undo (it applies once): `run` applies it from elsewhere (an
+   * open sheet's own Undo; the toast goes), `offer` shows the toast later (with `toast: false`).
    */
   const commit = (
     edited: Session,
     undo?: {
       message: string;
       scope?: ExRef | { blockId: string };
-      /** Custom revert on top of the latest saved session (instead of `scope`). */
-      revert?: (cur: Session) => Session;
+      /**
+       * Custom revert on top of the latest saved session (instead of `scope`); `saved` is what
+       * this edit saved. A string instead says why it can't be undone any more (shown as a toast).
+       */
+      revert?: (cur: Session, saved: Session) => Session | string;
       duration?: number;
       /** After the Undo is applied: where focus should go (the toast's button is gone). */
       onUndone?: () => void;
+      /** false: no toast now (an open sheet offers the undo itself; `offer` shows it later). */
+      toast?: boolean;
     },
-  ) => {
+  ): UndoHandle | undefined => {
     if (isPreview) return;
     const before = stored;
     const wasDraft = !saved;
@@ -294,32 +315,52 @@ export function TrainScreen() {
     const next = settled(savedAfterEdit(edited, session, stored));
     saveSession(next);
     if (!undo) return;
-    offerUndo(
-      undo.message,
-      () => {
-        const cur = cachedSession(date) ?? next;
-        let restored = before;
-        const scope = undo.scope;
-        if (undo.revert) restored = undo.revert(cur);
-        else if (scope) {
-          const prevBlock = before.blocks.find((b) => b.id === scope.blockId);
-          const curBlock = cur.blocks.find((b) => b.id === scope.blockId);
-          const same = (i: number) => {
-            const p = prevBlock?.exercises[i];
-            return p && curBlock?.exercises[i]?.exerciseId === p.exerciseId ? p : null;
-          };
-          if ("exIdx" in scope) {
-            const prevEx = same(scope.exIdx);
-            if (prevEx) restored = mapExercise(cur, scope, () => prevEx);
-          } else if (prevBlock && curBlock)
-            restored = mapBlock(cur, scope.blockId, (b) => ({ ...b, exercises: b.exercises.map((e, i) => same(i) ?? e) }));
+    let used = false;
+    let toastId: number | null = null;
+    const apply = () => {
+      if (used) return;
+      used = true;
+      const cur = cachedSession(date) ?? next;
+      let restored = before;
+      const scope = undo.scope;
+      if (undo.revert) {
+        const r = undo.revert(cur, next);
+        if (typeof r === "string") {
+          toast.show({ message: r, tone: "warn" });
+          return;
         }
-        if (wasDraft && JSON.stringify(restored) === JSON.stringify(before)) deleteSession(date);
-        else saveSession(settled(restored));
-        undo.onUndone?.();
+        restored = r;
+      } else if (scope) {
+        const prevBlock = before.blocks.find((b) => b.id === scope.blockId);
+        const curBlock = cur.blocks.find((b) => b.id === scope.blockId);
+        const same = (i: number) => {
+          const p = prevBlock?.exercises[i];
+          return p && curBlock?.exercises[i]?.exerciseId === p.exerciseId ? p : null;
+        };
+        if ("exIdx" in scope) {
+          const prevEx = same(scope.exIdx);
+          if (prevEx) restored = mapExercise(cur, scope, () => prevEx);
+        } else if (prevBlock && curBlock)
+          restored = mapBlock(cur, scope.blockId, (b) => ({ ...b, exercises: b.exercises.map((e, i) => same(i) ?? e) }));
+      }
+      if (wasDraft && JSON.stringify(restored) === JSON.stringify(before)) deleteSession(date);
+      else saveSession(settled(restored));
+      undo.onUndone?.();
+    };
+    const offer = () => {
+      if (!used) toastId = offerUndo(undo.message, apply, undo.duration);
+    };
+    if (undo.toast !== false) offer();
+    return {
+      run: () => {
+        if (toastId !== null) {
+          toast.dismiss(toastId);
+          if (lastToast.current === toastId) lastToast.current = null;
+        }
+        apply();
       },
-      undo.duration,
-    );
+      offer,
+    };
   };
 
   const setLabel = (ref: SetRef) => {
@@ -572,20 +613,10 @@ export function TrainScreen() {
   }, [data.sessions]);
 
   const addExercise = (ex: Exercise) => {
+    if (adding?.mode === "pair") return addToSuperset(adding.blockId, ex);
     // Pre-filled from the last time it was done, as this session's own pre-fill would carry it.
     const sets = setsForAddedExercise(ex, session, data);
-    const item = { exerciseId: ex.id, measure: ex.measure, sets };
-    if (adding?.mode === "pair") {
-      const next = mapBlock(session, adding.blockId, (b) =>
-        b.exercises.length >= MAX_SUPERSET ? b : { ...b, exercises: [...b.exercises, item] },
-      );
-      commit(next);
-      if (adding.back) {
-        const letter = supersetLetters(next).get(adding.blockId);
-        const n = next.blocks.find((b) => b.id === adding.blockId)?.exercises.length ?? 0;
-        openManage(adding.blockId, letter ? `${ex.name} added to Superset ${letter} as ${letter}${n}` : "");
-      }
-    } else commit({ ...session, blocks: [...session.blocks, { id: newId(), kind: "accessory", exercises: [item] }] });
+    commit({ ...session, blocks: [...session.blocks, { id: newId(), kind: "accessory", exercises: [{ exerciseId: ex.id, measure: ex.measure, sets }] }] });
     tick();
     setAdding(null);
   };
@@ -595,17 +626,32 @@ export function TrainScreen() {
   const accessories = accessoryBlocks(session);
   const openManage = (blockId: string, status = "") => {
     setStructureStatus(status);
+    setSheetUndo(null);
     setManaging(blockId);
   };
+  /** A superset member's control in the open sheet, by the member's key. */
+  const memberControl = (key: string, which: "up" | "remove") => () =>
+    document.querySelector<HTMLElement>(`[data-member="${key}"] ${which === "up" ? '[data-move="up"]' : "[data-remove]"}`);
   /** Save a structure edit made in an open sheet, and say what it did (the sheet's live region). */
   const restructure = (next: Session, status: string) => {
     if (next === session) return false;
     tick();
     commit(next);
     setStructureStatus(status);
+    setSheetUndo(null);
     return true;
   };
   const exAt = (p: ExPlace) => session.blocks.find((b) => b.id === p.blockId)?.exercises[p.exIdx];
+  /** The key and announcement of a block's last member, after an edit that added it. */
+  const joined = (next: Session, blockId: string, name: string) => {
+    const letter = supersetLetters(next).get(blockId) ?? "";
+    const list = next.blocks.find((b) => b.id === blockId)?.exercises ?? [];
+    const n = list.length;
+    return {
+      key: list[n - 1] ? exKey(list[n - 1]!, n - 1, blockId) : "",
+      status: `${name} added to Superset ${letter} as ${letter}${n}`,
+    };
+  };
   const moveMember = (blockId: string, exIdx: number, delta: -1 | 1) => {
     const e = exAt({ blockId, exIdx });
     if (!e) return;
@@ -614,22 +660,110 @@ export function TrainScreen() {
     const n = next.blocks.find((b) => b.id === blockId)?.exercises.length ?? 0;
     restructure(next, `${exName(e.exerciseId)} moved ${delta < 0 ? "up" : "down"} · now ${letter}${exIdx + delta + 1} of ${n}`);
   };
-  const removeMember = (blockId: string, exIdx: number) => {
-    const e = exAt({ blockId, exIdx });
-    if (!e) return;
-    const letter = letters.get(blockId) ?? "";
-    if (restructure(splitOut(session, { blockId, exIdx }), `${exName(e.exerciseId)} removed from Superset ${letter} · now right after it`))
-      // Its row is gone (with the button pressed): back to the top of the list.
-      focusWhenReady(() => document.querySelector<HTMLElement>("[data-superset-members]"));
-  };
-  const addExisting = (blockId: string, from: ExPlace) => {
+
+  /**
+   * Take an exercise out of its superset into a block of its own right after it, with an Undo
+   * that puts it back at its place: from the toast, or — taken out in the superset sheet — from
+   * the sheet (its toast is offered once the sheet closes). An Undo that can no longer apply (the
+   * superset filled up since, say) says so instead.
+   */
+  const removeFromSuperset = (from: ExPlace, inSheet: boolean) => {
     const e = exAt(from);
-    if (!e) return;
-    const next = moveExerciseToBlock(session, from, blockId);
-    const letter = supersetLetters(next).get(blockId) ?? "";
-    const n = next.blocks.find((b) => b.id === blockId)?.exercises.length ?? 0;
-    if (restructure(next, `${exName(e.exerciseId)} added to Superset ${letter} as ${letter}${n}`))
-      focusWhenReady(() => document.querySelector<HTMLElement>(`[data-member="${exKey(e, from.exIdx)}"] [data-move="up"]`));
+    if (!e) return null;
+    const letter = letters.get(from.blockId) ?? "";
+    const name = exName(e.exerciseId);
+    const ownId = newId();
+    const next = splitOut(session, from, ownId);
+    if (next === session) return null;
+    tick();
+    const undo = commit(next, {
+      message: `${name} removed from Superset ${letter}`,
+      toast: !inSheet,
+      revert: (cur, saved) => {
+        const r = rejoinSuperset(cur, from, ownId, e.exerciseId, [e, saved.blocks.find((b) => b.id === ownId)?.exercises[0]]);
+        if ("session" in r) return r.session;
+        return r.cannot === "full"
+          ? `Can't undo: Superset ${letter} is full (${MAX_SUPERSET} exercises)`
+          : r.cannot === "superset-gone"
+            ? `Can't undo: Superset ${letter} is no longer in this workout`
+            : `Can't undo: ${name} is no longer in this workout`;
+      },
+      onUndone: () => {
+        setSheetUndo(null);
+        if (managingNow.current === from.blockId) {
+          setStructureStatus(`${name} back in Superset ${letter} as ${letter}${from.exIdx + 1}`);
+          focusWhenReady(memberControl(exKey(e, from.exIdx, from.blockId), "remove"));
+        } else focusWhenReady(exControl(from, "options"));
+      },
+    });
+    return { next, ownId, name, letter, undo };
+  };
+  const removeMember = (blockId: string, exIdx: number) => {
+    const r = removeFromSuperset({ blockId, exIdx }, true);
+    if (!r) return;
+    setStructureStatus(`${r.name} removed from Superset ${r.letter} · now right after it`);
+    setSheetUndo(r.undo ? { blockId, label: `${r.name} is on its own now, right after the superset.`, name: r.name, undo: r.undo } : null);
+    // Its row is gone (with the button pressed): back to the top of the list.
+    focusWhenReady(() => document.querySelector<HTMLElement>("[data-superset-members]"));
+  };
+
+  /**
+   * An exercise of this workout joins a superset at its end, with all its sets ("Add from this
+   * workout", or picked in "Add another exercise": `reopen` brings the superset sheet back). Focus
+   * goes to its row's Move up.
+   */
+  const addExisting = (blockId: string, from: ExPlace, reopen = false) => {
+    const e = exAt(from);
+    const next = e ? moveExerciseToBlock(session, from, blockId) : session;
+    if (!e || next === session) {
+      if (reopen) openManage(blockId);
+      return;
+    }
+    const { key, status } = joined(next, blockId, exName(e.exerciseId));
+    tick();
+    commit(next);
+    if (reopen) openManage(blockId, status);
+    else {
+      setStructureStatus(status);
+      setSheetUndo(null);
+    }
+    focusWhenReady(memberControl(key, "up"));
+  };
+  /**
+   * "Add another exercise" picked one: an exercise elsewhere in this workout moves in (keeping its
+   * sets) rather than being added twice; one already in the superset, or the main lift, isn't
+   * offered (AddExerciseSheet shows them disabled); anything else is added pre-filled. The
+   * superset sheet comes back, announcing it, with focus on the new member.
+   */
+  const addToSuperset = (blockId: string, ex: Exercise) => {
+    const standing = addStandings(session, blockId).get(ex.id);
+    if (standing?.kind === "member" || standing?.kind === "main") return;
+    setAdding(null);
+    if (standing?.kind === "elsewhere") return addExisting(blockId, standing.place, true);
+    const dest = session.blocks.find((b) => b.id === blockId);
+    if (!dest || dest.exercises.length >= MAX_SUPERSET) return openManage(blockId);
+    // Pre-filled like an exercise added by hand.
+    const item = { exerciseId: ex.id, measure: ex.measure, sets: setsForAddedExercise(ex, session, data) };
+    const next = mapBlock(session, blockId, (b) => ({ ...b, exercises: [...b.exercises, item] }));
+    const { key, status } = joined(next, blockId, ex.name);
+    tick();
+    commit(next);
+    openManage(blockId, status);
+    focusWhenReady(memberControl(key, "up"));
+  };
+  /** What "Add another exercise" shows for an exercise of the library (see addToSuperset). */
+  const pairMarks = (blockId: string): ReadonlyMap<number, ExerciseMark> => {
+    const letter = letters.get(blockId);
+    const out = new Map<number, ExerciseMark>();
+    for (const [id, st] of addStandings(session, blockId)) {
+      if (st.kind === "member") out.set(id, { note: letter ? `Already in Superset ${letter}` : "Already in this superset", disabled: true });
+      else if (st.kind === "main") out.set(id, { note: "Main lift · stays on its own", disabled: true });
+      else {
+        const from = letters.get(st.place.blockId);
+        out.set(id, { note: `${from ? `In Superset ${from}` : "In this workout"} · moves here`, disabled: false });
+      }
+    }
+    return out;
   };
   const moveAccessory = (index: number, delta: -1 | 1) => {
     const b = accessories[index];
@@ -1262,7 +1396,7 @@ export function TrainScreen() {
                       if (e.skipped)
                         return (
                           <div
-                            key={exKey(e, exIdx)}
+                            key={exKey(e, exIdx, b.id)}
                             className={clsx("flex min-h-11 flex-wrap items-center justify-between gap-x-3", exIdx > 0 && "mt-3")}
                           >
                             <div className="min-w-0 truncate text-[0.9375rem] text-mute">
@@ -1308,7 +1442,7 @@ export function TrainScreen() {
                             });
                       const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
                       return (
-                        <div key={exKey(e, exIdx)} className={clsx(exIdx > 0 && "mt-5")}>
+                        <div key={exKey(e, exIdx, b.id)} className={clsx(exIdx > 0 && "mt-5")}>
                           <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
                             <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
                               {tagLabel}
@@ -1608,12 +1742,19 @@ export function TrainScreen() {
       <AddExerciseSheet
         open={!!adding}
         onClose={() => {
-          if (adding?.mode === "pair" && adding.back) openManage(adding.blockId);
+          if (adding?.mode === "pair") {
+            // Back to the superset sheet, on the button that opened this one.
+            openManage(adding.blockId);
+            focusWhenReady(() => document.querySelector<HTMLElement>("[data-add-new]"));
+          }
           setAdding(null);
         }}
-        title={adding?.mode === "pair" ? "Add to superset" : "Add exercise"}
+        title={
+          adding?.mode === "pair" ? (letters.get(adding.blockId) ? `Add to Superset ${letters.get(adding.blockId)}` : "Add to superset") : "Add exercise"
+        }
         exercises={data.exercises}
         recentIds={recentIds}
+        marks={adding?.mode === "pair" ? pairMarks(adding.blockId) : undefined}
         onPick={addExercise}
         onCreate={async (input) => addExercise(await createExercise(input))}
       />
@@ -1623,44 +1764,57 @@ export function TrainScreen() {
         onClose={() => {
           const id = managingId;
           setManaging(null);
-          // Opened from the superset's header, its trigger is still there; when it isn't (the sheet
-          // came back after adding a new exercise), land on the superset's header or its first row.
-          focusWhenReady(() =>
-            document.activeElement && document.activeElement !== document.body
-              ? null
-              : (document.querySelector<HTMLElement>(`[data-manage="${id}"]`) ??
-                document.querySelector<HTMLElement>(`[data-ex="${id}:0"][data-control="options"]`)),
-          );
+          // A Remove still undoable here: its Undo moves to a toast.
+          if (sheetUndo?.blockId === id) sheetUndo.undo.offer();
+          setSheetUndo(null);
+          // Opened from the superset's header, the sheet gives focus back to it. Opened from a
+          // control that's gone (the exercise options, or it came back after "Add another
+          // exercise"), focus would stay in the closing sheet: land on the superset's header, or
+          // its first row once it's no longer a superset.
+          focusWhenReady(() => {
+            const a = document.activeElement;
+            if (a && a !== document.body && !a.closest('[role="dialog"]')) return null;
+            return (
+              document.querySelector<HTMLElement>(`[data-manage="${id}"]`) ??
+              document.querySelector<HTMLElement>(`[data-ex="${id}:0"][data-control="options"]`)
+            );
+          });
         }}
         letter={managed ? (letters.get(managed.id) ?? null) : null}
         members={(managed?.exercises ?? []).map((e, i) => {
           const done = e.sets.filter((x) => x.done).length;
           return {
-            key: exKey(e, i),
+            key: exKey(e, i, managed!.id),
             name: exName(e.exerciseId),
             detail: e.skipped ? "Skipped today" : `${plural(e.sets.length, "set")}${done ? ` · ${done} logged` : ""}`,
           };
         })}
         candidates={(managed ? movableInto(session, managed.id) : []).map((c) => ({
-          key: exKey(c.exercise, c.exIdx),
+          key: exKey(c.exercise, c.exIdx, c.blockId),
           name: exName(c.exercise.exerciseId),
           from: c.fromSuperset ? `Superset ${letters.get(c.blockId)}` : null,
         }))}
         full={!!managed && managed.exercises.length >= MAX_SUPERSET}
         blocksFull={blocksFull}
         status={structureStatus}
+        undo={
+          sheetUndo && managed && sheetUndo.blockId === managed.id
+            ? { label: sheetUndo.label, name: sheetUndo.name, onUndo: () => sheetUndo.undo.run() }
+            : null
+        }
         limitNote={{ superset: `A superset holds up to ${MAX_SUPERSET} exercises`, blocks: `A session holds up to ${MAX_BLOCKS} blocks` }}
         onMove={(i, d) => managed && moveMember(managed.id, i, d)}
         onRemove={(i) => managed && removeMember(managed.id, i)}
         onAddExisting={(key) => {
           if (!managed) return;
-          const c = movableInto(session, managed.id).find((x) => exKey(x.exercise, x.exIdx) === key);
+          const c = movableInto(session, managed.id).find((x) => exKey(x.exercise, x.exIdx, x.blockId) === key);
           if (c) addExisting(managed.id, c);
         }}
         onAddNew={() => {
-          if (!managed) return;
-          setAdding({ mode: "pair", blockId: managed.id, back: true });
+          if (!managed || managed.exercises.length >= MAX_SUPERSET) return;
+          setAdding({ mode: "pair", blockId: managed.id });
           setManaging(null);
+          setSheetUndo(null);
         }}
       />
 
@@ -1839,24 +1993,10 @@ export function TrainScreen() {
                       blocksFull
                         ? undefined
                         : () => {
-                            const letter = letters.get(actionsBlock.id) ?? "";
-                            const moved = actionsEx;
-                            const from = { blockId: actionsBlock.id, exIdx: actions.exIdx };
-                            const next = splitOut(session, from);
                             setActions(null);
-                            if (next === session) return;
-                            tick();
-                            commit(next, {
-                              message: `${exName(moved.exerciseId)} removed from Superset ${letter}`,
-                              // Back into the superset, at its place (wherever it is by then).
-                              revert: (cur) => {
-                                const at = locateExercise(cur, moved);
-                                return at ? moveExerciseToBlock(cur, at, from.blockId, from.exIdx) : cur;
-                              },
-                            });
+                            const r = removeFromSuperset({ blockId: actionsBlock.id, exIdx: actions.exIdx }, false);
                             // Its row (and the options button that opened this sheet) moved to a block of its own.
-                            const at = locateExercise(next, moved);
-                            if (at) focusWhenReady(exControl(at, "options"));
+                            if (r) focusWhenReady(exControl({ blockId: r.ownId, exIdx: 0 }, "options"));
                           }
                     }
                   >
