@@ -3,6 +3,7 @@ import { motion } from "motion/react";
 import type { ReactNode } from "react";
 import { Check } from "lucide-react";
 import type { Measure, SetEntry } from "../../../shared/schemas";
+import { shownLoad } from "../../../shared/session";
 import { measureUnit } from "./SetSheets";
 import { describeSet, unitWord } from "./sessionEdit";
 import { HOLD_MS, useHold } from "./useHold";
@@ -31,8 +32,8 @@ function HoldFill({ holding, className }: { holding: boolean; className: string 
 }
 
 /**
- * A set's load line on a chip: the load, or a muted "lb" for a weighted exercise without one yet
- * (an empty pounds field, so it reads as something to set; the chip's name says "(no load)" after
+ * A set's load line on a chip: the load, or a muted "– lb" for a weighted exercise without one yet
+ * (an empty pounds field — a bare "lb" under "10" read as "10 lb", so it reads as something to set; the chip's name says "(no load)" after
  * the reps instead). The caller passes no load for an unweighted exercise's pending sets.
  */
 function ChipLoad({ weight, weighted, className }: { weight: number | null; weighted: boolean; className: string }) {
@@ -47,16 +48,10 @@ function ChipLoad({ weight, weighted, className }: { weight: number | null; weig
   if (!weighted) return null;
   return (
     <span aria-hidden className={clsx("mt-1 text-[0.625rem] leading-none", className)}>
-      lb
+      – lb
     </span>
   );
 }
-
-/**
- * The load a set shows: a weighted exercise's logged or target load; an unweighted exercise's
- * only once logged with one (an old load stays visible, a target load is never shown).
- */
-const shownLoad = (set: SetEntry, weighted: boolean) => (set.done ? set.weight : weighted ? set.targetWeight : null);
 
 /** An accessory set: tap logs / unlogs, hold edits. */
 export function SetChip({
@@ -78,7 +73,7 @@ export function SetChip({
   index: number;
   set: SetEntry;
   measure: Measure;
-  /** The exercise tracks a load: a set without one shows an empty "lb". */
+  /** The exercise tracks a load: a set without one shows an empty "– lb". */
   weighted?: boolean;
   describedBy?: string;
   onTap: () => void;
@@ -90,7 +85,7 @@ export function SetChip({
   const unit = measureUnit(measure);
   // The accessible name is built from the visible text plus sr-only words around it (WCAG 2.5.3):
   // "Row set 1: 10 reps at 50 lb", where "10" and "50" are what the chip shows ("… (no load)" for
-  // an empty "lb").
+  // an empty "– lb").
   return (
     <motion.button
       type="button"
@@ -200,7 +195,7 @@ export function PlannedChip({
       </span>
       {(load || weighted) && (
         <span aria-hidden className={clsx("mt-1 text-[0.625rem] leading-none text-mute", load && "num")}>
-          {load || "lb"}
+          {load || "– lb"}
         </span>
       )}
     </li>

@@ -21,7 +21,10 @@ async function create(page: Page, name: string, measure: string) {
   const sheet = page.getByRole("dialog", { name: "Add exercise" });
   await sheet.getByRole("textbox", { name: "Search or create exercise" }).fill(name);
   await sheet.getByRole("button", { name: measure, exact: true }).click();
-  await expect(sheet.getByRole("switch", { name: "Weighted" })).toHaveAttribute("aria-checked", "true");
+  // Time defaults to unweighted (a plain hold); a weighted hang is picked explicitly.
+  const weighted = sheet.getByRole("group", { name: "Load" }).getByRole("button", { name: "Weighted", exact: true });
+  await weighted.click();
+  await expect(weighted).toHaveAttribute("aria-pressed", "true");
   await sheet.getByRole("button", { name: /Create & add/ }).click();
   await expect(sheet).toHaveCount(0);
 }
@@ -77,7 +80,7 @@ test("an exercise made unweighted logs no load and gets no hint from its old loa
   // Made unweighted while the session is in progress.
   await expectSynced(page);
   await page.goto("/settings");
-  const toggle = page.getByRole("button", { name: "Ring row: track load" });
+  const toggle = page.getByRole("button", { name: "Ring row: weighted" });
   await expect(toggle).toHaveAttribute("aria-pressed", "true");
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-pressed", "false");

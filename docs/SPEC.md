@@ -195,12 +195,15 @@ optional note.
 - Sets measure reps, seconds or distance. Independently, an exercise is **weighted** (tracks a load in lb) or not, so
   every combination exists: reps + load (rows, curls), time + load (weighted dead hang, weighted plank), distance + load
   (farmer's / sandbag carry), and unloaded reps, time or distance (pull-ups, a plank, a run). The flag is chosen when the
-  exercise is created ("Weighted", on by default for every measure) and can be changed in the exercise library; an
+  exercise is created (Load: "Weighted" / "Unweighted") and can be changed in the exercise library. Until the athlete
+  picks, the default follows the choices above it: weighted for reps (except core and conditioning) and for carries,
+  unweighted otherwise. Main lifts (barbell category or tracking a max) are always weighted and offer no choice. An
   exercise created without saying (older clients, imports of backups from before the flag) is weighted. Seeds: the main
-  lifts and the carries are weighted, pull-ups are not.
-  - A weighted exercise shows its load on every set (a "—" while none is set) and offers a load in the set editor. An
-    unweighted one shows no load and no load control — except on a set that already has a load (e.g. logged before the
-    exercise was made unweighted), which keeps showing it and stays editable.
+  lifts and the carries are weighted, pull-ups are not. On upgrade, existing exercises that were never logged or
+  planned with a load (and aren't main lifts, max-tracked or strength targets) became unweighted, once.
+  - A weighted exercise shows its load on every set (an empty "– lb" while none is set) and offers a load in the set
+    editor. An unweighted one shows no load and no load control — except on a set already logged with a load (e.g.
+    before the exercise was made unweighted), which keeps showing it and stays editable.
   - Whether an exercise is weighted is read from the exercise, not stored in sessions, so changing it applies at once,
     including to the session in progress. For an unweighted exercise, target loads on sets not yet logged are ignored
     (not shown, not counted; logging such a set records no load) but kept, so making it weighted again brings them

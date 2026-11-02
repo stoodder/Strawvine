@@ -192,7 +192,7 @@ describe("set chips", () => {
 
   it("shows a weighted set without a load as an empty “lb”, so there's a load to set", () => {
     chip(set(), true);
-    expect(screen.getByRole("button", { name: named("Hang set 1: 30s (no load)") }).textContent).toMatch(/lb$/);
+    expect(screen.getByRole("button", { name: named("Hang set 1: 30s (no load)") }).textContent).toMatch(/– lb$/);
   });
 
   it("shows no target load on an unweighted set, but shows a logged one", () => {
@@ -214,7 +214,7 @@ describe("set chips", () => {
       { container: root() },
     );
     const [empty, plain, loaded] = screen.getAllByRole("listitem");
-    expect(empty!.textContent).toMatch(/Set 1: 40 meters \(no load\).*lb$/);
+    expect(empty!.textContent).toMatch(/Set 1: 40 meters \(no load\).*– lb$/);
     expect(plain!.textContent).toBe("Set 2: 40 meters40m");
     expect(loaded!.textContent).toMatch(/Set 3: 40 meters at 70 lb.*70$/);
   });
