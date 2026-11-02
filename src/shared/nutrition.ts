@@ -150,3 +150,47 @@ export function project(
   const range: [ISODate, ISODate] | null = dates.length ? [dates[0]!, dates[dates.length - 1]!] : null;
   return { direction, remainingLb, atPace, atLimit, observed, observedRateLbPerWeek, range };
 }
+
+// ---------------------------------------------------------------------------
+// Over-target colour scale (Today's calorie and macro bars, SPEC §3.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * How far over a target counts as "over", and how far over is as bad as it gets. Both are
+ * fractions of the target: `tolerance` 0.05 = up to 5 % over still reads as on target; `full`
+ * 0.25 = 25 % over is the end of the scale. A display tolerance (how the bars are tinted), not a
+ * training rule, so it lives here as named constants rather than in Settings.
+ */
+export interface OverTargetScale {
+  tolerance: number;
+  full: number;
+}
+
+/** Calories, carbs and fat: on target within 5 %, fully over at 25 %. */
+export const OVER_TARGET_SCALE: OverTargetScale = { tolerance: 0.05, full: 0.25 };
+
+/**
+ * Protein is a floor for an athlete more than a ceiling — going over costs nothing but the calories
+ * (which the calorie bar already shows) — so its scale is wider: on target within 25 % over,
+ * fully over at 75 % (e.g. 350 g on a 200 g target).
+ */
+export const PROTEIN_OVER_TARGET_SCALE: OverTargetScale = { tolerance: 0.25, full: 0.75 };
+
+/**
+ * How far `eaten` is over `target`, on a 0…1 scale: 0 at or under the target and within the
+ * scale's tolerance, rising linearly to 1 at `full` over (and staying 1 beyond). 0 when there is
+ * nothing to compare (no entry, or a target ≤ 0).
+ */
+export function overTargetSeverity(
+  eaten: number | null | undefined,
+  target: number | null | undefined,
+  scale: OverTargetScale = OVER_TARGET_SCALE,
+): number {
+  if (eaten === null || eaten === undefined || target === null || target === undefined) return 0;
+  if (!Number.isFinite(eaten) || !Number.isFinite(target) || target <= 0) return 0;
+  // In grams/kcal rather than ratios, so "exactly 5 % over" isn't nudged past by rounding.
+  const excess = eaten - target - target * scale.tolerance;
+  if (excess <= 1e-9) return 0;
+  const span = target * (scale.full - scale.tolerance);
+  return span <= 0 ? 1 : Math.min(1, excess / span);
+}

@@ -5,6 +5,7 @@ import { addDays, formatShortDate } from "../../shared/dates";
 import { displayPrefs } from "../../shared/defaults";
 import { CALIBRATION_DAYS, computeEnergySeries } from "../../shared/energy";
 import { currentMax } from "../../shared/program";
+import { computeStepsSeries } from "../../shared/steps";
 import type { Exercise } from "../../shared/schemas";
 import { LineChart, Sparkline, type Series } from "../components/charts";
 import { MaxSheet } from "../components/MaxSheet";
@@ -36,10 +37,13 @@ export function ProgressScreen() {
   useTitle("Progress");
 
   const first = data.days.find((d) => d.weightLb !== null || d.calories !== null)?.date ?? today;
-  const series = useMemo(() => {
-    const from = range ? addDays(today, -(range - 1)) : first < today ? first : addDays(today, -6);
-    return computeEnergySeries(data.days, from, today, data.settings.nutrition.kcalPerLb);
-  }, [data.days, data.settings.nutrition.kcalPerLb, range, today, first]);
+  const from = range ? addDays(today, -(range - 1)) : first < today ? first : addDays(today, -6);
+  const series = useMemo(
+    () => computeEnergySeries(data.days, from, today, data.settings.nutrition.kcalPerLb),
+    [data.days, data.settings.nutrition.kcalPerLb, from, today],
+  );
+  // Steps over the same range; today's count is in progress, so the trend ends yesterday.
+  const steps = useMemo(() => computeStepsSeries(data.days, from, today, today), [data.days, from, today]);
 
   // Stable series for the charts, so hovering or opening a table never rebuilds years of points.
   const weightSeries = useMemo<Series[]>(
@@ -85,6 +89,35 @@ export function ProgressScreen() {
       },
     ],
     [series],
+  );
+
+  const stepsSeries = useMemo<Series[]>(() => {
+    // A single day is a dot, not a trend: wait for a couple.
+    if (steps.filter((d) => d.steps !== null).length < 2) return [];
+    return [
+      {
+        key: "steps",
+        label: "Steps",
+        kind: "dots",
+        color: "var(--color-fg-2)",
+        points: steps.map((d) => ({ x: d.date, y: d.steps })),
+        format: (v) => fmt(v),
+        weeklyOver: 400,
+      },
+      {
+        key: "avg",
+        label: "Trend",
+        kind: "line",
+        color: "var(--color-accent)",
+        points: steps.map((d) => ({ x: d.date, y: d.avgSteps })),
+        format: (v) => fmt(v),
+      },
+    ];
+  }, [steps]);
+  const stepTarget = data.settings.targets.steps;
+  const stepRef = useMemo(
+    () => (stepTarget > 0 ? { y: stepTarget, label: `target ${fmt(stepTarget)}`, tone: "target" as const } : undefined),
+    [stepTarget],
   );
 
   const loggedCount = model.todayEnergy?.loggedCount ?? 0;
@@ -297,6 +330,21 @@ export function ProgressScreen() {
           Weighted 7-day averages. The gap between the lines is the surplus or deficit your scale is actually responding to.
         </p>
         <IntakeStrip data={data} series={model.series} today={today} />
+      </Section>
+
+      <Section label="Steps">
+        <LineChart
+          series={stepsSeries}
+          refLine={stepRef}
+          title="Steps"
+          strong={strong}
+          emptyText="Log steps a few days to see your trend."
+        />
+        {stepsSeries.length > 0 && (
+          <p className="mt-3 text-xs leading-relaxed text-mute">
+            Weighted 7-day average, like your weight trend. Today&rsquo;s count joins it once the day is done.
+          </p>
+        )}
       </Section>
 
       {/* Lifts */}

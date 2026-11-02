@@ -73,6 +73,12 @@
   --color-glow: #6ee7d8;
   --color-gold: #f4b860;
   --color-warn: #f08a6c;
+  /*
+   * Caution: the middle of the over-target scale on Today's fuel bars (lime → caution → warn).
+   * A clear lemon yellow (OKLCH hue ≈105°), kept ≈30° away from gold's amber (≈75°) so an
+   * over-target bar never reads as an achievement. 13.9:1 on ink-950, 12.3:1 on the bar track.
+   */
+  --color-caution: #e8dc4a;
 
   --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -105,6 +111,7 @@
   --color-mute: #aeb4be;
   --color-faint: #959ba6;
   --color-warn: #ff9d82;
+  --color-caution: #f4e65c; /* 15.3:1 on ink-950, 8.6:1 on the high-contrast track */
   --hairline: rgb(255 255 255 / 0.22);
   --edge-soft: rgb(255 255 255 / 0.38); /* ≥ 3:1 against ink-950 */
   --edge: rgb(255 255 255 / 0.36);

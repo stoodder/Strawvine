@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
-import { goalDirection, macrosFor, project, recommend, weeksAtPct } from "./nutrition";
+import {
+  goalDirection,
+  macrosFor,
+  OVER_TARGET_SCALE,
+  overTargetSeverity,
+  project,
+  PROTEIN_OVER_TARGET_SCALE,
+  recommend,
+  weeksAtPct,
+} from "./nutrition";
 
 const base = defaultSettings({ bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 }, "2026-11-01");
 const withGoal = (targetLb: number, pacePctPerWeek: number, startLb?: number) => ({
@@ -159,5 +168,40 @@ describe("project", () => {
     expect(p.atPace!.weeks).toBeCloseTo(weeksAtPct(200, 210, 0.5)!);
     expect(p.observed!.weeks).toBeCloseTo(20);
     expect(p.range).toEqual([p.atPace!.date, p.observed!.date]);
+  });
+});
+
+describe("overTargetSeverity", () => {
+  it("is 0 at or under the target and within the 5% tolerance", () => {
+    expect(overTargetSeverity(0, 200)).toBe(0);
+    expect(overTargetSeverity(150, 200)).toBe(0);
+    expect(overTargetSeverity(200, 200)).toBe(0);
+    expect(overTargetSeverity(210, 200)).toBe(0); // exactly 5% over
+  });
+
+  it("rises linearly from the tolerance to 1 at 25% over, and stays there", () => {
+    expect(overTargetSeverity(212, 200)).toBeCloseTo(0.05); // 6%: just past the tolerance
+    expect(overTargetSeverity(230, 200)).toBeCloseTo(0.5); // 15%: halfway
+    expect(overTargetSeverity(250, 200)).toBe(1); // 25%
+    expect(overTargetSeverity(400, 200)).toBe(1);
+    expect(overTargetSeverity(2900, 2500)).toBeCloseTo(0.55); // calories: 16% over
+  });
+
+  it("is lenient with protein: on target up to 25% over, fully over at 75%", () => {
+    expect(overTargetSeverity(250, 200, PROTEIN_OVER_TARGET_SCALE)).toBe(0);
+    expect(overTargetSeverity(300, 200, PROTEIN_OVER_TARGET_SCALE)).toBeCloseTo(0.5);
+    expect(overTargetSeverity(350, 200, PROTEIN_OVER_TARGET_SCALE)).toBe(1);
+  });
+
+  it("is 0 when there is nothing to compare", () => {
+    expect(overTargetSeverity(null, 200)).toBe(0);
+    expect(overTargetSeverity(120, 0)).toBe(0); // a zero carb target has no bar
+    expect(overTargetSeverity(120, null)).toBe(0);
+    expect(overTargetSeverity(Number.NaN, 200)).toBe(0);
+  });
+
+  it("treats a degenerate scale as a step", () => {
+    expect(overTargetSeverity(211, 200, { tolerance: 0.05, full: 0.05 })).toBe(1);
+    expect(OVER_TARGET_SCALE.full).toBeGreaterThan(OVER_TARGET_SCALE.tolerance);
   });
 });

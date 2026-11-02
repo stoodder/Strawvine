@@ -50,6 +50,34 @@ All fields are optional and can be edited at any time during the day (or later).
   any past day ripples forward correctly.
 - Today is shown live, marked _in progress_.
 
+### 3.1 Fuel bars (Today)
+
+The calorie bar and each macro bar fill toward the day's target (§4.4). Going over is shown on a colour scale
+rather than a switch: **on target** (accent lime) up to a tolerance over, then the bar shades through a
+**caution yellow** to the **warn red** as the overage grows, mixed continuously in between. The scale is a 0–1
+severity (`overTargetSeverity`, `src/shared/nutrition.ts`): 0 within the tolerance, rising linearly to 1 at "fully
+over", and staying there beyond.
+
+| Bar                  | Tolerance (stays lime) | Halfway (yellow) | Fully over (red) |
+| -------------------- | ---------------------- | ---------------- | ---------------- |
+| Calories, carbs, fat | ≤ 5 % over             | 15 % over        | ≥ 25 % over      |
+| Protein              | ≤ 25 % over            | 50 % over        | ≥ 75 % over      |
+
+- Protein is lenient: for an athlete it is a floor more than a ceiling, and its extra calories already show on the
+  calorie bar.
+- Past the tolerance the bar is labelled "+N kcal over" / "+Ng over" in the same colour (not colour alone); the lime
+  glow is kept for an on-target bar.
+- The tolerances are display constants (`OVER_TARGET_SCALE`, `PROTEIN_OVER_TARGET_SCALE`), not training rules.
+- Yellow is its own colour, never gold: gold stays for PRs and goals.
+
+### 3.2 Steps trend (Progress)
+
+Progress charts daily steps (a dot per day, a dot per week past ~a year) with a **trend line**: the same descending
+weighted 7-day average as bodyweight (§4.1), with days without a count skipped and their weight removed from the
+divisor. Today's count is still in progress, so it is plotted but joins the trend only once the day is done. The step
+target is drawn as a neutral dashed reference line. The chart follows the same range toggle as the bodyweight and
+energy charts, and needs counts on at least two days.
+
 ## 4. Energy engine (TDEE)
 
 Units: **lb**, **3,500 kcal per lb**.

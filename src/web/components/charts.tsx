@@ -111,7 +111,11 @@ export function LineChart({
 }: {
   series: Series[];
   height?: number;
-  refLine?: { y: number; label: string };
+  /**
+   * A dashed horizontal reference. "goal" (the default) is gold — a goal weight; "target" is a
+   * neutral grey for an everyday target (a step count) that isn't an achievement.
+   */
+  refLine?: { y: number; label: string; tone?: "goal" | "target" };
   formatY?: (v: number) => string;
   emptyText?: ReactNode;
   /** Names the chart for screen readers ("Bodyweight"); the summary is generated. */
@@ -255,6 +259,7 @@ export function LineChart({
     .join(" ");
   const pct = (v: number) => `${(v / height) * 100}%`;
   // Axis values read in the main line's own format (e.g. one decimal for bodyweight).
+  const refGoal = refLine?.tone !== "target";
   const fmtAxis = (series.find((s) => s.kind === "line") ?? series[0])?.format ?? formatY;
   const gridAt = dataMax > dataMin ? [dataMax, (dataMax + dataMin) / 2, dataMin] : [dataMax];
 
@@ -303,9 +308,9 @@ export function LineChart({
               x2={width - pad.r}
               y1={yOf(refLine.y)}
               y2={yOf(refLine.y)}
-              stroke="var(--color-gold)"
+              stroke={refGoal ? "var(--color-gold)" : "var(--color-mute)"}
               strokeDasharray="3 5"
-              opacity={0.6}
+              opacity={refGoal ? 0.6 : 0.8}
             />
           )}
           {/*
@@ -383,7 +388,10 @@ export function LineChart({
         {refLine && !pinned && (
           <span
             aria-hidden
-            className="pointer-events-none absolute right-0 -translate-y-full pb-1 font-mono text-2xs text-gold/90"
+            className={clsx(
+              "pointer-events-none absolute right-0 -translate-y-full pb-1 font-mono text-2xs",
+              refGoal ? "text-gold/90" : "text-mute",
+            )}
             style={{ top: pct(yOf(refLine.y)) }}
           >
             {refLine.label}
@@ -393,7 +401,8 @@ export function LineChart({
           <span
             aria-hidden
             className={clsx(
-              "pointer-events-none absolute right-0 font-mono text-2xs text-gold/90",
+              "pointer-events-none absolute right-0 font-mono text-2xs",
+              refGoal ? "text-gold/90" : "text-mute",
               pinned === "below" ? "bottom-0" : "top-0",
             )}
           >
