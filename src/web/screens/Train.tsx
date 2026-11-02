@@ -731,7 +731,7 @@ export function TrainScreen() {
       </header>
 
       <div className="mt-6">
-        <h1 data-train-title tabIndex={-1} className="text-[clamp(2.125rem,11vw,2.75rem)] leading-none font-light tracking-tight">
+        <h1 data-train-title tabIndex={-1} className="text-[clamp(1.75rem,11vw,2.75rem)] leading-none font-light tracking-tight">
           {session.label}
         </h1>
         <p className="mt-3 text-sm text-mute">
@@ -1572,7 +1572,7 @@ export function TrainScreen() {
                       <button
                         type="button"
                         aria-label={`Edit set ${si + 1}: ${describeSet(s, actionsEx.measure, weighted)}${s.done ? ", logged" : ""}`}
-                        className="tap flex min-h-11 flex-1 items-center justify-between rounded-2xl bg-white/[0.04] px-4 py-3 text-left"
+                        className="tap flex min-h-11 min-w-0 flex-1 flex-wrap items-center justify-between gap-x-3 rounded-2xl bg-white/[0.04] px-4 py-3 text-left"
                         onClick={() => {
                           setActions(null);
                           setEditing(ref);

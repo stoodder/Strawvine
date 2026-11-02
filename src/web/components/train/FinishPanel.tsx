@@ -153,7 +153,7 @@ export function FinishPanel({
         <h2 ref={recapHeading} tabIndex={-1} className="label mt-4 text-accent">
           Session complete
         </h2>
-        <dl className="mt-4 flex gap-8">
+        <dl className="mt-4 flex flex-wrap justify-center gap-x-8 gap-y-3">
           <div>
             <dt className="label">Sets</dt>
             <dd className="num mt-1 text-2xl font-light">

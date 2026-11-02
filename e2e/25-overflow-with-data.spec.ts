@@ -3,9 +3,9 @@
  * history, accessories with long names — one with no break opportunity at all — in a superset,
  * four-digit loads and step counts, long benchmark names, notes with URLs. Train, its sheets,
  * Progress's maxes and the PR celebration (which names the lift or benchmark) are where long names
- * used to push the page — or a sheet's panel — wider than the phone. A narrow phone (320 px) and a
- * common one (375 px). Measured with the html/body clip lifted (`pageOverflow`), so the safety net
- * in styles.css can't hide a regression.
+ * used to push the page — or a sheet's panel — wider than the phone. A narrow phone (320 px), a
+ * common one (375 px) and a 390 px phone at 200% zoom (195 px). Measured with the html/body clip
+ * lifted (`pageOverflow`), so the safety net in styles.css can't hide a regression.
  */
 import type { Page } from "@playwright/test";
 import {
@@ -114,10 +114,11 @@ test("a PR celebration naming an unbreakable benchmark fits a 320 px phone", asy
   expect(await outsideViewport(overlay), "the celebration at 320 px").toEqual([]);
 });
 
-for (const width of [320, 375]) {
+// 195 px: a 390 px phone at 200% zoom (WCAG reflow, as in e2e/13).
+for (const width of [195, 320, 375]) {
   test.describe(`with weeks of data, nothing scrolls sideways at ${width} px`, () => {
     test.beforeEach(async ({ page }) => {
-      await page.setViewportSize({ width, height: 740 });
+      await page.setViewportSize({ width, height: width === 195 ? 422 : 740 });
       await onboardedOn(page, MONDAY);
       await seedRealData(page);
     });
@@ -142,7 +143,7 @@ for (const width of [320, 375]) {
       expect(await page.evaluate(() => window.scrollX), "Train pans sideways").toBe(0);
     });
 
-    test("Train's sheets with long names", async ({ page }) => {
+    test("sheets with long names and four-digit numbers", async ({ page }) => {
       await page.goto("/train");
       for (const name of [LONG, UNBREAKABLE]) {
         await page.getByRole("button", { name: `${name} options` }).click();
@@ -164,6 +165,16 @@ for (const width of [320, 375]) {
       await expect(add.getByRole("button", { name: /Create & add/ })).toBeVisible();
       expect(await outsideViewport(add), `add exercise sheet, creating a long name, at ${width} px`).toEqual([]);
       expect(await pageOverflow(page)).toBeNull();
+      await page.keyboard.press("Escape");
+      await expect(add).toHaveCount(0);
+
+      // A 1,000 lb max beside its sparkline, and the max form.
+      await page.goto("/progress");
+      await page.getByRole("button", { name: new RegExp(`^${UNBREAKABLE}`) }).click();
+      const max = page.getByRole("dialog", { name: UNBREAKABLE });
+      await expect(max.getByRole("textbox", { name: "New max" })).toBeVisible();
+      await page.waitForTimeout(400);
+      expect(await outsideViewport(max), `max sheet at ${width} px`).toEqual([]);
     });
   });
 }
