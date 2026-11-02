@@ -100,6 +100,7 @@ class FakeServer {
         category: "primary" as const,
         tracksMax: true,
         measure: "reps" as const,
+        weighted: true,
         archived: false,
       })),
       maxEntries: [],

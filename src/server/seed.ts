@@ -15,11 +15,12 @@ export async function ensureSeeded(db: Db, today: string = localToday()) {
     for (const s of SEED_EXERCISES) {
       const [row] = await tx
         .insert(exercises)
-        .values({ name: s.name, category: s.category, tracksMax: s.tracksMax, measure: s.measure })
+        .values({ name: s.name, category: s.category, tracksMax: s.tracksMax, measure: s.measure, weighted: s.weighted })
         .returning({ id: exercises.id });
       ids[s.key] = row!.id;
     }
-    for (const a of SEED_ACCESSORIES) await tx.insert(exercises).values({ name: a.name, category: a.category, measure: a.measure });
+    for (const a of SEED_ACCESSORIES)
+      await tx.insert(exercises).values({ name: a.name, category: a.category, measure: a.measure, weighted: a.weighted });
     await tx
       .insert(settings)
       .values({ id: 1, data: defaultSettings(ids, today) })

@@ -63,6 +63,13 @@ export const exerciseSchema = z.object({
   category: exerciseCategory,
   tracksMax: z.boolean(),
   measure,
+  /**
+   * Tracks a load (lb) with each set, whatever the measure: reps + load (rows), time + load
+   * (weighted dead hang), distance + load (farmer's carry). Absent on exercises saved before it
+   * existed (old backups, cached copies): those are weighted, as everything was. Read it through
+   * `isWeighted()` (session.ts).
+   */
+  weighted: z.boolean().default(true),
   archived: z.boolean(),
 });
 export type Exercise = z.infer<typeof exerciseSchema>;
@@ -73,6 +80,12 @@ export const exerciseCreateSchema = z
     category: exerciseCategory.default("accessory"),
     tracksMax: z.boolean().default(false),
     measure: measure.default("reps"),
+    /**
+     * Absent = weighted (the server stores true), for every measure: clients from before the flag
+     * existed showed a load on every exercise. Optional rather than defaulted so such a client's
+     * queued create hashes the same as before (idempotent retries, see server/idempotency.ts).
+     */
+    weighted: z.boolean().optional(),
   })
   .strict();
 
@@ -82,6 +95,7 @@ export const exercisePatchSchema = z
     category: exerciseCategory,
     tracksMax: z.boolean(),
     measure,
+    weighted: z.boolean(),
     archived: z.boolean(),
   })
   .partial()
@@ -227,7 +241,7 @@ export const settingsSchema = z.object({
       restSecondsMain: z.number().min(10).max(900),
       /** Rest timer target after an accessory set, in seconds. */
       restSecondsAccessory: z.number().min(10).max(900),
-      /** Load added by an accessory progression hint ("hit all reps last time → +5"). 0 turns hints off. */
+      /** Load added by a weighted accessory's progression hint ("hit every target last time → +5"). 0 turns hints off. */
       accessoryIncrementLb: z.number().min(0).max(50),
     })
     .optional(),
@@ -259,6 +273,11 @@ export const setEntrySchema = z.object({
 });
 export type SetEntry = z.infer<typeof setEntrySchema>;
 
+/**
+ * An exercise in a session. `measure` is snapshotted from the exercise (the app never changes it after
+ * creation); whether it is weighted is not — it is looked up on the exercise (`isWeighted`), so
+ * changing the flag applies to the session in progress and to every later pre-fill.
+ */
 export const blockExerciseSchema = z.object({
   exerciseId: z.number().int(),
   measure,

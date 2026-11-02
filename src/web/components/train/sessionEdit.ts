@@ -73,11 +73,16 @@ export function unitWord(m: Measure, n: number | null): string {
   return m === "seconds" ? (one ? "second" : "seconds") : m === "meters" ? (one ? "meter" : "meters") : one ? "rep" : "reps";
 }
 
-/** "10 reps at 50 lb" — the spoken form of a set. */
-export function describeSet(s: SetEntry, m: Measure): string {
+/**
+ * "10 reps at 50 lb", "30 seconds at 25 lb" — the spoken form of a set. A set of a weighted
+ * exercise without a load yet says so ("10 reps (no load)"); otherwise a load is only mentioned
+ * when there is one.
+ */
+export function describeSet(s: SetEntry, m: Measure, weighted = false): string {
   const reps = shownReps(s);
   const weight = shownWeight(s);
-  return `${reps ?? "no target"} ${reps === null ? "" : unitWord(m, reps)}${weight ? ` at ${weight} lb` : ""}`.replace(/\s+/g, " ").trim();
+  const load = weight ? ` at ${weight} lb` : weighted ? " (no load)" : "";
+  return `${reps ?? "no target"} ${reps === null ? "" : unitWord(m, reps)}${load}`.replace(/\s+/g, " ").trim();
 }
 
 /** "4×10" when every set shares a rep count, else "6/8/10/12". */

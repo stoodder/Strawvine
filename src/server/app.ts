@@ -651,7 +651,11 @@ export function createApp(opts: AppOptions) {
       c,
       { path: "/api/exercises", body: parsed.data },
       async (tx) => {
-        const [row] = await tx.insert(exercises).values(parsed.data).returning();
+        // A create that doesn't say is weighted (see exerciseCreateSchema).
+        const [row] = await tx
+          .insert(exercises)
+          .values({ ...parsed.data, weighted: parsed.data.weighted ?? true })
+          .returning();
         return { status: 201, body: toExercise(row!) };
       },
       { beforeCommit: (tx) => recordVersion(c, tx) },

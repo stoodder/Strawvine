@@ -27,7 +27,7 @@ const settings = { onboarded: true } as unknown as Settings;
 const boot = (): Bootstrap => ({
   settings,
   days: [],
-  exercises: [{ id: 1, name: "Squat", category: "primary", measure: "reps", tracksMax: true, archived: false }],
+  exercises: [{ id: 1, name: "Squat", category: "primary", measure: "reps", tracksMax: true, weighted: true, archived: false }],
   maxEntries: [],
   sessions: [],
   seenAchievements: [],
@@ -134,6 +134,41 @@ describe("overlay", () => {
     const base = applyAcked(boot(), s.entries);
     expect(base.maxEntries).toEqual([saved]);
     expect(overlay(base, s.entries, {}).maxEntries).toEqual([saved]);
+  });
+});
+
+describe("weighted exercises", () => {
+  const create = {
+    kind: "createExercise",
+    tempId: -1,
+    name: "Dead hang",
+    category: "accessory",
+    measure: "seconds",
+    tracksMax: false,
+  } as const;
+
+  it("sends and shows the flag a create was made with", () => {
+    const s = addOp(emptyOutbox(), { ...create, weighted: false }, null);
+    expect(request(s.entries[0]!.op).body).toEqual({
+      name: "Dead hang",
+      category: "accessory",
+      measure: "seconds",
+      tracksMax: false,
+      weighted: false,
+    });
+    expect(overlay(boot(), s.entries, {}).exercises.at(-1)).toMatchObject({ id: -1, measure: "seconds", weighted: false });
+  });
+
+  it("sends a create queued before the flag existed as it was (same idempotency hash), shown as weighted", () => {
+    const s = addOp(emptyOutbox(), create, null);
+    expect(request(s.entries[0]!.op).body).toEqual({ name: "Dead hang", category: "accessory", measure: "seconds", tracksMax: false });
+    expect(overlay(boot(), s.entries, {}).exercises.at(-1)).toMatchObject({ id: -1, weighted: true });
+  });
+
+  it("patches the flag like any other exercise field", () => {
+    const s = addOp(emptyOutbox(), { kind: "updateExercise", id: 1, patch: { weighted: false } }, null);
+    expect(request(s.entries[0]!.op)).toMatchObject({ method: "PATCH", path: "/exercises/1", body: { weighted: false } });
+    expect(overlay(boot(), s.entries, {}).exercises[0]).toMatchObject({ id: 1, weighted: false });
   });
 });
 

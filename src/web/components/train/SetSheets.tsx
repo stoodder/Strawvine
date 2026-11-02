@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useId, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { platesPerSide } from "../../../shared/program";
+import { defaultTarget } from "../../../shared/session";
 import type { Measure, SetEntry } from "../../../shared/schemas";
 import { celebrate, success } from "../../lib/haptics";
 import { Sheet, Stepper } from "../ui";
@@ -59,13 +60,18 @@ function FineLoad({ weight, onChange }: { weight: number; onChange: (v: number) 
   );
 }
 
-/** Edit a single set's reps/time/distance and load. */
+/**
+ * Edit a single set's reps/time/distance and load. The load is offered for a weighted exercise,
+ * and for any set that already has one (an exercise made unweighted later keeps its old loads
+ * editable rather than silently hidden).
+ */
 export function SetEditSheet({
   open,
   onClose,
   title,
   set,
   measure,
+  weighted,
   showPlates,
   onSave,
   onDelete,
@@ -75,6 +81,8 @@ export function SetEditSheet({
   title: string;
   set: SetEntry | null;
   measure: Measure;
+  /** The exercise tracks a load. */
+  weighted: boolean;
   /** Barbell work only: plates make no sense for dumbbells or cables. */
   showPlates?: boolean;
   onSave: (s: SetEntry) => void;
@@ -85,12 +93,13 @@ export function SetEditSheet({
   const setId = set?.id;
   useEffect(() => {
     if (set) {
-      setReps(set.reps ?? set.targetReps ?? (measure === "reps" ? 10 : measure === "seconds" ? 30 : 40));
+      setReps(set.reps ?? set.targetReps ?? defaultTarget(measure));
       setWeight(set.weight ?? set.targetWeight ?? 0);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, setId, measure]);
   if (!set) return null;
+  const showLoad = weighted || !!(set.weight ?? set.targetWeight);
   const repStep = measure === "reps" ? 1 : measure === "seconds" ? 5 : 5;
   const repLabel = measure === "reps" ? "Reps" : measure === "seconds" ? "Seconds" : "Meters";
   return (
@@ -100,16 +109,18 @@ export function SetEditSheet({
           <div className="label">{repLabel}</div>
           <Stepper value={reps} onChange={setReps} step={repStep} max={10000} editable label={repLabel.toLowerCase()} />
         </div>
-        <div className="flex flex-col items-center gap-2">
-          <div className="label">Load · lb</div>
-          <Stepper value={weight} onChange={setWeight} step={5} max={2000} editable label="load" />
-          <FineLoad weight={weight} onChange={setWeight} />
-          {showPlates && (
-            <div className="mt-2 min-h-6">
-              <Plates weight={weight} />
-            </div>
-          )}
-        </div>
+        {showLoad && (
+          <div className="flex flex-col items-center gap-2">
+            <div className="label">Load · lb</div>
+            <Stepper value={weight} onChange={setWeight} step={5} max={2000} editable label="load" />
+            <FineLoad weight={weight} onChange={setWeight} />
+            {showPlates && (
+              <div className="mt-2 min-h-6">
+                <Plates weight={weight} />
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-3">
           {onDelete && (
             <button

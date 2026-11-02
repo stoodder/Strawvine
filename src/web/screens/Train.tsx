@@ -27,11 +27,14 @@ import {
   buildSession,
   buildSessionFrom,
   isSessionStarted,
+  isWeighted,
   newId,
   planChanged,
   sessionCounts,
   sessionDoneEarly,
   sessionVolume,
+  setsForAddedExercise,
+  targetsMetPhrase,
 } from "../../shared/session";
 import { useDockHeight, useDockTop } from "../components/Dock";
 import { CheckDot, Empty, Section, Sheet } from "../components/ui";
@@ -206,6 +209,8 @@ export function TrainScreen() {
 
   const exById = (id: number) => data.exercises.find((e) => e.id === id);
   const exName = (id: number) => exById(id)?.name ?? "Exercise";
+  /** Whether an exercise tracks a load (an unknown one does). */
+  const exWeighted = (id: number) => isWeighted(exById(id));
 
   // --- Undo toasts --------------------------------------------------------------------------
   const lastToast = useRef<number | null>(null);
@@ -531,11 +536,7 @@ export function TrainScreen() {
   };
 
   const addExercise = (ex: Exercise) => {
-    const prev = lastSets(ex.id);
-    const defaultReps = ex.measure === "reps" ? 10 : ex.measure === "seconds" ? 30 : 40;
-    const sets = prev
-      ? prev.map((p) => blankSet({ targetReps: p.reps ?? p.targetReps, targetWeight: p.weight ?? p.targetWeight }))
-      : Array.from({ length: 3 }, () => blankSet({ targetReps: defaultReps }));
+    const sets = setsForAddedExercise(lastSets(ex.id), ex.measure, isWeighted(ex));
     const item = { exerciseId: ex.id, measure: ex.measure, sets };
     if (adding?.mode === "pair") commit(mapBlock(session, adding.blockId, (b) => ({ ...b, exercises: [...b.exercises, item] })));
     else commit({ ...session, blocks: [...session.blocks, { id: newId(), kind: "accessory", exercises: [item] }] });
@@ -632,13 +633,9 @@ export function TrainScreen() {
       mapExercise(session, ref, (x) => {
         if (x.sets.length >= MAX_SETS) return x;
         const last = x.sets[x.sets.length - 1];
-        return {
-          ...x,
-          sets: [
-            ...x.sets,
-            blankSet({ targetReps: last?.reps ?? last?.targetReps ?? null, targetWeight: last?.weight ?? last?.targetWeight ?? null }),
-          ],
-        };
+        // An unweighted exercise's new set has no load, even next to an old set that has one.
+        const targetWeight = exWeighted(x.exerciseId) ? (last?.weight ?? last?.targetWeight ?? null) : null;
+        return { ...x, sets: [...x.sets, blankSet({ targetReps: last?.reps ?? last?.targetReps ?? null, targetWeight })] };
       }),
     );
 
@@ -1169,10 +1166,11 @@ export function TrainScreen() {
                               </div>
                             </div>
                           );
+                        const weighted = exWeighted(e.exerciseId);
                         const hint =
-                          isPreview || session.deload || session.completedAt || e.measure !== "reps"
+                          isPreview || session.deload || session.completedAt
                             ? null
-                            : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb);
+                            : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, { weighted });
                         const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
                         return (
                           <div key={exIdx} className={clsx(exIdx > 0 && "mt-5")}>
@@ -1205,7 +1203,7 @@ export function TrainScreen() {
                                   <>
                                     <span title={hint.reason}>
                                       Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb
-                                      <span className="max-[359px]:hidden"> · all reps</span> → try{" "}
+                                      <span className="max-[359px]:hidden"> · {targetsMetPhrase(hint.measure)}</span> → try{" "}
                                       <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
                                     </span>
                                     <button
@@ -1238,7 +1236,7 @@ export function TrainScreen() {
                             {isPreview ? (
                               <ul className="mt-1 flex flex-wrap gap-2" aria-label={`${name} sets`}>
                                 {e.sets.map((s, si) => (
-                                  <PlannedChip key={s.id} index={si} set={s} measure={e.measure} />
+                                  <PlannedChip key={s.id} index={si} set={s} measure={e.measure} weighted={weighted} />
                                 ))}
                               </ul>
                             ) : (
@@ -1254,6 +1252,7 @@ export function TrainScreen() {
                                       index={si}
                                       set={s}
                                       measure={e.measure}
+                                      weighted={weighted}
                                       describedBy={hintId}
                                       onTap={() => toggleDone(setRef)}
                                       onHold={() => setEditing(setRef)}
@@ -1387,6 +1386,7 @@ export function TrainScreen() {
         title={editingFound ? `${exName(editingFound.ex.exerciseId)} · set ${editingFound.index + 1}` : ""}
         set={editingFound?.set ?? null}
         measure={editingFound?.ex.measure ?? "reps"}
+        weighted={!!editingFound && (editingFound.block.kind === "primary" || exWeighted(editingFound.ex.exerciseId))}
         showPlates={
           !!editingFound &&
           editingFound.ex.measure === "reps" &&
@@ -1562,13 +1562,14 @@ export function TrainScreen() {
                 {actionsEx.sets.map((s, si) => {
                   const ref = { ...actions, setId: s.id };
                   const unit = measureUnit(actionsEx.measure);
+                  const weighted = exWeighted(actionsEx.exerciseId);
                   const reps = s.done ? s.reps : s.targetReps;
                   const weight = s.done ? s.weight : s.targetWeight;
                   return (
                     <li key={s.id} className="flex items-center gap-2">
                       <button
                         type="button"
-                        aria-label={`Edit set ${si + 1}: ${describeSet(s, actionsEx.measure)}${s.done ? ", logged" : ""}`}
+                        aria-label={`Edit set ${si + 1}: ${describeSet(s, actionsEx.measure, weighted)}${s.done ? ", logged" : ""}`}
                         className="tap flex min-h-11 flex-1 items-center justify-between rounded-2xl bg-white/[0.04] px-4 py-3 text-left"
                         onClick={() => {
                           setActions(null);
@@ -1582,7 +1583,7 @@ export function TrainScreen() {
                         <span className="num text-sm text-fg-2">
                           {reps ?? "—"}
                           {unit || " reps"}
-                          {weight ? ` · ${weight} lb` : ""}
+                          {weight ? ` · ${weight} lb` : weighted ? " · — lb" : ""}
                         </span>
                       </button>
                       <button

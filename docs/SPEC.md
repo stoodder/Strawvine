@@ -192,11 +192,22 @@ optional note.
 ### 6.5 Accessories & supersets
 
 - Exercises and their sets can be grouped into **supersets** (covers core couplets and any pairing).
-- Sets measure reps, seconds or distance.
+- Sets measure reps, seconds or distance. Independently, an exercise is **weighted** (tracks a load in lb) or not, so
+  every combination exists: reps + load (rows, curls), time + load (weighted dead hang, weighted plank), distance + load
+  (farmer's / sandbag carry), and unloaded reps, time or distance (pull-ups, a plank, a run). The flag is chosen when the
+  exercise is created ("Weighted", on by default for every measure) and can be changed in the exercise library; an
+  exercise created without saying (older clients, imports of backups from before the flag) is weighted. Seeds: the main
+  lifts and the carries are weighted, pull-ups are not.
+  - A weighted exercise shows its load on every set (a "—" while none is set) and offers a load in the set editor. An
+    unweighted one shows no load and no load control — except on a set that already has a load (e.g. logged before the
+    exercise was made unweighted), which keeps showing it and stays editable.
+  - Whether an exercise is weighted is read from the exercise, not stored in sessions, so changing it applies at once,
+    including to the session in progress. An unweighted exercise's pre-filled and added sets carry no load.
+  - Volume counts weight × reps of rep-measured sets only; time and distance never count (a set without a load adds 0).
 - Sessions pre-fill from the last session of the same day type (exercises, sets, target reps, last weights). Reps
   carry over as **targets** — a missed rep never becomes next week's target (sets added without a target carry what was
-  done). On deload weeks accessory loads pre-fill at 80%; deload loads never carry into a normal week (a normal week
-  pre-fills from the last normal performance, or scales a deload-only one back up).
+  done). On deload weeks accessory loads pre-fill at 80% — for weighted holds and carries too; deload loads never carry
+  into a normal week (a normal week pre-fills from the last normal performance, or scales a deload-only one back up).
 - **Skip today:** an accessory can be marked skipped for one session. It stays in the session (and in next week's
   pre-fill, un-skipped, with the numbers from the last time it was actually done), but its sets don't count toward
   volume, PRs or hints.
@@ -217,9 +228,11 @@ optional note.
   stored with the session as its plan signature), with a one-tap recalculation. The athlete's own edits to targets never
   read as a plan change. (Sessions saved before signatures existed compare their sets with a fresh plan instead; added
   back-off sets are ignored.)
-- **Progression hint:** when every logged set of an accessory's last (non-skipped, non-deload) performance met that
-  session's target reps with a load, the next session suggests that load + **5 lb** (editable; 0 turns hints off).
-  When a set fell short of its target, the hint says **hold** at the same load ("Missed reps at 50 lb on Nov 2 — hold").
+- **Progression hint:** when every logged set of a weighted accessory's last (non-skipped, non-deload) performance met
+  that session's target — reps, seconds or meters — with a load, the next session suggests that load + **5 lb**
+  (editable; 0 turns hints off): "All reps / Full time / Full distance at 50 lb on Nov 2 → +5 lb". When a set fell short
+  of its target, the hint says **hold** at the same load ("Missed reps at 50 lb on Nov 2 — hold", "Short on time …",
+  "Short on distance …"). Unweighted exercises get no hint.
 - Rest timer (targets editable: **180 s** after main-lift sets, **90 s** after accessories); plate calculator.
 
 ## 7. Gamification & feedback

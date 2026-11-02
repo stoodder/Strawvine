@@ -71,6 +71,8 @@ export type Op =
       category: ExerciseCategory;
       measure: Measure;
       tracksMax: boolean;
+      /** Absent on creates queued by builds from before the flag: weighted, as the server stores it. */
+      weighted?: boolean;
       /** Sent as `Idempotency-Key`; assigned by `addOp` when missing. */
       idemKey?: string;
     }
@@ -785,7 +787,7 @@ export function applyOp(b: Bootstrap, op: Op): Bootstrap {
     case "createExercise": {
       if (b.exercises.some((e) => e.id === op.tempId)) return b;
       const { tempId, kind: _k, idemKey: _i, ...rest } = op;
-      return { ...b, exercises: [...b.exercises, { id: tempId, archived: false, ...rest }] };
+      return { ...b, exercises: [...b.exercises, { id: tempId, archived: false, ...rest, weighted: op.weighted ?? true }] };
     }
     case "updateExercise":
       return { ...b, exercises: b.exercises.map((e) => (e.id === op.id ? { ...e, ...op.patch } : e)) };
@@ -1022,7 +1024,15 @@ export function request(op: Op): OpRequest {
       return {
         method: "POST",
         path: "/exercises",
-        body: { name: op.name, category: op.category, measure: op.measure, tracksMax: op.tracksMax },
+        // `weighted` only when the op has it: a create queued before the flag existed is sent (and
+        // hashed for its Idempotency-Key) exactly as it was.
+        body: {
+          name: op.name,
+          category: op.category,
+          measure: op.measure,
+          tracksMax: op.tracksMax,
+          ...(op.weighted === undefined ? {} : { weighted: op.weighted }),
+        },
         headers: idemHeaders(op),
       };
     case "updateExercise":

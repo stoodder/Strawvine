@@ -5,6 +5,7 @@ import { ChevronLeft, Download, LogOut, Plus, RefreshCw, Trash2, UserX } from "l
 import { isISODate, startOfWeek, WEEKDAY_SHORT } from "../../shared/dates";
 import { displayPrefs, trainingPrefs } from "../../shared/defaults";
 import { repMaxPct } from "../../shared/program";
+import { isWeighted } from "../../shared/session";
 import { settingsSchema, type Program, type ProgramWeek, type Settings } from "../../shared/schemas";
 import { InlineText } from "../components/InlineText";
 import { useToast } from "../components/Toast";
@@ -420,7 +421,7 @@ export function SettingsScreen() {
           />
           <NumSetting
             label="Accessory increment"
-            hint="Suggested jump after hitting every rep. 0 turns hints off."
+            hint="Suggested jump on a weighted accessory after hitting every target. 0 turns hints off."
             value={training.accessoryIncrementLb}
             decimals={1}
             unit="lb"
@@ -841,7 +842,8 @@ function LiftsEditor() {
     >
       <div className="divide-y divide-white/[0.04]">
         {list.map((e) => (
-          <div key={e.id} className={clsx("flex items-center gap-3 py-2", e.archived && "opacity-50")}>
+          // The chips wrap under the name when they don't fit beside it (narrow screens, zoom).
+          <div key={e.id} className={clsx("flex flex-wrap items-center gap-x-3 gap-y-1 py-2", e.archived && "opacity-50")}>
             <InlineText
               ariaLabel={`Rename ${e.name}`}
               value={e.name}
@@ -849,34 +851,45 @@ function LiftsEditor() {
               required
               requiredMessage="A lift needs a name."
               onCommit={(name) => void updateExercise(e.id, { name })}
-              className="flex-1"
+              className="min-w-0 flex-[1_1_7rem]"
               inputClassName="text-sm"
             />
-            <button
-              type="button"
-              aria-pressed={e.tracksMax}
-              aria-label={`${e.name}: track max`}
-              onClick={() => void updateExercise(e.id, { tracksMax: !e.tracksMax })}
-              className={clsx("chip", e.tracksMax ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-mute")}
-            >
-              max
-            </button>
-            <button
-              type="button"
-              aria-label={`${e.name}: ${e.archived ? "restore" : "archive"}`}
-              onClick={() => {
-                const archived = !e.archived;
-                void updateExercise(e.id, { archived });
-                if (archived && !showArchived)
-                  toast.show({
-                    message: `${e.name} archived`,
-                    action: { label: "Undo", onAction: () => void updateExercise(e.id, { archived: false }) },
-                  });
-              }}
-              className="chip bg-white/[0.04] text-fg-2"
-            >
-              {e.archived ? "restore" : "archive"}
-            </button>
+            <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1">
+              <button
+                type="button"
+                aria-pressed={isWeighted(e)}
+                aria-label={`${e.name}: track load`}
+                onClick={() => void updateExercise(e.id, { weighted: !isWeighted(e) })}
+                className={clsx("chip", isWeighted(e) ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-fg-2")}
+              >
+                load
+              </button>
+              <button
+                type="button"
+                aria-pressed={e.tracksMax}
+                aria-label={`${e.name}: track max`}
+                onClick={() => void updateExercise(e.id, { tracksMax: !e.tracksMax })}
+                className={clsx("chip", e.tracksMax ? "bg-accent/15 text-accent" : "bg-white/[0.04] text-fg-2")}
+              >
+                max
+              </button>
+              <button
+                type="button"
+                aria-label={`${e.name}: ${e.archived ? "restore" : "archive"}`}
+                onClick={() => {
+                  const archived = !e.archived;
+                  void updateExercise(e.id, { archived });
+                  if (archived && !showArchived)
+                    toast.show({
+                      message: `${e.name} archived`,
+                      action: { label: "Undo", onAction: () => void updateExercise(e.id, { archived: false }) },
+                    });
+                }}
+                className="chip bg-white/[0.04] text-fg-2"
+              >
+                {e.archived ? "restore" : "archive"}
+              </button>
+            </div>
           </div>
         ))}
       </div>

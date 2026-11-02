@@ -11,20 +11,21 @@ export const SEED_EXERCISES: ReadonlyArray<{
   category: ExerciseCategory;
   tracksMax: boolean;
   measure: Measure;
+  weighted: boolean;
 }> = [
-  { key: "bench", name: "Bench press", category: "primary", tracksMax: true, measure: "reps" },
-  { key: "deadlift", name: "Deadlift", category: "primary", tracksMax: true, measure: "reps" },
-  { key: "backSquat", name: "Back squat", category: "primary", tracksMax: true, measure: "reps" },
-  { key: "frontSquat", name: "Front squat", category: "primary", tracksMax: true, measure: "reps" },
-  { key: "strictPress", name: "Strict press", category: "primary", tracksMax: true, measure: "reps" },
+  { key: "bench", name: "Bench press", category: "primary", tracksMax: true, measure: "reps", weighted: true },
+  { key: "deadlift", name: "Deadlift", category: "primary", tracksMax: true, measure: "reps", weighted: true },
+  { key: "backSquat", name: "Back squat", category: "primary", tracksMax: true, measure: "reps", weighted: true },
+  { key: "frontSquat", name: "Front squat", category: "primary", tracksMax: true, measure: "reps", weighted: true },
+  { key: "strictPress", name: "Strict press", category: "primary", tracksMax: true, measure: "reps", weighted: true },
 ];
 
 /** A few starting points for the carry / pull day so the library isn't empty. */
-export const SEED_ACCESSORIES: ReadonlyArray<{ name: string; category: ExerciseCategory; measure: Measure }> = [
-  { name: "Pull-up", category: "accessory", measure: "reps" },
-  { name: "Sandbag clean", category: "carry", measure: "reps" },
-  { name: "Sandbag carry", category: "carry", measure: "meters" },
-  { name: "Farmer's carry", category: "carry", measure: "meters" },
+export const SEED_ACCESSORIES: ReadonlyArray<{ name: string; category: ExerciseCategory; measure: Measure; weighted: boolean }> = [
+  { name: "Pull-up", category: "accessory", measure: "reps", weighted: false },
+  { name: "Sandbag clean", category: "carry", measure: "reps", weighted: true },
+  { name: "Sandbag carry", category: "carry", measure: "meters", weighted: true },
+  { name: "Farmer's carry", category: "carry", measure: "meters", weighted: true },
 ];
 
 export type SeedIds = Record<(typeof SEED_EXERCISES)[number]["key"], number>;

@@ -131,6 +131,49 @@ describe("api", () => {
     expect(b.seenAchievements).toEqual(["calib-1"]);
     expect(b.exercises.at(-1)).toMatchObject({ name: "Hollow hold", measure: "seconds" });
   });
+
+  it("seeds which exercises are weighted: everything but the pull-up", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const weighted = Object.fromEntries(b.exercises.filter((e) => e.id <= 9).map((e) => [e.name, e.weighted]));
+    expect(weighted).toEqual({
+      "Bench press": true,
+      Deadlift: true,
+      "Back squat": true,
+      "Front squat": true,
+      "Strict press": true,
+      "Pull-up": false,
+      "Sandbag clean": true,
+      "Sandbag carry": true,
+      "Farmer's carry": true,
+    });
+  });
+
+  it("creates weighted and unweighted exercises of any measure, and patches the flag", async () => {
+    const create = async (body: object) => {
+      const res = await req("/api/exercises", json("POST", body));
+      expect(res.status).toBe(201);
+      return res.json();
+    };
+    // Not saying (an older client) is weighted, whatever the measure.
+    expect(await create({ name: "Cable curl" })).toMatchObject({ measure: "reps", weighted: true });
+    expect(await create({ name: "Plank", category: "core", measure: "seconds" })).toMatchObject({ weighted: true });
+    const hang = await create({ name: "Weighted dead hang", measure: "seconds", weighted: true });
+    expect(hang).toMatchObject({ measure: "seconds", weighted: true });
+    const run = await create({ name: "Shuttle run", category: "conditioning", measure: "meters", weighted: false });
+    expect(run).toMatchObject({ measure: "meters", weighted: false });
+    expect((await req("/api/exercises", json("POST", { name: "Dip", weighted: "yes" }))).status).toBe(400);
+
+    const patched = await req(`/api/exercises/${run.id}`, json("PATCH", { weighted: true }));
+    expect(await patched.json()).toMatchObject({ id: run.id, measure: "meters", weighted: true });
+    expect((await req(`/api/exercises/${hang.id}`, json("PATCH", { weighted: null }))).status).toBe(400);
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(b.exercises.find((e) => e.id === run.id)?.weighted).toBe(true);
+
+    // Rows written without the column (as before the migration) are weighted.
+    const [raw] = await db.execute<{ weighted: boolean }>(sql`insert into exercises (name) values ('Raw row') returning weighted`);
+    expect(raw?.weighted).toBe(true);
+    await db.execute(sql`delete from exercises where name = 'Raw row'`);
+  });
 });
 
 describe("settings preferences", () => {
@@ -713,6 +756,7 @@ describe("export & restore", () => {
     expect(exported).toMatchObject({ format: "strawvine-export", version: 2 });
     expect(exported.seenAchievements.map((s: { key: string }) => s.key)).toEqual(["calib-1", "etag-test", "streak-3"]);
     expect(exported.exercises[0].createdAt).toMatch(/Z$/);
+    expect(exported.exercises.find((e: { name: string }) => e.name === "Pull-up")).toMatchObject({ weighted: false });
     expect(exported.maxEntries.length).toBeGreaterThan(0);
     expect(exported.days.length).toBeGreaterThan(0);
 
@@ -752,13 +796,18 @@ describe("export & restore", () => {
       exportedAt: current.exportedAt,
       settings: current.settings,
       days: current.days,
-      exercises: current.exercises.map(({ createdAt: _c, ...e }) => e),
+      // Exported before exercises had a `weighted` flag, too.
+      exercises: current.exercises.map(({ createdAt: _c, weighted: _w, ...e }) => e),
       maxEntries: current.maxEntries,
       sessions: current.sessions,
     };
+    expect(current.exercises.some((e) => !e.weighted)).toBe(true);
     const summary = await restoreExport(db, legacy, { force: true });
     expect(summary).toMatchObject({ seenAchievements: 0, exercises: current.exercises.length });
-    expect((await buildExport(db)).seenAchievements).toEqual([]);
+    const after = await buildExport(db);
+    expect(after.seenAchievements).toEqual([]);
+    // An export from before the flag restores every exercise as weighted (a load was shown on all of them).
+    expect(after.exercises.map((e) => e.weighted)).toEqual(current.exercises.map(() => true));
   });
 
   it("bumps the session epoch and clears idempotency keys on every restore", async () => {

@@ -194,26 +194,31 @@ export function useDeleteMax() {
 
 /** Like useAddMax: the server's exercise if it arrives promptly, else the local one. Never rejects. */
 export function useCreateExercise() {
-  return useCallback(async (input: Pick<Exercise, "name" | "category" | "measure"> & { tracksMax?: boolean }): Promise<Exercise> => {
-    const local: Exercise = {
-      id: takeTempId(),
-      name: input.name,
-      category: input.category,
-      measure: input.measure,
-      tracksMax: input.tracksMax ?? false,
-      archived: false,
-    };
-    const seq = enqueue({
-      kind: "createExercise",
-      tempId: local.id,
-      name: local.name,
-      category: local.category,
-      measure: local.measure,
-      tracksMax: local.tracksMax,
-    });
-    const saved = (await waitForAck(seq, CREATE_WAIT_MS)) as Exercise | undefined;
-    return saved && typeof saved.id === "number" ? saved : local;
-  }, []);
+  return useCallback(
+    async (input: Pick<Exercise, "name" | "category" | "measure"> & { tracksMax?: boolean; weighted?: boolean }): Promise<Exercise> => {
+      const local: Exercise = {
+        id: takeTempId(),
+        name: input.name,
+        category: input.category,
+        measure: input.measure,
+        tracksMax: input.tracksMax ?? false,
+        weighted: input.weighted ?? true,
+        archived: false,
+      };
+      const seq = enqueue({
+        kind: "createExercise",
+        tempId: local.id,
+        name: local.name,
+        category: local.category,
+        measure: local.measure,
+        tracksMax: local.tracksMax,
+        weighted: local.weighted,
+      });
+      const saved = (await waitForAck(seq, CREATE_WAIT_MS)) as Exercise | undefined;
+      return saved && typeof saved.id === "number" ? saved : local;
+    },
+    [],
+  );
 }
 
 export function useUpdateExercise() {

@@ -50,7 +50,7 @@ const session = (sets: ReturnType<typeof set>[], notes = ""): Session => ({
 const data = (over: Partial<Bootstrap> = {}): Bootstrap => ({
   settings,
   days: [],
-  exercises: [{ id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", archived: false }],
+  exercises: [{ id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false }],
   maxEntries: [],
   sessions: [session([set("a"), set("b")])],
   seenAchievements: [],

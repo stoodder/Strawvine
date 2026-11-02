@@ -61,6 +61,7 @@ export const toExercise = (r: ExerciseRow): Exercise => ({
   category: r.category as Exercise["category"],
   tracksMax: r.tracksMax,
   measure: r.measure as Exercise["measure"],
+  weighted: r.weighted,
   archived: r.archived,
 });
 export const toMax = (r: MaxRow): MaxEntry => ({
@@ -227,6 +228,7 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
           category: e.category,
           tracksMax: e.tracksMax,
           measure: e.measure,
+          weighted: e.weighted,
           archived: e.archived,
           createdAt: e.createdAt ? new Date(e.createdAt) : now,
         })),

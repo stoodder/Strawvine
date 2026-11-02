@@ -81,9 +81,9 @@ export const ALLOW = {
     "src/web/components/ui.tsx": ["0.1"], // active:bg of round icon buttons
   },
   "mute-on-tint": {
-    // Unselected toggle chips on the page background (ink-950 + white/0.04 ≈ 4.8:1 — passes there,
-    // but would not on a sheet). Candidates for text-fg-2.
-    "src/web/screens/Settings.tsx": 2,
+    // Unselected weekday chips on the page background (ink-950 + white/0.04 ≈ 4.8:1 — passes there,
+    // but would not on a sheet). A candidate for text-fg-2.
+    "src/web/screens/Settings.tsx": 1,
   },
   "type-scale": {},
 };

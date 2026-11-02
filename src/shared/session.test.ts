@@ -8,22 +8,25 @@ import {
   blankSet,
   buildSession,
   buildSessionFrom,
+  defaultTarget,
+  isWeighted,
   nextSession,
   planChanged,
   planMatches,
   planSignature,
   sessionCounts,
   sessionVolume,
+  setsForAddedExercise,
 } from "./session";
 import { addDays } from "./dates";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 const settings = { ...defaultSettings(ids, "2026-11-01"), onboarded: true };
 const exercises: Exercise[] = [
-  { id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", archived: false },
-  { id: 2, name: "Deadlift", category: "primary", tracksMax: true, measure: "reps", archived: false },
-  { id: 10, name: "Dumbbell fly", category: "accessory", tracksMax: false, measure: "reps", archived: false },
-  { id: 11, name: "Hollow hold", category: "core", tracksMax: false, measure: "seconds", archived: false },
+  { id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false },
+  { id: 2, name: "Deadlift", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false },
+  { id: 10, name: "Dumbbell fly", category: "accessory", tracksMax: false, measure: "reps", weighted: true, archived: false },
+  { id: 11, name: "Hollow hold", category: "core", tracksMax: false, measure: "seconds", weighted: true, archived: false },
 ];
 const maxEntries: MaxEntry[] = [
   { id: 1, exerciseId: 1, date: "2026-11-01", valueLb: 315, source: "initial", note: null, createdAt: "2026-11-01T00:00:00Z" },
@@ -295,6 +298,7 @@ describe("accessoryHint", () => {
     ]);
     expect(accessoryHint(10, "2026-11-16", [last], 5)).toEqual({
       kind: "increase",
+      measure: "reps",
       lastWeight: 50,
       suggestedWeight: 55,
       reason: expect.stringContaining("+5 lb"),
@@ -309,6 +313,7 @@ describe("accessoryHint", () => {
     ]);
     expect(accessoryHint(10, "2026-11-16", [short], 5)).toEqual({
       kind: "hold",
+      measure: "reps",
       lastWeight: 50,
       suggestedWeight: 50,
       reason: "Missed reps at 50 lb on Nov 9 — hold",
@@ -331,6 +336,102 @@ describe("accessoryHint", () => {
     const unlogged = sess("2026-11-17", [[null, 12, 60, false]]);
     expect(accessoryHint(10, "2026-11-23", [good, short, skipped, unlogged], 5)).toMatchObject({ kind: "hold", lastWeight: 50 }); // Nov 9 fell short
     expect(accessoryHint(10, "2026-11-09", [good, short, skipped, unlogged], 5)?.suggestedWeight).toBe(45); // before Nov 9
+  });
+
+  it("has no hint for an unweighted exercise, even with old loads logged", () => {
+    const last = sess("2026-11-09", [[12, 12, 50, true]]);
+    expect(accessoryHint(10, "2026-11-16", [last], 5, { weighted: false })).toBeNull();
+    expect(accessoryHint(10, "2026-11-16", [last], 5, { weighted: true })?.kind).toBe("increase");
+  });
+
+  describe("weighted time and distance", () => {
+    const timed = (date: string, measure: "seconds" | "meters", sets: Array<[done: number, target: number, weight: number]>): Session => ({
+      ...buildSession(date, { settings, exercises: [], maxEntries: [], sessions: [] }),
+      blocks: [
+        {
+          id: `b-${date}`,
+          kind: "accessory",
+          exercises: [
+            {
+              exerciseId: 10,
+              measure,
+              sets: sets.map(([reps, targetReps, weight], i) =>
+                blankSet({ id: `${date}-${i}`, reps, targetReps, weight, targetWeight: weight, done: true }),
+              ),
+            },
+          ],
+        },
+      ],
+    });
+
+    it("suggests +increment when every hold lasted its target time at a load", () => {
+      const hang = timed("2026-11-09", "seconds", [
+        [30, 30, 25],
+        [35, 30, 25],
+      ]);
+      expect(accessoryHint(10, "2026-11-16", [hang], 5)).toEqual({
+        kind: "increase",
+        measure: "seconds",
+        lastWeight: 25,
+        suggestedWeight: 30,
+        reason: "Full time at 25 lb on Nov 9 → +5 lb",
+      });
+    });
+
+    it("holds when a hold or a carry fell short", () => {
+      const hang = timed("2026-11-09", "seconds", [[20, 30, 25]]);
+      expect(accessoryHint(10, "2026-11-16", [hang], 5)).toMatchObject({
+        kind: "hold",
+        suggestedWeight: 25,
+        reason: "Short on time at 25 lb on Nov 9 — hold",
+      });
+      const carry = timed("2026-11-09", "meters", [[30, 40, 70]]);
+      expect(accessoryHint(10, "2026-11-16", [carry], 5)?.reason).toBe("Short on distance at 70 lb on Nov 9 — hold");
+    });
+
+    it("uses the increment from settings for a carry that went the full distance", () => {
+      const carry = timed("2026-11-09", "meters", [[40, 40, 70]]);
+      expect(accessoryHint(10, "2026-11-16", [carry], 10)).toMatchObject({
+        kind: "increase",
+        measure: "meters",
+        suggestedWeight: 80,
+        reason: "Full distance at 70 lb on Nov 9 → +10 lb",
+      });
+    });
+  });
+});
+
+describe("isWeighted / setsForAddedExercise", () => {
+  it("counts an exercise without the flag (or an unknown one) as weighted", () => {
+    expect(isWeighted({ weighted: false })).toBe(false);
+    expect(isWeighted({ weighted: true })).toBe(true);
+    expect(isWeighted({} as Exercise)).toBe(true);
+    expect(isWeighted(undefined)).toBe(true);
+  });
+
+  it("starts a new exercise at three sets of the measure's default target", () => {
+    expect(defaultTarget("reps")).toBe(10);
+    expect(setsForAddedExercise(null, "seconds", true).map((s) => [s.targetReps, s.targetWeight])).toEqual([
+      [30, null],
+      [30, null],
+      [30, null],
+    ]);
+    expect(setsForAddedExercise([], "meters", false).map((s) => s.targetReps)).toEqual([40, 40, 40]);
+  });
+
+  it("pre-fills from the last performance: reps and load for a weighted one, no load for an unweighted one", () => {
+    const prev = [
+      blankSet({ targetReps: 30, targetWeight: 20, reps: 35, weight: 25, done: true }),
+      blankSet({ targetReps: 30, targetWeight: 25 }),
+    ];
+    expect(setsForAddedExercise(prev, "seconds", true).map((s) => [s.targetReps, s.targetWeight, s.done])).toEqual([
+      [35, 25, false],
+      [30, 25, false],
+    ]);
+    expect(setsForAddedExercise(prev, "seconds", false).map((s) => [s.targetReps, s.targetWeight])).toEqual([
+      [35, null],
+      [30, null],
+    ]);
   });
 });
 
@@ -369,6 +470,50 @@ describe("carrying numbers across weeks", () => {
     // …and so is a deload week used as the template itself.
     const fromDeload = buildSession("2026-12-07", { settings, exercises, maxEntries, sessions: [deload] });
     expect(fly(fromDeload).sets[0]!.targetWeight).toBe(50);
+  });
+
+  it("pre-fills and deloads the load of a weighted hold and carry like any other accessory", () => {
+    const loaded: Exercise[] = [
+      ...exercises,
+      { id: 20, name: "Weighted hang", category: "accessory", tracksMax: false, measure: "seconds", weighted: true, archived: false },
+      { id: 21, name: "Farmer's carry", category: "carry", tracksMax: false, measure: "meters", weighted: true, archived: false },
+    ];
+    const normal = session("2026-11-23", [
+      { exerciseId: 20, measure: "seconds", sets: [set(25, 30, 30)] },
+      { exerciseId: 21, measure: "meters", sets: [set(100, 40, 40)] },
+    ]);
+    const ex = (s: Session, id: number) => s.blocks.find((b) => b.kind === "accessory")!.exercises.find((e) => e.exerciseId === id)!;
+    const deload = buildSession("2026-11-30", { settings, exercises: loaded, maxEntries, sessions: [normal] });
+    expect(deload.deload).toBe(true);
+    expect([ex(deload, 20).sets[0]!.targetReps, ex(deload, 20).sets[0]!.targetWeight]).toEqual([30, 20]);
+    expect([ex(deload, 21).sets[0]!.targetReps, ex(deload, 21).sets[0]!.targetWeight]).toEqual([40, 80]);
+    const next = buildSession("2026-11-23", {
+      settings,
+      exercises: loaded,
+      maxEntries,
+      sessions: [session("2026-11-16", normal.blocks[0]!.exercises)],
+    });
+    expect(ex(next, 21).sets[0]!.targetWeight).toBe(100);
+  });
+
+  it("carries no load for an unweighted exercise (an old load stays in its own session)", () => {
+    const bodyweight: Exercise[] = exercises.map((e) => (e.id === 10 ? { ...e, weighted: false } : e));
+    const last = session("2026-11-09", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12, 12)] }]);
+    const next = buildSession("2026-11-16", { settings, exercises: bodyweight, maxEntries, sessions: [last] });
+    expect(fly(next).sets.map((s) => [s.targetReps, s.targetWeight])).toEqual([[12, null]]);
+    // Without the flag (an exercise saved before it existed) the load carries, as it always did.
+    const legacy = exercises.map((e) => (e.id === 10 ? (({ weighted: _w, ...rest }) => rest)(e) : e)) as Exercise[];
+    expect(fly(buildSession("2026-11-16", { settings, exercises: legacy, maxEntries, sessions: [last] })).sets[0]!.targetWeight).toBe(50);
+  });
+
+  it("counts only rep-measured sets toward volume, and an unloaded set as 0", () => {
+    const s = session("2026-11-16", [
+      { exerciseId: 10, measure: "reps", sets: [set(50, 10, 10)] },
+      { exerciseId: 20, measure: "seconds", sets: [set(25, 30, 30)] },
+      { exerciseId: 21, measure: "meters", sets: [set(100, 40, 40)] },
+      { exerciseId: 22, measure: "reps", sets: [blankSet({ targetReps: 8, reps: 8, done: true })] },
+    ]);
+    expect(sessionVolume(s)).toBe(500);
   });
 
   it("bases the progression hint on the last normal week, against that session's targets", () => {

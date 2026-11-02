@@ -12,7 +12,9 @@ import { buildSessionFrom, sessionDoneEarly } from "./session";
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 // The program's first cycle starts Monday 2026-11-02.
 const settings: Settings = { ...defaultSettings(ids, "2026-11-01"), onboarded: true };
-const exercises: Exercise[] = [{ id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", archived: false }];
+const exercises: Exercise[] = [
+  { id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false },
+];
 const today = "2026-12-31";
 
 const appData = (patch: Partial<AppData> = {}): AppData => ({ settings, days: [], exercises, maxEntries: [], sessions: [], ...patch });

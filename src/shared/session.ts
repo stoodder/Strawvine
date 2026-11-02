@@ -5,7 +5,7 @@
  */
 import { addDays, formatShortDate, weekdayOf, type ISODate } from "./dates";
 import { cyclePosition, currentMax, mainLiftSets, programDayFor, roundTo, scheduledProgramDay } from "./program";
-import type { Block, BlockExercise, Exercise, MaxEntry, Session, SetEntry, Settings } from "./schemas";
+import type { Block, BlockExercise, Exercise, Measure, MaxEntry, Session, SetEntry, Settings } from "./schemas";
 
 export function newId(): string {
   const c = globalThis.crypto;
@@ -25,6 +25,28 @@ export function blankSet(partial: Partial<SetEntry> = {}): SetEntry {
     appliedProgressionLb: null,
     ...partial,
   };
+}
+
+/**
+ * Whether an exercise tracks a load with its sets. An unknown exercise, or one saved before the
+ * flag existed, counts as weighted: a load was shown on everything then.
+ */
+export const isWeighted = (ex: Pick<Exercise, "weighted"> | null | undefined): boolean => ex?.weighted !== false;
+
+/** Target for a set of an exercise done for the first time: 10 reps, 30 seconds or 40 meters. */
+export function defaultTarget(measure: Measure): number {
+  return measure === "seconds" ? 30 : measure === "meters" ? 40 : 10;
+}
+
+/**
+ * Sets for an exercise added to a session by hand: the last time it was done (`previous`, its
+ * sets in order), as targets — reps (seconds, meters) and load — else three sets at the default
+ * target. An unweighted exercise gets no load, even when an old performance has one.
+ */
+export function setsForAddedExercise(previous: ReadonlyArray<SetEntry> | null, measure: Measure, weighted: boolean): SetEntry[] {
+  return previous?.length
+    ? previous.map((p) => blankSet({ targetReps: p.reps ?? p.targetReps, targetWeight: weighted ? (p.weight ?? p.targetWeight) : null }))
+    : Array.from({ length: 3 }, () => blankSet({ targetReps: defaultTarget(measure) }));
 }
 
 export interface BuildContext {
@@ -71,14 +93,15 @@ function scaleLoad(weightLb: number, factor: number, roundToLb: number): number 
 /**
  * The next session's prescription for an exercise. Reps carry over as *targets* — a missed rep
  * must not become next week's target — except for sets the athlete added without one, which
- * carry what was done. Loads carry what was actually lifted, scaled by `loadFactor`.
+ * carry what was done. Loads carry what was actually lifted, scaled by `loadFactor`, whatever the
+ * measure (a weighted hang or carry deloads too); an unweighted exercise carries no load.
  */
-function carryOverExercise(ex: BlockExercise, loadFactor: number, roundToLb: number): BlockExercise {
+function carryOverExercise(ex: BlockExercise, loadFactor: number, roundToLb: number, weighted: boolean): BlockExercise {
   return {
     exerciseId: ex.exerciseId,
     measure: ex.measure,
     sets: ex.sets.map((s) => {
-      const weight = s.weight ?? s.targetWeight;
+      const weight = weighted ? (s.weight ?? s.targetWeight) : null;
       const scaled = weight !== null && weight > 0 && loadFactor !== 1 ? scaleLoad(weight, loadFactor, roundToLb) : weight;
       return blankSet({ targetReps: s.targetReps ?? s.reps, targetWeight: scaled });
     }),
@@ -157,15 +180,18 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
     const factorFrom = (from: Session) => deloadFactor(pos?.week.deload ?? false) / deloadFactor(from.deload);
     for (const b of source.blocks) {
       if (b.kind !== "accessory") continue;
-      const exercises = b.exercises
-        .filter((e) => ctx.exercises.some((x) => x.id === e.exerciseId && !x.archived))
-        .map((e) => {
-          // Skipped last time: still on the plan, prefilled from the last time it was really done.
-          const done = e.skipped ? lastPerformance(e.exerciseId, date, ctx.sessions) : null;
-          return done
-            ? carryOverExercise(done.exercise, factorFrom(done.session), program.roundToLb)
-            : carryOverExercise(e, factorFrom(source), program.roundToLb);
-        });
+      const exercises = b.exercises.flatMap((e) => {
+        const ex = ctx.exercises.find((x) => x.id === e.exerciseId && !x.archived);
+        if (!ex) return [];
+        const weighted = isWeighted(ex);
+        // Skipped last time: still on the plan, prefilled from the last time it was really done.
+        const done = e.skipped ? lastPerformance(e.exerciseId, date, ctx.sessions) : null;
+        return [
+          done
+            ? carryOverExercise(done.exercise, factorFrom(done.session), program.roundToLb, weighted)
+            : carryOverExercise(e, factorFrom(source), program.roundToLb, weighted),
+        ];
+      });
       if (exercises.length) blocks.push({ id: newId(), kind: "accessory", exercises });
     }
   }
@@ -337,6 +363,8 @@ export interface AccessoryHint {
    * short of its target → stay at the same load.
    */
   kind: "increase" | "hold";
+  /** What the targets counted (from the performance the hint is based on). */
+  measure: Measure;
   /** Heaviest load logged last time. */
   lastWeight: number;
   /** `lastWeight + incrementLb` for "increase", `lastWeight` for "hold". */
@@ -345,29 +373,42 @@ export interface AccessoryHint {
   reason: string;
 }
 
+/** "all reps" / "full time" / "full distance": every set met its target, in the measure's words. */
+export function targetsMetPhrase(measure: Measure): string {
+  return measure === "seconds" ? "full time" : measure === "meters" ? "full distance" : "all reps";
+}
+
+/** "Missed reps" / "Short on time" / "Short on distance": a set fell short of its target. */
+function targetMissedPhrase(measure: Measure): string {
+  return measure === "seconds" ? "Short on time" : measure === "meters" ? "Short on distance" : "Missed reps";
+}
+
 /**
- * Progression hint for an accessory, from its most recent (non-skipped, started, non-deload)
- * performance before `beforeDate`. When every logged set met that session's target reps with a
- * load: "increase" to the heaviest of those loads + `incrementLb`. When a set fell short: "hold"
- * at that load. Deload weeks are ignored: their light loads say nothing about progress. Null when
- * a logged set has no target or no load, when nothing was logged, or when the increment is 0
- * (hints off).
+ * Progression hint for a weighted accessory, from its most recent (non-skipped, started,
+ * non-deload) performance before `beforeDate`. When every logged set met that session's target —
+ * reps, seconds or meters — with a load: "increase" to the heaviest of those loads +
+ * `incrementLb`. When a set fell short: "hold" at that load. Deload weeks are ignored: their light
+ * loads say nothing about progress. Null for an unweighted exercise (`weighted: false`), when a
+ * logged set has no target or no load, when nothing was logged, or when the increment is 0 (hints
+ * off).
  */
 export function accessoryHint(
   exerciseId: number,
   beforeDate: ISODate,
   sessions: ReadonlyArray<Session>,
   incrementLb: number,
+  { weighted = true }: { weighted?: boolean } = {},
 ): AccessoryHint | null {
-  if (!(incrementLb > 0)) return null;
+  if (!(incrementLb > 0) || !weighted) return null;
   const prior = sessions.filter((s) => s.date < beforeDate && !s.deload).sort(byDateDesc);
   for (const s of prior) {
-    const logged = s.blocks
+    const performed = s.blocks
       .filter((b) => b.kind === "accessory")
       .flatMap((b) => b.exercises)
-      .filter((e) => e.exerciseId === exerciseId && !e.skipped)
-      .flatMap((e) => e.sets.filter((x) => x.done));
+      .filter((e) => e.exerciseId === exerciseId && !e.skipped);
+    const logged = performed.flatMap((e) => e.sets.filter((x) => x.done));
     if (!logged.length) continue;
+    const measure = performed.find((e) => e.sets.some((x) => x.done))!.measure;
     let lastWeight = 0;
     let missed = false;
     for (const x of logged) {
@@ -378,14 +419,32 @@ export function accessoryHint(
       lastWeight = Math.max(lastWeight, weight);
     }
     const on = formatShortDate(s.date);
-    if (missed) return { kind: "hold", lastWeight, suggestedWeight: lastWeight, reason: `Missed reps at ${lastWeight} lb on ${on} — hold` };
+    if (missed)
+      return {
+        kind: "hold",
+        measure,
+        lastWeight,
+        suggestedWeight: lastWeight,
+        reason: `${targetMissedPhrase(measure)} at ${lastWeight} lb on ${on} — hold`,
+      };
     const suggestedWeight = Math.round((lastWeight + incrementLb) * 100) / 100;
-    return { kind: "increase", lastWeight, suggestedWeight, reason: `All reps at ${lastWeight} lb on ${on} → +${incrementLb} lb` };
+    const met = targetsMetPhrase(measure);
+    return {
+      kind: "increase",
+      measure,
+      lastWeight,
+      suggestedWeight,
+      reason: `${met[0]!.toUpperCase()}${met.slice(1)} at ${lastWeight} lb on ${on} → +${incrementLb} lb`,
+    };
   }
   return null;
 }
 
-/** Total load moved (weight × reps) across completed sets of rep-measured, not-skipped exercises (and main lift). */
+/**
+ * Total load moved (weight × reps) across completed sets of rep-measured, not-skipped exercises
+ * (and main lift). Time and distance never count, loaded or not (seconds × lb isn't volume); a set
+ * without a load (an unweighted exercise) adds 0.
+ */
 export function sessionVolume(session: Session): number {
   let total = 0;
   for (const b of session.blocks)

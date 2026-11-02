@@ -16,12 +16,12 @@ const start = "2016-11-07";
 const today = "2026-11-01";
 const settings = { ...defaultSettings(ids, start), onboarded: true };
 const exercises: Exercise[] = [
-  { id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", archived: false },
-  { id: 2, name: "Deadlift", category: "primary", tracksMax: true, measure: "reps", archived: false },
-  { id: 3, name: "Back squat", category: "primary", tracksMax: true, measure: "reps", archived: false },
-  { id: 5, name: "Strict press", category: "primary", tracksMax: true, measure: "reps", archived: false },
-  { id: 10, name: "Dumbbell fly", category: "accessory", tracksMax: false, measure: "reps", archived: false },
-  { id: 11, name: "Row", category: "accessory", tracksMax: false, measure: "reps", archived: false },
+  { id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false },
+  { id: 2, name: "Deadlift", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false },
+  { id: 3, name: "Back squat", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false },
+  { id: 5, name: "Strict press", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false },
+  { id: 10, name: "Dumbbell fly", category: "accessory", tracksMax: false, measure: "reps", weighted: true, archived: false },
+  { id: 11, name: "Row", category: "accessory", tracksMax: false, measure: "reps", weighted: true, archived: false },
 ];
 
 function fixture(): AppData {

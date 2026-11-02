@@ -32,6 +32,8 @@ export const exercises = pgTable("exercises", {
   category: varchar("category", { length: 20 }).notNull().default("accessory"),
   tracksMax: boolean("tracks_max").notNull().default(false),
   measure: varchar("measure", { length: 10 }).notNull().default("reps"),
+  /** Tracks a load with each set (any measure). Rows from before it existed are weighted. */
+  weighted: boolean("weighted").notNull().default(true),
   archived: boolean("archived").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   /** Bumped on every edit; part of the bootstrap's version stamp (ETag). */

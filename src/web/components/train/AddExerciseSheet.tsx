@@ -2,7 +2,8 @@ import clsx from "clsx";
 import { useMemo, useState } from "react";
 import { Check, Plus, Search } from "lucide-react";
 import type { Exercise, ExerciseCategory, Measure } from "../../../shared/schemas";
-import { Sheet } from "../ui";
+import { isWeighted } from "../../../shared/session";
+import { Field, Sheet, Toggle } from "../ui";
 
 /** One name per category, used for both the create chips and the list tags. */
 const CATEGORIES: Array<[ExerciseCategory, string]> = [
@@ -18,9 +19,15 @@ const MEASURES: Array<[Measure, string]> = [
   ["seconds", "Time"],
   ["meters", "Distance"],
 ];
-/** List tag: category, plus the unit when it isn't reps ("carry · m"). */
-const tag = (e: Exercise) =>
-  `${CATEGORY_LABEL[e.category] ?? e.category}${e.measure === "seconds" ? " · s" : e.measure === "meters" ? " · m" : ""}`;
+/** List tag: category, plus what is logged besides reps — time, distance, load ("Carry · m · lb", "Core · s"). */
+const exerciseTag = (e: Exercise) =>
+  [
+    CATEGORY_LABEL[e.category] ?? e.category,
+    e.measure === "seconds" ? "s" : e.measure === "meters" ? "m" : null,
+    isWeighted(e) ? "lb" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
 function ChoiceChip({ on, onClick, children }: { on: boolean; onClick: () => void; children: string }) {
   return (
@@ -51,11 +58,14 @@ export function AddExerciseSheet({
   exercises: ReadonlyArray<Exercise>;
   recentIds: number[];
   onPick: (ex: Exercise) => void;
-  onCreate: (input: { name: string; category: ExerciseCategory; measure: Measure }) => Promise<void>;
+  onCreate: (input: { name: string; category: ExerciseCategory; measure: Measure; weighted: boolean }) => Promise<void>;
 }) {
   const [q, setQ] = useState("");
   const [category, setCategory] = useState<ExerciseCategory>("accessory");
   const [measure, setMeasure] = useState<Measure>("reps");
+  // On by default, whatever the measure: most accessory work is loaded, and the switch sits right
+  // under the measure for a plank or a run.
+  const [weighted, setWeighted] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const list = useMemo(() => {
@@ -115,14 +125,17 @@ export function AddExerciseSheet({
               </ChoiceChip>
             ))}
           </div>
+          <Field label="Weighted" hint="Log a load (lb) with each set">
+            <Toggle label="Weighted" on={weighted} onChange={setWeighted} />
+          </Field>
           <button
             type="button"
             disabled={busy}
-            className="btn-primary mt-4 w-full"
+            className="btn-primary mt-1 w-full"
             onClick={async () => {
               setBusy(true);
               try {
-                await onCreate({ name: q.trim(), category, measure });
+                await onCreate({ name: q.trim(), category, measure, weighted });
                 setQ("");
               } finally {
                 setBusy(false);
@@ -146,7 +159,7 @@ export function AddExerciseSheet({
               }}
             >
               <span className="text-[0.9375rem]">{e.name}</span>
-              <span className="label shrink-0 pl-3">{tag(e)}</span>
+              <span className="label shrink-0 pl-3">{exerciseTag(e)}</span>
             </button>
           </li>
         ))}
