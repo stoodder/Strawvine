@@ -153,25 +153,56 @@ export function CheckDot({
   );
 }
 
+/**
+ * The over-target colour for a 0…1 severity (`overTargetSeverity`): lime at 0, caution yellow at
+ * 0.5, warn red at 1, mixed in OKLCH in between so the hue walks lime → yellow → coral without a
+ * muddy midpoint. Never gold: that stays for PRs and goals. A CSS colour, usable as a fill or as
+ * text (every step is ≥ 8:1 on ink-950).
+ */
+export function severityColor(severity: number): string {
+  const s = Math.max(0, Math.min(1, severity || 0));
+  if (s === 0) return "var(--color-accent)";
+  if (s === 1) return "var(--color-warn)";
+  if (s === 0.5) return "var(--color-caution)";
+  const pct = (f: number) => `${Math.round(f * 1000) / 10}%`;
+  return s <= 0.5
+    ? `color-mix(in oklch, var(--color-accent), var(--color-caution) ${pct(s * 2)})`
+    : `color-mix(in oklch, var(--color-caution), var(--color-warn) ${pct((s - 0.5) * 2)})`;
+}
+
 export function Bar({
   value,
   tone = "accent",
+  severity,
   className,
 }: {
   value: number;
   tone?: "accent" | "gold" | "mute" | "warn";
+  /**
+   * How far over its target the bar is (0…1, from `overTargetSeverity`). When given it decides the
+   * colour (`severityColor`) instead of `tone`: lime at 0, through caution yellow to warn red.
+   */
+  severity?: number;
   className?: string;
 }) {
   const v = Math.max(0, Math.min(1, value || 0));
-  const color = tone === "gold" ? "bg-gold" : tone === "mute" ? "bg-fg-2/50" : tone === "warn" ? "bg-warn" : "bg-accent";
+  const sev = severity === undefined ? null : Math.max(0, Math.min(1, severity || 0));
+  const accent = sev === null ? tone === "accent" : sev === 0;
+  const color =
+    sev !== null ? null : tone === "gold" ? "bg-gold" : tone === "mute" ? "bg-fg-2/50" : tone === "warn" ? "bg-warn" : "bg-accent";
   return (
     <div className={clsx("h-[3px] overflow-hidden rounded-full bg-[var(--track)]", className)}>
       <motion.div
-        className={clsx("h-full rounded-full", color)}
+        className={clsx("h-full rounded-full transition-colors duration-500 motion-reduce:transition-none", color)}
+        data-severity={sev !== null ? Math.round(sev * 100) / 100 : undefined}
         initial={false}
         animate={{ width: `${v * 100}%` }}
         transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
-        style={{ boxShadow: v > 0 && tone === "accent" ? "0 0 12px rgb(183 243 106 / 0.45)" : undefined }}
+        style={{
+          backgroundColor: sev !== null ? severityColor(sev) : undefined,
+          // The lime glow belongs to lime only: an over-target bar is flat.
+          boxShadow: v > 0 && accent ? "0 0 12px rgb(183 243 106 / 0.45)" : undefined,
+        }}
       />
     </div>
   );

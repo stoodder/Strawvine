@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { addDays, formatShortDate } from "../../shared/dates";
+import { computeStepsSeries } from "../../shared/steps";
 import { LineChart, weeklyMeans, type Series } from "./charts";
 
 /** Ten years of daily points: a weigh-in on most days, a smooth trend line on every day. */
@@ -89,6 +90,41 @@ describe("LineChart", () => {
     const { container } = render(<LineChart series={series} title="Bodyweight" />);
     const dots = [...container.querySelectorAll("svg path")].find((p) => p.getAttribute("stroke") === "gray")!;
     expect(dots.getAttribute("d")!.match(/M/g)!.length).toBe(series[0]!.points.filter((p) => p.y !== null).length);
+  });
+});
+
+describe("LineChart: steps with their trend and a target", () => {
+  const today = "2026-10-21";
+  const days = Array.from({ length: 21 }, (_, i) => ({
+    date: addDays("2026-10-01", i),
+    steps: i === 4 ? null : 8000 + ((i * 1733) % 7000),
+  }));
+  const s = computeStepsSeries(days, "2026-10-01", today, today);
+  const series: Series[] = [
+    { key: "steps", label: "Steps", kind: "dots", color: "gray", points: s.map((d) => ({ x: d.date, y: d.steps })) },
+    { key: "avg", label: "Trend", kind: "line", color: "lime", points: s.map((d) => ({ x: d.date, y: d.avgSteps })) },
+  ];
+
+  it("draws the daily dots, the trend line and a neutral (not gold) target line", () => {
+    const { container } = render(
+      <LineChart series={series} title="Steps" refLine={{ y: 15000, label: "target 15,000", tone: "target" }} />,
+    );
+    const paths = [...container.querySelectorAll("svg path")];
+    const dots = paths.filter((p) => p.getAttribute("stroke") === "gray");
+    expect(dots[0]!.getAttribute("d")!.match(/M/g)).toHaveLength(20); // 21 days, one missed
+    const line = paths.filter((p) => p.getAttribute("stroke") === "lime").at(-1)!;
+    expect(line.getAttribute("d")!.match(/[ML]/g)).toHaveLength(20); // ends yesterday: today is in progress
+    const ref = container.querySelector("svg line[stroke-dasharray]")!;
+    expect(ref.getAttribute("stroke")).toBe("var(--color-mute)");
+    const label = screen.getByText("target 15,000");
+    expect(label.className).toContain("text-mute");
+    expect(label.className).not.toContain("text-gold");
+    expect(screen.getByRole("img").getAttribute("aria-label")).toMatch(/^Steps, .*Steps \d+ to \d+\. Trend \d+ to \d+\. target 15,000\./);
+  });
+
+  it("keeps the goal line gold by default", () => {
+    const { container } = render(<LineChart series={series} title="Steps" refLine={{ y: 12000, label: "goal" }} />);
+    expect(container.querySelector("svg line[stroke-dasharray]")!.getAttribute("stroke")).toBe("var(--color-gold)");
   });
 });
 

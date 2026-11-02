@@ -6,11 +6,12 @@ import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { CALIBRATION_DAYS } from "../../shared/energy";
 import { dayChecklist, isClosed } from "../../shared/gamify";
 import { targetsFor } from "../../shared/insights";
+import { overTargetSeverity, PROTEIN_OVER_TARGET_SCALE, type OverTargetScale } from "../../shared/nutrition";
 import { cyclePosition, programDayFor } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
-import { Bar, Section, Stat } from "../components/ui";
+import { Bar, Section, severityColor, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { JournalText } from "../components/TextArea";
 import { DayChecklist } from "../components/today/Checklist";
@@ -81,7 +82,8 @@ export function TodayScreen() {
     day.weightLb !== null && day.calories === null ? "calories" : day.calories !== null && day.weightLb === null ? "weight" : null;
   const trendDelta = energy?.avgWeight != null && prevEnergy?.avgWeight != null ? energy.avgWeight - prevEnergy.avgWeight : null;
   const overKcal = rec && day.calories !== null ? day.calories - rec.calories : 0;
-  const overEating = overKcal > (rec?.calories ?? 0) * 0.05;
+  // 0 within 5 % of the target, then lime → caution yellow → warn as the day runs further over (SPEC §3.1).
+  const kcalSeverity = overTargetSeverity(day.calories, rec?.calories);
 
   return (
     <div>
@@ -186,14 +188,14 @@ export function TodayScreen() {
                 <div className="label mt-1">{isToday ? "so far" : "eaten"}</div>
               </div>
             </div>
-            <Bar className="mt-4" value={day.calories ? day.calories / rec.calories : 0} tone={overEating ? "warn" : "accent"} />
-            {overEating && (
-              <div className="num mt-1.5 text-right text-xs text-warn">
+            <Bar className="mt-4" value={day.calories ? day.calories / rec.calories : 0} severity={kcalSeverity} />
+            {kcalSeverity > 0 && (
+              <div className="num mt-1.5 text-right text-xs" style={{ color: severityColor(kcalSeverity) }}>
                 +{fmt(overKcal)} <span className="text-mute">kcal over</span>
               </div>
             )}
             <div className="mt-5 grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
-              <Macro label="Protein" eaten={day.proteinG} target={rec.macros.proteinG} />
+              <Macro label="Protein" eaten={day.proteinG} target={rec.macros.proteinG} scale={PROTEIN_OVER_TARGET_SCALE} />
               <Macro label="Carbs" eaten={day.carbsG} target={rec.macros.carbsG} />
               <Macro label="Fat" eaten={day.fatG} target={rec.macros.fatG} />
             </div>
@@ -305,10 +307,22 @@ function trueMinus(text: string): string {
   return text.replace(/(^|[\s(])-(?=\d)/g, "$1\u2212");
 }
 
-function Macro({ label, eaten, target }: { label: string; eaten: number | null; target: number }) {
+export function Macro({
+  label,
+  eaten,
+  target,
+  scale,
+}: {
+  label: string;
+  eaten: number | null;
+  target: number;
+  /** How far over counts as over (protein is lenient); see `overTargetSeverity`. */
+  scale?: OverTargetScale;
+}) {
   // A zero target (e.g. carbs on an aggressive cut) has no meaningful bar.
   const hasTarget = target > 0;
-  const over = hasTarget && eaten !== null && eaten > target * 1.1 ? eaten - target : 0;
+  const severity = overTargetSeverity(eaten, target, scale);
+  const over = severity > 0 && eaten !== null ? eaten - target : 0;
   return (
     <div className="min-w-0">
       <div className="label mb-1.5">{label}</div>
@@ -316,8 +330,13 @@ function Macro({ label, eaten, target }: { label: string; eaten: number | null; 
         {eaten !== null ? fmt(eaten) : <span className="text-mute">—</span>}
         <span className="text-xs text-mute"> / {hasTarget ? `${fmt(target)}g` : "—"}</span>
       </div>
-      <Bar className="mt-2" value={hasTarget && eaten ? eaten / target : 0} tone={over ? "mute" : "accent"} />
-      {over > 0 && <div className="num mt-1 text-[0.6875rem] text-mute">+{fmt(over)}g over</div>}
+      <Bar className="mt-2" value={hasTarget && eaten ? eaten / target : 0} severity={severity} />
+      {/* Not colour alone: the text says "over". */}
+      {over > 0 && (
+        <div className="num mt-1 text-[0.6875rem]" style={{ color: severityColor(severity) }}>
+          +{fmt(over)}g over
+        </div>
+      )}
     </div>
   );
 }
