@@ -368,7 +368,8 @@
 }
 @utility btn-ghost {
   @apply btn bg-white/[0.04] text-fg-2 hover:bg-white/[0.07];
-  &:disabled {
+  /* aria-disabled: a locked control that stays focusable so its explanation is announced. */
+  &:is(:disabled, [aria-disabled="true"]) {
     color: var(--color-faint);
     cursor: default;
   }
