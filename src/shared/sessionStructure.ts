@@ -105,6 +105,39 @@ export function splitOut(session: Session, place: ExPlace, id: string = newId())
   return { ...session, blocks: session.blocks.flatMap((x) => (x === b ? [rest, own] : [x])) };
 }
 
+/**
+ * An id for a block derived from another (`<id>-2`, `-3`, … — the first not in `taken`, which it
+ * joins). Deterministic, so two devices deriving a block from the same one agree on its id.
+ */
+export function derivedBlockId(from: string, taken: Set<string>): string {
+  let n = 2;
+  while (taken.has(`${from.slice(0, 36)}-${n}`)) n++;
+  const id = `${from.slice(0, 36)}-${n}`;
+  taken.add(id);
+  return id;
+}
+
+/**
+ * The main-lift block holds the main lift alone (the screen shows only its first exercise). A
+ * main-lift block holding more (from an old build, a hand-made import, a merge) keeps its first
+ * exercise; the others, with all their sets, move into an accessory block right after it (with a
+ * derived id, see `derivedBlockId`) — nothing is dropped. The same session (same object) when
+ * there is nothing to do. The result can hold one block more than `MAX_BLOCKS` per such block.
+ */
+export function normalizeMainLift(session: Session): Session {
+  if (!session.blocks.some((b) => b.kind === "primary" && b.exercises.length > 1)) return session;
+  const taken = new Set(session.blocks.map((b) => b.id));
+  const blocks = session.blocks.flatMap((b): Block[] => {
+    if (b.kind !== "primary" || b.exercises.length < 2) return [b];
+    const [first, ...rest] = b.exercises;
+    return [
+      { ...b, exercises: [first!] },
+      { id: derivedBlockId(b.id, taken), kind: "accessory", exercises: rest },
+    ];
+  });
+  return { ...session, blocks };
+}
+
 /** An exercise of the workout that can join a block (`movableInto`). */
 export interface MoveCandidate extends ExPlace {
   exercise: BlockExercise;

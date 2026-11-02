@@ -15,6 +15,7 @@ import {
   type Op,
 } from "./outbox-core";
 import { fitSession, mergeFields, mergeSession, mergeSettings, mergeSettingsDetailed } from "./merge";
+import { MAX_BLOCKS, moveBlock, moveExerciseToBlock, splitOut } from "../../shared/sessionStructure";
 
 const settings = defaultSettings({ bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 }, "2026-11-01");
 
@@ -361,6 +362,16 @@ describe("mergeSession: exercises that move between blocks", () => {
       expect(shape(mergeSession(start, logOn(start, "c1"), moved))).toBe("Z[13:d1] X[10:a1,a2|11:b1,b2] Y[12:c1*]");
     });
 
+    it("blocks reordered on one device, a block added at the end on the other: the new block stays last", () => {
+      const moved = moveBlock(start, "Z", 0);
+      const added = sess([...start.blocks, block("W", ex(14, [set("w1")]))]);
+      expect(shape(mergeSession(start, added, moved))).toBe("Z[13:d1] X[10:a1,a2|11:b1,b2] Y[12:c1] W[14:w1]");
+      expect(shape(mergeSession(start, moved, added))).toBe("Z[13:d1] X[10:a1,a2|11:b1,b2] Y[12:c1] W[14:w1]");
+      // Added in the middle: it follows the block before it.
+      const mid = sess([start.blocks[0]!, block("W", ex(14, [set("w1")])), start.blocks[1]!, start.blocks[2]!]);
+      expect(shape(mergeSession(start, mid, moved))).toBe("Z[13:d1] X[10:a1,a2|11:b1,b2] W[14:w1] Y[12:c1]");
+    });
+
     it("reordered on both devices: this device's order wins; nothing is lost or doubled", () => {
       const other = sess([start.blocks[1]!, start.blocks[0]!, start.blocks[2]!]);
       const mine = sess([start.blocks[2]!, start.blocks[1]!, start.blocks[0]!]);
@@ -405,6 +416,68 @@ describe("mergeSession: exercises that move between blocks", () => {
     });
   });
 
+  describe("exercises with no sets (identified across the workout, not by their block)", () => {
+    const skip = (s: Session, exerciseId: number): Session => ({
+      ...s,
+      blocks: s.blocks.map((b) => ({
+        ...b,
+        exercises: b.exercises.map((e) => (e.exerciseId === exerciseId ? { ...e, skipped: true } : e)),
+      })),
+    });
+    const shapeS = (s: Session) =>
+      s.blocks
+        .map(
+          (b) =>
+            `${b.id}[${b.exercises.map((e) => `${e.exerciseId}${e.skipped ? "S" : ""}:${e.sets.map((x) => x.id + (x.done ? "*" : "")).join(",")}`).join("|")}]`,
+        )
+        .join(" ");
+    // X: a superset of 10 and a set-less 11; Y: 12.
+    const a = sess([block("X", ex(10, [set("a1")]), ex(11, [])), block("Y", ex(12, [set("c1")]))]);
+    const moved = moveExerciseToBlock(a, { blockId: "X", exIdx: 1 }, "Y");
+
+    it("moved into another block here, skipped there: one copy, moved and skipped", () => {
+      expect(shapeS(mergeSession(a, moved, skip(a, 11)))).toBe("X[10:a1] Y[12:c1|11S:]");
+      expect(shapeS(mergeSession(a, skip(a, 11), moved))).toBe("X[10:a1] Y[12:c1|11S:]");
+    });
+
+    it("an exercise with no sets in a concurrent log merge is kept exactly once", () => {
+      // The other device added a set to it and logged it.
+      const loggedThere = sess([block("X", ex(10, [set("a1")]), ex(11, [logged("n1")])), block("Y", ex(12, [set("c1")]))]);
+      expect(shapeS(mergeSession(a, moved, loggedThere))).toBe("X[10:a1] Y[12:c1|11:n1*]");
+      expect(shapeS(mergeSession(a, loggedThere, moved))).toBe("X[10:a1] Y[12:c1|11:n1*]");
+      // …and logged elsewhere while this device moved it.
+      expect(shapeS(mergeSession(a, moved, sess([block("X", ex(10, [logged("a1")]), ex(11, [])), block("Y", ex(12, [set("c1")]))])))).toBe(
+        "X[10:a1*] Y[12:c1|11:]",
+      );
+    });
+
+    it("moved into different supersets on the two devices: this device's place, once", () => {
+      const three = sess([block("X", ex(10, [set("a1")]), ex(11, [])), block("Y", ex(12, [set("c1")])), block("Z", ex(13, [set("d1")]))]);
+      const here = moveExerciseToBlock(three, { blockId: "X", exIdx: 1 }, "Y");
+      const there = moveExerciseToBlock(three, { blockId: "X", exIdx: 1 }, "Z");
+      expect(shapeS(mergeSession(three, here, there))).toBe("X[10:a1] Y[12:c1|11:] Z[13:d1]");
+    });
+
+    it("split out here, skipped there: one copy, in its own block, skipped", () => {
+      const split = splitOut(a, { blockId: "X", exIdx: 1 }, "N");
+      expect(shapeS(mergeSession(a, split, skip(a, 11)))).toBe("X[10:a1] N[11S:] Y[12:c1]");
+      expect(shapeS(mergeSession(a, skip(a, 11), split))).toBe("X[10:a1] N[11S:] Y[12:c1]");
+    });
+
+    it("the same exercise twice on purpose (both without sets) keeps both", () => {
+      const twice = sess([block("X", ex(10, [set("a1")]), ex(11, [])), block("Y", ex(12, [set("c1")]), ex(11, []))]);
+      const reordered = moveBlock(twice, "Y", 0);
+      for (const m of [mergeSession(twice, reordered, skip(twice, 10)), mergeSession(twice, skip(twice, 10), reordered)])
+        expect(shapeS(m)).toBe("Y[12:c1|11:] X[10S:a1|11:]");
+      // Added on both devices to different blocks: both kept.
+      const addX = sess([block("X", ex(10, [set("a1")]), ex(11, []), ex(14, [])), block("Y", ex(12, [set("c1")]))]);
+      const addY = sess([block("X", ex(10, [set("a1")]), ex(11, [])), block("Y", ex(12, [set("c1")]), ex(14, []))]);
+      expect(shapeS(mergeSession(a, addX, addY))).toBe("X[10:a1|11:|14:] Y[12:c1|14:]");
+      // A second one added here while the other device moved the first: both kept, once each.
+      expect(shapeS(mergeSession(a, sess([...a.blocks, block("W", ex(11, []))]), moved))).toBe("X[10:a1] Y[12:c1|11:] W[11:]");
+    });
+  });
+
   it("an exercise swapped for another lift (same sets) isn't duplicated", () => {
     const swapped = sess([block("X", ex(12, [set("a1"), set("a2")]), ex(11, [set("b1"), set("b2")]))]);
     const m = mergeSession(anc, swapped, loggedA);
@@ -429,7 +502,10 @@ describe("mergeSession: exercises that move between blocks", () => {
       for (let k = 0; k < 4; k++) {
         const b = blocks[rnd(blocks.length)]!;
         const e = b.exercises[rnd(b.exercises.length)]!;
-        switch (rnd(8)) {
+        switch (rnd(9)) {
+          case 8: // skip it (or not)
+            b.exercises[b.exercises.indexOf(e)] = { ...e, skipped: !e.skipped };
+            break;
           case 0: // log a set
             if (e.sets.length) e.sets[rnd(e.sets.length)] = { ...e.sets[0]!, id: e.sets[rnd(e.sets.length)]!.id, done: true, reps: 5 };
             break;
@@ -477,17 +553,26 @@ describe("mergeSession: exercises that move between blocks", () => {
       }
       return { ...s, blocks };
     };
+    // 15–17 have no sets (yet): identified by lift and occurrence, not by sets.
     const start = sess([
-      block("X", ex(10, [set("a1"), set("a2")]), ex(11, [set("b1"), set("b2")]), ex(12, [set("c1")])),
-      block("Y", ex(13, [set("d1"), set("d2")])),
+      block("X", ex(10, [set("a1"), set("a2")]), ex(11, [set("b1"), set("b2")]), ex(12, [set("c1")]), ex(15, [])),
+      block("Y", ex(13, [set("d1"), set("d2")]), ex(16, [])),
       block("Z", ex(14, [set("e1")])),
+      block("W", ex(17, [])),
     ]);
+    const count = (s: Session, exerciseId: number) =>
+      s.blocks.flatMap((b) => b.exercises).filter((e) => e.exerciseId === exerciseId).length;
     for (let i = 0; i < 300; i++) {
       const l = mutateDoc(start, `l${i}-`);
       const s = mutateDoc(start, `s${i}-`);
       const m = mergeSession(start, l, s);
       unique(m);
       expect(m.blocks.every((b) => b.exercises.length > 0)).toBe(true);
+      // Every exercise appears at most once — exactly once when both devices still have it.
+      for (const id of [10, 11, 12, 13, 14, 15, 16, 17]) {
+        expect(count(m, id), `exercise ${id}, round ${i}`).toBeLessThanOrEqual(1);
+        if (count(l, id) && count(s, id)) expect(count(m, id), `exercise ${id}, round ${i}`).toBe(1);
+      }
       // Every set on both devices (and every set logged on either) is still there, once.
       const both = new Set(allSetIds(l).filter((id) => allSetIds(s).includes(id)));
       for (const id of both) expect(allSetIds(m).filter((x) => x === id)).toHaveLength(1);
@@ -612,17 +697,86 @@ describe("fitSession", () => {
     expect(setsOf(fit, "x").filter((x) => x.done)).toHaveLength(20);
   });
 
-  it("splits a superset over 6 into another block, dropping unlogged exercises first", () => {
+  it("a superset over 6 keeps its first 6 and moves the rest into a block right after it (nothing dropped)", () => {
     const exs = Array.from({ length: 8 }, (_, i) => ({
       exerciseId: 20 + i,
       measure: "reps" as const,
       sets: [set(`s${i}`, i < 7 ? { done: true } : {})],
     }));
-    const { doc, error } = fitSession(sess([{ id: "big", kind: "accessory", exercises: exs }]));
+    const { doc, error, notices } = fitSession(sess([{ id: "big", kind: "accessory", exercises: exs }, accessory("z", 9, [set("z1")])]));
     expect(error).toBeNull();
-    expect(doc.blocks.map((b) => [b.id, b.exercises.length])).toEqual([
-      ["big", 6],
-      ["big-2", 1],
+    expect(notices).toEqual([]);
+    expect(doc.blocks.map((b) => [b.id, b.exercises.map((x) => x.exerciseId)])).toEqual([
+      ["big", [20, 21, 22, 23, 24, 25]],
+      ["big-2", [26, 27]],
+      ["z", [9]],
+    ]);
+  });
+
+  it("…logged members stay in the superset; the ones moved out are unlogged where possible", () => {
+    const exs = Array.from({ length: 7 }, (_, i) => ({
+      exerciseId: 20 + i,
+      measure: "reps" as const,
+      sets: [set(`s${i}`, i === 6 ? { done: true } : {})],
+    }));
+    const { doc } = fitSession(sess([{ id: "big", kind: "accessory", exercises: exs }]));
+    expect(doc.blocks.map((b) => b.exercises.map((x) => x.exerciseId))).toEqual([[20, 21, 22, 23, 24, 26], [25]]);
+  });
+
+  it("two devices each moving an exercise into a superset of 5: the one that doesn't fit gets a block after it", () => {
+    const ex = (exerciseId: number, sets: SetEntry[]) => ({ exerciseId, measure: "reps" as const, sets });
+    const five = [10, 11, 12, 13, 14].map((n) => ex(n, [set(`s${n}`)]));
+    const anc = sess([
+      primary([set("p1")]),
+      { id: "S", kind: "accessory", exercises: five },
+      accessory("X", 20, [set("x1"), set("x2")]),
+      accessory("Q", 30, [set("q1")]),
+    ]);
+    const here = moveExerciseToBlock(anc, { blockId: "X", exIdx: 0 }, "S");
+    const there = moveExerciseToBlock(anc, { blockId: "Q", exIdx: 0 }, "S");
+    for (const [l, s] of [
+      [here, there],
+      [there, here],
+    ] as const) {
+      const { doc, error, notices } = fitSession(mergeSession(anc, l, s));
+      expect(error).toBeNull();
+      expect(notices).toEqual([]);
+      expect(doc.blocks.map((b) => b.id)).toEqual(["p", "S", "S-2"]);
+      const [s1, s2] = [doc.blocks[1]!.exercises.map((x) => x.exerciseId), doc.blocks[2]!.exercises.map((x) => x.exerciseId)];
+      expect(s1.slice(0, 5)).toEqual([10, 11, 12, 13, 14]);
+      expect([s1[5], ...s2].sort()).toEqual([20, 30]);
+      expect(s2).toHaveLength(1);
+      expect(doc.blocks[1]!.exercises.find((x) => x.exerciseId === 20)?.sets ?? doc.blocks[2]!.exercises[0]!.sets).toHaveLength(2);
+    }
+  });
+
+  it("no room for another block (30): unlogged members that don't fit are dropped, and the merge says so", () => {
+    const ex = (exerciseId: number, sets: SetEntry[]) => ({ exerciseId, measure: "reps" as const, sets });
+    const big = { id: "big", kind: "accessory" as const, exercises: Array.from({ length: 8 }, (_, i) => ex(20 + i, [set(`s${i}`)])) };
+    const rest = Array.from({ length: MAX_BLOCKS - 1 }, (_, i) => accessory(`b${i}`, 100 + i, [set(`r${i}`)]));
+    const { doc, error, notices } = fitSession(sess([big, ...rest]));
+    expect(error).toBeNull();
+    expect(doc.blocks).toHaveLength(MAX_BLOCKS);
+    expect(doc.blocks[0]!.exercises.map((x) => x.exerciseId)).toEqual([20, 21, 22, 23, 24, 25]);
+    expect(doc.blocks.slice(1).map((b) => b.id)).toEqual(rest.map((b) => b.id));
+    expect(notices).toEqual(["2 unlogged exercises were left out (a workout holds at most 30 blocks)"]);
+    // Logged members that can't fit anywhere: the merge fails with the reason.
+    const loggedBig = { ...big, exercises: big.exercises.map((x) => ({ ...x, sets: [logged(x.sets[0]!.id)] })) };
+    const loggedRest = rest.map((b) => ({ ...b, exercises: [{ ...b.exercises[0]!, sets: [logged(b.exercises[0]!.sets[0]!.id)] }] }));
+    expect(fitSession(sess([loggedBig, ...loggedRest])).error).toMatch(/more than 30 blocks/);
+  });
+
+  it("a main-lift block holding more than one exercise keeps its first; the others move to an accessory block after it", () => {
+    const ex = (exerciseId: number, sets: SetEntry[]) => ({ exerciseId, measure: "reps" as const, sets });
+    const doc = sess([
+      { id: "p", kind: "primary", exercises: [ex(1, [logged("p1")]), ex(2, [set("q1")]), ex(3, [])] },
+      accessory("x", 10, [set("x1")]),
+    ]);
+    const { doc: fit } = fitSession(doc);
+    expect(fit.blocks.map((b) => [b.id, b.kind, b.exercises.map((x) => x.exerciseId)])).toEqual([
+      ["p", "primary", [1]],
+      ["p-2", "accessory", [2, 3]],
+      ["x", "accessory", [10]],
     ]);
   });
 
@@ -634,6 +788,16 @@ describe("fitSession", () => {
   it("returns the same document when it fits", () => {
     const doc = sess([primary([set("a")])]);
     expect(fitSession(doc).doc).toBe(doc);
+    expect(fitSession(doc).notices).toEqual([]);
+  });
+
+  it("reports the unlogged work it trims", () => {
+    const many = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => set(`${prefix}${i}`));
+    expect(fitSession(sess([accessory("x", 10, many("o", 32))])).notices).toEqual([
+      "2 unlogged sets were left out (an exercise holds at most 30 sets)",
+    ]);
+    const blocks = Array.from({ length: MAX_BLOCKS + 1 }, (_, i) => accessory(`b${i}`, 100 + i, [set(`r${i}`)]));
+    expect(fitSession(sess(blocks)).notices).toEqual(["1 unlogged block was left out (a workout holds at most 30 blocks)"]);
   });
 });
 
@@ -766,7 +930,7 @@ describe("version-checked ops: deletes, rejected copies and conflicts", () => {
     const theirs = sess([primary([...many("a", 10, false), ...many("t", 15, true)])]);
     let s = addOp(emptyOutbox(), sessionOp(mine, "r1", anc), null);
     let r = resolve(s, s.entries[0]!.seq, { current: theirs, rev: "r2" }, true);
-    expect(r.kind).toBe("retry");
+    expect(r).toMatchObject({ kind: "retry", conflicts: ["10 unlogged sets were left out (an exercise holds at most 30 sets)"] });
     expect(validateOp(r.state.entries[0]!.op)).toBeNull();
     expect(opOf(r.state, 0).doc!.blocks[0]!.exercises[0]!.sets.filter((x) => x.done)).toHaveLength(15);
 

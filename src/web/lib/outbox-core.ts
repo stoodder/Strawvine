@@ -485,6 +485,11 @@ export interface Conflict {
   rev: string | null;
 }
 
+/**
+ * In every merged resolution, `conflicts` says what the merge couldn't keep as both devices had
+ * it: for settings, the lists both changed (this device's kept, e.g. "program weeks"); for a
+ * workout, the unlogged work left out to fit the server's limits (`fitSession`'s notices).
+ */
 export type ConflictResolution =
   /** Merged onto the server's copy: send the entry again (it's next). */
   | { kind: "retry"; state: OutboxState; tookServer: boolean; conflicts: string[] }
@@ -544,6 +549,7 @@ export function resolveConflict(s: OutboxState, seq: number, c: Conflict, retry:
     const current = c.current as Session | null;
     const fit = fitSession(current ? mergeSession(op.base ?? null, op.doc, current) : op.doc);
     error = fit.error;
+    conflicts = fit.notices;
     pre = op.doc;
     merged = fit.doc;
     next = { ...op, doc: fit.doc, baseRev: rev, base: current };
@@ -572,9 +578,11 @@ export function resolveConflict(s: OutboxState, seq: number, c: Conflict, retry:
     if (!laterSet.has(i)) return x;
     const lo = x.op;
     let op2: Op = lo;
-    if (lo.kind === "session" && lo.doc && next.kind === "session" && next.doc)
-      op2 = { ...lo, doc: fitSession(mergeSession(pre as Session, lo.doc, next.doc)).doc, baseRev: rev, base: next.base ?? null };
-    else if (lo.kind === "settings" && next.kind === "settings") {
+    if (lo.kind === "session" && lo.doc && next.kind === "session" && next.doc) {
+      const fit = fitSession(mergeSession(pre as Session, lo.doc, next.doc));
+      conflicts = [...new Set([...conflicts, ...fit.notices])];
+      op2 = { ...lo, doc: fit.doc, baseRev: rev, base: next.base ?? null };
+    } else if (lo.kind === "settings" && next.kind === "settings") {
       const m = mergeSettingsDetailed(pre as Settings, lo.settings, next.settings);
       conflicts = [...new Set([...conflicts, ...m.conflicts])];
       op2 = { ...lo, settings: m.value, baseRev: rev, base: next.base ?? null };

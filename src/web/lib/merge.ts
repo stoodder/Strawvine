@@ -11,7 +11,7 @@
  * server, so the other device's changes are kept.
  */
 import type { Block, BlockExercise, Session, SetEntry, Settings } from "../../shared/schemas";
-import { MAX_BLOCKS, MAX_SETS, MAX_SUPERSET } from "../../shared/sessionStructure";
+import { derivedBlockId, MAX_BLOCKS, MAX_SETS, MAX_SUPERSET, normalizeMainLift } from "../../shared/sessionStructure";
 
 /**
  * Deep equality for JSON-shaped data (keys whose value is `undefined` count as absent). Fast
@@ -102,7 +102,9 @@ function reordered<T>(ancestor: readonly T[] | null, list: readonly T[], key: (x
  * The merged list: the items both versions hold (merged), the ones only one of them holds that are
  * worth keeping, in this device's order — or in the server's when only the server reordered the
  * items they share (e.g. a superset's order, or the workout's, changed there while this device
- * logged). Items only the other version holds go after the item that precedes them there.
+ * logged). Items only the other version holds go after the item that precedes them there — and
+ * after everything both hold when nothing both hold follows them there (added at the end, they
+ * stay at the end even when the other version moved their predecessor up).
  */
 function mergeList<T>(
   ancestor: readonly T[] | null,
@@ -141,6 +143,7 @@ function mergeList<T>(
   const lead: keyof Entry = byServer ? "s" : "l";
   const other: keyof Entry = byServer ? "l" : "s";
   const out = entries.filter((e) => e[lead] >= 0).sort((x, y) => x[lead] - y[lead]);
+  const shared = (o: Entry) => o.l >= 0 && o.s >= 0;
   for (const e of entries.filter((x) => x[lead] < 0).sort((x, y) => x[other] - y[other])) {
     let at = 0;
     for (let n = e[other] - 1; n >= 0; n--) {
@@ -150,6 +153,10 @@ function mergeList<T>(
         break;
       }
     }
+    // One at the end of its version (nothing both hold comes after it there) stays at the end,
+    // even when the other version moved the item before it up the list.
+    const last = !entries.some((o) => shared(o) && o[other] > e[other]);
+    if (last && out.slice(at).some(shared)) at = out.length;
     out.splice(at, 0, e);
   }
   return out.map((o) => o.item);
@@ -289,20 +296,30 @@ function mergeSet(a: SetEntry | undefined, l: SetEntry, s: SetEntry): SetEntry {
  * Exercise identities across the three versions of a session. Set ids are unique within a
  * session and travel with their exercise (moved into or out of a superset, swapped for another
  * lift), so an exercise is identified by the sets it holds: exercises in different versions that
- * share a set id are the same exercise, wherever each version keeps it. An exercise without sets
- * is identified by its block, lift and occurrence.
+ * share a set id are the same exercise, wherever each version keeps it.
+ *
+ * An exercise the ancestor holds without sets has nothing to follow it by, so it is identified
+ * across the whole workout by its lift: in this device's and the server's version, an exercise
+ * none of whose sets the ancestor knows (still set-less, or with sets added since) takes the
+ * identity of an ancestor set-less exercise of the same lift — first one in the same block (in
+ * order), else anywhere in the workout (in workout order), set-less exercises before ones that
+ * gained sets. So one moved to another block on one device while the other skips it, logs it or
+ * moves it elsewhere is still one exercise; the same lift twice on purpose stays twice. One
+ * left over (added on this device or the server) is new.
  */
 class Idents {
   private readonly bySet = new Map<string, string>();
   private readonly of: Record<Side, Map<BlockExercise, string>> = { a: new Map(), l: new Map(), s: new Map() };
+  /** The ancestor's set-less exercises, in workout order. */
+  private readonly bare: Array<{ t: string; block: string; exerciseId: number }> = [];
   private n = 0;
 
   add(doc: Session | null, side: Side) {
     if (!doc) return;
     const mine = this.of[side];
     const taken = new Set<string>();
+    const open: Array<{ x: BlockExercise; block: string }> = [];
     for (const b of doc.blocks) {
-      const occ = new Map<number, number>();
       for (const x of b.exercises) {
         let t: string | undefined;
         for (const st of x.sets) {
@@ -312,17 +329,33 @@ class Idents {
             break;
           }
         }
-        if (!t && !x.sets.length) {
-          const o = occ.get(x.exerciseId) ?? 0;
-          occ.set(x.exerciseId, o + 1);
-          t = `e:${b.id}:${x.exerciseId}:${o}`;
+        if (!t && side === "a" && !x.sets.length) {
+          t = `z${this.n++}`;
+          this.bare.push({ t, block: b.id, exerciseId: x.exerciseId });
+        }
+        if (!t && side !== "a") {
+          open.push({ x, block: b.id });
+          continue;
         }
         t ??= `t${this.n++}`;
-        taken.add(t);
-        for (const st of x.sets) if (!this.bySet.has(st.id)) this.bySet.set(st.id, t);
-        mine.set(x, t);
+        this.claim(x, t, side, taken);
       }
     }
+    // Set-less first, then the ones with (new) sets; same block first, then anywhere.
+    const order = [...open.filter((o) => !o.x.sets.length), ...open.filter((o) => o.x.sets.length)];
+    for (const sameBlock of [true, false])
+      for (const o of order) {
+        if (mine.has(o.x)) continue;
+        const z = this.bare.find((e) => !taken.has(e.t) && e.exerciseId === o.x.exerciseId && (!sameBlock || e.block === o.block));
+        if (z) this.claim(o.x, z.t, side, taken);
+      }
+    for (const o of open) if (!mine.has(o.x)) this.claim(o.x, `t${this.n++}`, side, taken);
+  }
+
+  private claim(x: BlockExercise, t: string, side: Side, taken: Set<string>) {
+    taken.add(t);
+    for (const st of x.sets) if (!this.bySet.has(st.id)) this.bySet.set(st.id, t);
+    this.of[side].set(x, t);
   }
 
   get(x: BlockExercise, side: Side): string {
@@ -348,7 +381,6 @@ function normalizeMoves(ids: Idents, docs: Record<Side, Session | null>): Record
   const moves: Array<{ t: string; to: { block: string; index: number }; from: Side }> = [];
   const all = new Set([...places.l.keys(), ...places.s.keys()]);
   for (const t of all) {
-    if (t.startsWith("e:")) continue;
     const pa = places.a.get(t);
     const pl = places.l.get(t);
     const ps = places.s.get(t);
@@ -615,42 +647,76 @@ export function mergeSession(ancestor: Session | null | undefined, local: Sessio
 /** The server's limits on a workout (sessionSchema) that a merge can run into. */
 export const SESSION_LIMITS = { blocks: MAX_BLOCKS, superset: MAX_SUPERSET, sets: MAX_SETS } as const;
 
+export interface SessionFit {
+  doc: Session;
+  /** Why it still doesn't fit (only logged work is left over a limit); `doc` is then as close as it gets. */
+  error: string | null;
+  /** Unlogged work left out to fit, as readable phrases ("2 unlogged sets were left out (…)"). */
+  notices: string[];
+}
+
+const leftOut = (n: number, what: string, why: string) => `${n} unlogged ${what}${n === 1 ? " was" : "s were"} left out (${why})`;
+
 /**
- * Brings a merged workout within the server's limits without losing logged work: unlogged sets
- * beyond 30 per exercise are dropped (from the end); a superset of more than 6 exercises sheds
- * exercises with nothing logged (from the end), then splits the rest into further blocks; blocks
- * beyond 30 with nothing logged are dropped (from the end). `error` says why it still doesn't fit
- * (only logged work is left over the limit); `doc` is then as close as it gets.
+ * Brings a merged workout within the server's limits without losing logged work:
+ * - a main-lift block holding more than its lift is split (`normalizeMainLift`);
+ * - unlogged sets beyond 30 per exercise are dropped (from the end);
+ * - a superset of more than 6 (e.g. each device moved an exercise into a superset of 5) keeps 6 —
+ *   those with logged sets first, then in order, so what arrived last leaves — and the others
+ *   move, with their sets, into a block of their own right after it (more for more than 12);
+ * - beyond 30 blocks, blocks with nothing logged are dropped from the end — first the ones a
+ *   superset's overflow would have needed, then any other.
+ * Whatever unlogged work is dropped is reported in `notices`.
  */
-export function fitSession(doc: Session): { doc: Session; error: string | null } {
+export function fitSession(input: Session): SessionFit {
   const { blocks: maxBlocks, superset: maxEx, sets: maxSets } = SESSION_LIMITS;
-  let changed = false;
+  const doc = normalizeMainLift(input);
+  let changed = doc !== input;
   let error: string | null = null;
-  const blocks: Block[] = [];
+  let lostSets = 0;
+  const taken = new Set(doc.blocks.map((b) => b.id));
+  const out: Array<{ block: Block; overflow: boolean }> = [];
   for (const b of doc.blocks) {
-    let exercises = b.exercises.map((x) => {
+    const exercises = b.exercises.map((x) => {
       if (x.sets.length <= maxSets) return x;
-      changed = true;
       const sets = [...x.sets];
       for (let i = sets.length - 1; i >= 0 && sets.length > maxSets; i--) if (!sets[i]!.done) sets.splice(i, 1);
       if (sets.length > maxSets) error ??= `An exercise in the merged workout has more than ${maxSets} logged sets.`;
+      lostSets += x.sets.length - sets.length;
       return { ...x, sets };
     });
-    if (exercises.length > maxEx) {
-      changed = true;
-      exercises = [...exercises];
-      for (let i = exercises.length - 1; i >= 0 && exercises.length > maxEx; i--)
-        if (!exercises[i]!.sets.some((st) => st.done)) exercises.splice(i, 1);
+    const edited = exercises.some((x, i) => x !== b.exercises[i]);
+    changed ||= edited;
+    if (exercises.length <= maxEx) {
+      out.push({ block: edited ? { ...b, exercises } : b, overflow: false });
+      continue;
     }
-    for (let i = 0; i < exercises.length; i += maxEx)
-      blocks.push({ ...b, id: i ? `${b.id.slice(0, 36)}-${i / maxEx + 1}` : b.id, exercises: exercises.slice(i, i + maxEx) });
-    if (!exercises.length) changed = true;
-    else if (exercises.length !== b.exercises.length || exercises.some((x, i) => x !== b.exercises[i])) changed = true;
-  }
-  if (blocks.length > maxBlocks) {
     changed = true;
-    for (let i = blocks.length - 1; i >= 0 && blocks.length > maxBlocks; i--) if (!doneSets(blocks[i]!)) blocks.splice(i, 1);
-    if (blocks.length > maxBlocks) error ??= `The merged workout has more than ${maxBlocks} blocks with logged sets.`;
+    const rank = exercises.map((_, i) => i).sort((i, j) => Number(hasLogged(exercises[j]!)) - Number(hasLogged(exercises[i]!)) || i - j);
+    const stays = new Set(rank.slice(0, maxEx));
+    out.push({ block: { ...b, exercises: exercises.filter((_, i) => stays.has(i)) }, overflow: false });
+    const extra = exercises.filter((_, i) => !stays.has(i));
+    for (let i = 0; i < extra.length; i += maxEx)
+      out.push({ block: { id: derivedBlockId(b.id, taken), kind: "accessory", exercises: extra.slice(i, i + maxEx) }, overflow: true });
   }
-  return { doc: changed ? { ...doc, blocks } : doc, error };
+  const notices: string[] = [];
+  if (lostSets) notices.push(leftOut(lostSets, "set", `an exercise holds at most ${maxSets} sets`));
+  if (out.length > maxBlocks) {
+    changed = true;
+    let lostEx = 0;
+    let lostBlocks = 0;
+    for (const overflow of [true, false])
+      for (let i = out.length - 1; i >= 0 && out.length > maxBlocks; i--) {
+        const o = out[i]!;
+        if ((overflow && !o.overflow) || doneSets(o.block)) continue;
+        if (o.overflow) lostEx += o.block.exercises.length;
+        else lostBlocks++;
+        out.splice(i, 1);
+      }
+    const why = `a workout holds at most ${maxBlocks} blocks`;
+    if (lostEx) notices.push(leftOut(lostEx, "exercise", why));
+    if (lostBlocks) notices.push(leftOut(lostBlocks, "block", why));
+    if (out.length > maxBlocks) error ??= `The merged workout has more than ${maxBlocks} blocks with logged sets.`;
+  }
+  return { doc: changed ? { ...doc, blocks: out.map((o) => o.block) } : doc, error, notices };
 }

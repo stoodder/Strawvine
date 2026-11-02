@@ -1085,15 +1085,16 @@ async function replay() {
 /** Seqs that had their one automatic merge-and-resend (this window); a second conflict in a row fails. */
 const mergedOnce = new Set<number>();
 /**
- * Seqs whose document took changes from another device in a merge, with the settings lists that
- * couldn't be combined (this device's kept): a toast says so once the merged copy is saved.
+ * Seqs whose document took changes from another device in a merge, with what the merge couldn't
+ * keep as both had it (`ConflictResolution`): a toast says so once the merged copy is saved.
  */
 const merges = new Map<number, string[]>();
 
-function mergedMessage(conflicts: string[]) {
-  return conflicts.length
-    ? `Merged changes from another device (kept this device's ${conflicts.join(" and ")})`
-    : "Merged changes from another device";
+function mergedMessage(op: Op, conflicts: string[]) {
+  if (!conflicts.length) return "Merged changes from another device";
+  // A workout's are whole phrases (unlogged work left out to fit the server's limits).
+  if (op.kind === "session") return `Merged changes from another device; ${conflicts.join("; ")}`;
+  return `Merged changes from another device (kept this device's ${conflicts.join(" and ")})`;
 }
 
 /**
@@ -1209,7 +1210,7 @@ function onAcked(e: Entry, result: unknown, meta: AckMeta = {}) {
   schedulePersist();
   settleAck(seq, op, result);
   const conflicts = merges.get(seq);
-  if (conflicts) showToast({ message: mergedMessage(conflicts) });
+  if (conflicts) showToast({ message: mergedMessage(op, conflicts) });
   merges.delete(seq);
   mergedOnce.delete(seq);
   if (op.kind === "settings" && op.settings.onboarded) requestPersistentStorage();
