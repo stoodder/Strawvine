@@ -2,21 +2,27 @@ import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
 import { buildModel } from "./insights";
 import { achievements, checklist, streaks, type AppData } from "./gamify";
-import { emptyDayLog, type Exercise, type MaxEntry, type Session } from "./schemas";
+import { emptyDayLog, type BlockExercise, type Exercise, type MaxEntry, type Session, type SetEntry } from "./schemas";
 import {
   accessoryHint,
   blankSet,
   buildSession,
   buildSessionFrom,
   defaultTarget,
+  effectiveTargetWeight,
   isWeighted,
+  logAtTargets,
+  loggedWeightFor,
+  needsLoadBeforeLogging,
   nextSession,
+  nextSetAfter,
   planChanged,
   planMatches,
   planSignature,
   sessionCounts,
   sessionVolume,
   setsForAddedExercise,
+  shownLoad,
 } from "./session";
 import { addDays } from "./dates";
 
@@ -31,6 +37,8 @@ const exercises: Exercise[] = [
 const maxEntries: MaxEntry[] = [
   { id: 1, exerciseId: 1, date: "2026-11-01", valueLb: 315, source: "initial", note: null, createdAt: "2026-11-01T00:00:00Z" },
 ];
+/** `accessoryHint`'s option for a weighted exercise. */
+const W = { weighted: true };
 
 describe("buildSession", () => {
   it("calculates Monday's bench from the max (week 1)", () => {
@@ -216,6 +224,20 @@ describe("skipping an accessory today", () => {
     expect(deload.blocks.find((b) => b.kind === "accessory")!.exercises[0]!.sets[0]!.targetWeight).toBe(40);
   });
 
+  it("carries a skipped exercise's last real load only while it is weighted", () => {
+    const done = withAccessories("2026-11-02", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12)] }]);
+    const skipped = withAccessories("2026-11-09", [{ exerciseId: 10, measure: "reps", sets: [set(55, 12, false)], skipped: true }]);
+    const carried = (weighted: boolean) =>
+      buildSession("2026-11-16", {
+        settings,
+        exercises: exercises.map((e) => (e.id === 10 ? { ...e, weighted } : e)),
+        maxEntries,
+        sessions: [done, skipped],
+      }).blocks.find((b) => b.kind === "accessory")!.exercises[0]!.sets[0]!;
+    expect([carried(true).targetReps, carried(true).targetWeight]).toEqual([12, 50]);
+    expect([carried(false).targetReps, carried(false).targetWeight]).toEqual([12, null]);
+  });
+
   it("leaves skipped exercises out of the volume", () => {
     const s = withAccessories("2026-11-16", [
       { exerciseId: 10, measure: "reps", sets: [set(50, 10)] },
@@ -296,14 +318,14 @@ describe("accessoryHint", () => {
       [13, 12, 50, true],
       [null, 12, 50, false], // not logged: doesn't count
     ]);
-    expect(accessoryHint(10, "2026-11-16", [last], 5)).toEqual({
+    expect(accessoryHint(10, "2026-11-16", [last], 5, W)).toEqual({
       kind: "increase",
       measure: "reps",
       lastWeight: 50,
       suggestedWeight: 55,
       reason: expect.stringContaining("+5 lb"),
     });
-    expect(accessoryHint(10, "2026-11-16", [last], 2.5)?.suggestedWeight).toBe(52.5);
+    expect(accessoryHint(10, "2026-11-16", [last], 2.5, W)?.suggestedWeight).toBe(52.5);
   });
 
   it("holds the load when a set fell short of its target", () => {
@@ -311,7 +333,7 @@ describe("accessoryHint", () => {
       [12, 12, 50, true],
       [10, 12, 50, true],
     ]);
-    expect(accessoryHint(10, "2026-11-16", [short], 5)).toEqual({
+    expect(accessoryHint(10, "2026-11-16", [short], 5, W)).toEqual({
       kind: "hold",
       measure: "reps",
       lastWeight: 50,
@@ -319,14 +341,14 @@ describe("accessoryHint", () => {
       reason: "Missed reps at 50 lb on Nov 9 — hold",
     });
     // Hints off: no hold either.
-    expect(accessoryHint(10, "2026-11-16", [short], 0)).toBeNull();
+    expect(accessoryHint(10, "2026-11-16", [short], 0, W)).toBeNull();
   });
 
   it("has no hint when a set had no load or target, or nothing was logged", () => {
-    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, null, 50, true]])], 5)).toBeNull();
-    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, 12, null, true]])], 5)).toBeNull();
-    expect(accessoryHint(10, "2026-11-16", [], 5)).toBeNull();
-    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, 12, 50, true]])], 0)).toBeNull();
+    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, null, 50, true]])], 5, W)).toBeNull();
+    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, 12, null, true]])], 5, W)).toBeNull();
+    expect(accessoryHint(10, "2026-11-16", [], 5, W)).toBeNull();
+    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, 12, 50, true]])], 0, W)).toBeNull();
   });
 
   it("looks at the most recent non-skipped performance before the date", () => {
@@ -334,14 +356,58 @@ describe("accessoryHint", () => {
     const short = sess("2026-11-09", [[8, 12, 50, true]]);
     const skipped = sess("2026-11-16", [[12, 12, 60, true]], true);
     const unlogged = sess("2026-11-17", [[null, 12, 60, false]]);
-    expect(accessoryHint(10, "2026-11-23", [good, short, skipped, unlogged], 5)).toMatchObject({ kind: "hold", lastWeight: 50 }); // Nov 9 fell short
-    expect(accessoryHint(10, "2026-11-09", [good, short, skipped, unlogged], 5)?.suggestedWeight).toBe(45); // before Nov 9
+    expect(accessoryHint(10, "2026-11-23", [good, short, skipped, unlogged], 5, W)).toMatchObject({ kind: "hold", lastWeight: 50 }); // Nov 9 fell short
+    expect(accessoryHint(10, "2026-11-09", [good, short, skipped, unlogged], 5, W)?.suggestedWeight).toBe(45); // before Nov 9
   });
 
   it("has no hint for an unweighted exercise, even with old loads logged", () => {
     const last = sess("2026-11-09", [[12, 12, 50, true]]);
     expect(accessoryHint(10, "2026-11-16", [last], 5, { weighted: false })).toBeNull();
     expect(accessoryHint(10, "2026-11-16", [last], 5, { weighted: true })?.kind).toBe("increase");
+  });
+
+  it("looks past a performance logged without a load (while unweighted) to the last one with a load", () => {
+    const loaded = sess("2026-11-02", [[12, 12, 40, true]]);
+    // Logged while unweighted: no load recorded, though the pre-filled target load is still there.
+    const unloaded: Session = {
+      ...sess("2026-11-09", []),
+      blocks: [
+        {
+          id: "b",
+          kind: "accessory",
+          exercises: [{ exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 12, reps: 12, targetWeight: 25, weight: null, done: true })] }],
+        },
+      ],
+    };
+    expect(accessoryHint(10, "2026-11-16", [loaded, unloaded], 5, W)).toMatchObject({
+      kind: "increase",
+      lastWeight: 40,
+      suggestedWeight: 45,
+      reason: "All reps at 40 lb on Nov 2 → +5 lb",
+    });
+    expect(accessoryHint(10, "2026-11-16", [unloaded], 5, W)).toBeNull();
+    // Some sets with a load and some without: no hint (the load progression is unclear).
+    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, 12, 40, true], [12, 12, null, true]])], 5, W)).toBeNull();
+  });
+
+  it("takes the measure from the entry that was logged when the exercise appears twice", () => {
+    const twice: Session = {
+      ...sess("2026-11-09", []),
+      blocks: [
+        { id: "a", kind: "accessory", exercises: [{ exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 12, targetWeight: 25 })] }] },
+        {
+          id: "b",
+          kind: "accessory",
+          exercises: [
+            { exerciseId: 10, measure: "seconds", sets: [blankSet({ targetReps: 30, reps: 30, targetWeight: 25, weight: 25, done: true })] },
+          ],
+        },
+      ],
+    };
+    expect(accessoryHint(10, "2026-11-16", [twice], 5, W)).toMatchObject({
+      measure: "seconds",
+      reason: "Full duration at 25 lb on Nov 9 → +5 lb",
+    });
   });
 
   describe("weighted time and distance", () => {
@@ -369,29 +435,29 @@ describe("accessoryHint", () => {
         [30, 30, 25],
         [35, 30, 25],
       ]);
-      expect(accessoryHint(10, "2026-11-16", [hang], 5)).toEqual({
+      expect(accessoryHint(10, "2026-11-16", [hang], 5, W)).toEqual({
         kind: "increase",
         measure: "seconds",
         lastWeight: 25,
         suggestedWeight: 30,
-        reason: "Full time at 25 lb on Nov 9 → +5 lb",
+        reason: "Full duration at 25 lb on Nov 9 → +5 lb",
       });
     });
 
     it("holds when a hold or a carry fell short", () => {
       const hang = timed("2026-11-09", "seconds", [[20, 30, 25]]);
-      expect(accessoryHint(10, "2026-11-16", [hang], 5)).toMatchObject({
+      expect(accessoryHint(10, "2026-11-16", [hang], 5, W)).toMatchObject({
         kind: "hold",
         suggestedWeight: 25,
-        reason: "Short on time at 25 lb on Nov 9 — hold",
+        reason: "Short on duration at 25 lb on Nov 9 — hold",
       });
       const carry = timed("2026-11-09", "meters", [[30, 40, 70]]);
-      expect(accessoryHint(10, "2026-11-16", [carry], 5)?.reason).toBe("Short on distance at 70 lb on Nov 9 — hold");
+      expect(accessoryHint(10, "2026-11-16", [carry], 5, W)?.reason).toBe("Short on distance at 70 lb on Nov 9 — hold");
     });
 
     it("uses the increment from settings for a carry that went the full distance", () => {
       const carry = timed("2026-11-09", "meters", [[40, 40, 70]]);
-      expect(accessoryHint(10, "2026-11-16", [carry], 10)).toMatchObject({
+      expect(accessoryHint(10, "2026-11-16", [carry], 10, W)).toMatchObject({
         kind: "increase",
         measure: "meters",
         suggestedWeight: 80,
@@ -407,31 +473,140 @@ describe("isWeighted / setsForAddedExercise", () => {
     expect(isWeighted({ weighted: true })).toBe(true);
     expect(isWeighted({} as Exercise)).toBe(true);
     expect(isWeighted(undefined)).toBe(true);
+    expect(isWeighted(null)).toBe(true);
   });
+
+  const plan = (date: string) => buildSession(date, { settings, exercises: [], maxEntries: [], sessions: [] });
+  const withBlock = (date: string, exs: BlockExercise[], kind: "accessory" | "primary" = "accessory"): Session => ({
+    ...plan(date),
+    blocks: [{ id: `b-${date}`, kind, exercises: exs }],
+  });
+  const targets = (sets: ReadonlyArray<SetEntry>) => sets.map((s) => [s.targetReps, s.targetWeight]);
+  const logged = (targetReps: number | null, reps: number, weight: number | null) =>
+    blankSet({ targetReps, targetWeight: weight, reps, weight, done: true });
+  const hang = { id: 20, measure: "seconds" as const, weighted: true };
+  const carry = { id: 21, measure: "meters" as const, weighted: true };
 
   it("starts a new exercise at three sets of the measure's default target", () => {
     expect(defaultTarget("reps")).toBe(10);
-    expect(setsForAddedExercise(null, "seconds", true).map((s) => [s.targetReps, s.targetWeight])).toEqual([
+    expect(targets(setsForAddedExercise(hang, plan("2026-11-16"), { settings, sessions: [] }))).toEqual([
       [30, null],
       [30, null],
       [30, null],
     ]);
-    expect(setsForAddedExercise([], "meters", false).map((s) => s.targetReps)).toEqual([40, 40, 40]);
+    const run = { id: 22, measure: "meters" as const, weighted: false };
+    expect(setsForAddedExercise(run, plan("2026-11-16"), { settings, sessions: [] }).map((s) => s.targetReps)).toEqual([40, 40, 40]);
   });
 
-  it("pre-fills from the last performance: reps and load for a weighted one, no load for an unweighted one", () => {
-    const prev = [
-      blankSet({ targetReps: 30, targetWeight: 20, reps: 35, weight: 25, done: true }),
-      blankSet({ targetReps: 30, targetWeight: 25 }),
-    ];
-    expect(setsForAddedExercise(prev, "seconds", true).map((s) => [s.targetReps, s.targetWeight, s.done])).toEqual([
-      [35, 25, false],
-      [30, 25, false],
+  it("pre-fills targets (not missed reps) and the load lifted; an unweighted exercise gets no load", () => {
+    const prev = withBlock("2026-11-09", [
+      { exerciseId: 20, measure: "seconds", sets: [logged(30, 35, 25), logged(30, 20, 25), logged(null, 40, 25)] },
     ]);
-    expect(setsForAddedExercise(prev, "seconds", false).map((s) => [s.targetReps, s.targetWeight])).toEqual([
-      [35, null],
+    const ctx = { settings, sessions: [prev] };
+    expect(targets(setsForAddedExercise(hang, plan("2026-11-16"), ctx))).toEqual([
+      [30, 25],
+      [30, 25],
+      [40, 25], // added without a target: carries what was done
+    ]);
+    expect(targets(setsForAddedExercise({ ...hang, weighted: false }, plan("2026-11-16"), ctx))).toEqual([
       [30, null],
+      [30, null],
+      [40, null],
     ]);
+  });
+
+  it("never pre-fills from a skipped performance, a main-lift block or the session itself", () => {
+    const done = withBlock("2026-11-02", [{ exerciseId: 20, measure: "seconds", sets: [logged(30, 30, 20)] }]);
+    const skipped = withBlock("2026-11-09", [
+      { exerciseId: 20, measure: "seconds", sets: [blankSet({ targetReps: 45, targetWeight: 60 })], skipped: true },
+    ]);
+    const primary = withBlock("2026-11-10", [{ exerciseId: 20, measure: "seconds", sets: [logged(50, 50, 90)] }], "primary");
+    const today = withBlock("2026-11-16", [{ exerciseId: 20, measure: "seconds", sets: [logged(60, 60, 99)] }]);
+    const sets = setsForAddedExercise(hang, plan("2026-11-16"), { settings, sessions: [done, skipped, primary, today] });
+    expect(targets(sets)).toEqual([[30, 20]]);
+  });
+
+  it("agrees with the session pre-fill for a carry last done only in a deload week", () => {
+    // Default program: week 5 (Nov 30 – Dec 6) is the deload; Dec 4 and Dec 11 are Fridays.
+    const deloadFriday = withBlock("2026-12-04", [{ exerciseId: 21, measure: "meters", sets: [logged(40, 30, 80), logged(40, 40, 80)] }]);
+    expect(deloadFriday.deload).toBe(true);
+    const library: Exercise[] = [
+      ...exercises,
+      { id: 21, name: "Farmer's carry", category: "carry", tracksMax: false, measure: "meters", weighted: true, archived: false },
+    ];
+    const next = buildSession("2026-12-11", { settings, exercises: library, maxEntries, sessions: [deloadFriday] });
+    expect(next.deload).toBe(false);
+    const prefilled = next.blocks.find((b) => b.kind === "accessory")!.exercises[0]!;
+    expect(targets(prefilled.sets)).toEqual([
+      [40, 100],
+      [40, 100],
+    ]);
+    // Added by hand to the same day instead: the same sets (scaled back up from 80%, targets kept).
+    expect(targets(setsForAddedExercise(carry, plan("2026-12-11"), { settings, sessions: [deloadFriday] }))).toEqual(targets(prefilled.sets));
+  });
+
+  it("deloads into a deload week, and prefers a normal week's performance", () => {
+    const normalFriday = withBlock("2026-11-27", [{ exerciseId: 21, measure: "meters", sets: [logged(40, 40, 100)] }]);
+    const deloadFriday = withBlock("2026-12-04", [{ exerciseId: 21, measure: "meters", sets: [logged(40, 30, 80), logged(40, 40, 80)] }]);
+    expect(plan("2026-12-04").deload).toBe(true);
+    expect(targets(setsForAddedExercise(carry, plan("2026-12-04"), { settings, sessions: [normalFriday] }))).toEqual([[40, 80]]);
+    expect(targets(setsForAddedExercise(carry, plan("2026-12-11"), { settings, sessions: [normalFriday, deloadFriday] }))).toEqual([
+      [40, 100],
+    ]);
+  });
+});
+
+describe("loads of weighted and unweighted exercises", () => {
+  const pending = blankSet({ targetReps: 10, targetWeight: 25 });
+
+  it("logs an unweighted exercise's set without the target load it still holds", () => {
+    expect(logAtTargets(pending, false)).toMatchObject({ done: true, reps: 10, weight: null, targetWeight: 25 });
+    expect(logAtTargets(pending, true)).toMatchObject({ done: true, reps: 10, weight: 25 });
+    expect(logAtTargets({ ...pending, weight: 30, reps: 8 }, true)).toMatchObject({ reps: 8, weight: 30 });
+    expect(logAtTargets({ ...pending, weight: 30 }, false).weight).toBeNull();
+    expect([loggedWeightFor(pending, true), loggedWeightFor(pending, false)]).toEqual([25, null]);
+    expect([effectiveTargetWeight(pending, true), effectiveTargetWeight(pending, false)]).toEqual([25, null]);
+  });
+
+  it("shows an already-logged load as data, but no pending target load, once unweighted", () => {
+    const done = { ...pending, done: true, reps: 10, weight: 30 };
+    expect([shownLoad(done, false), shownLoad(done, true)]).toEqual([30, 30]);
+    expect([shownLoad(pending, false), shownLoad(pending, true)]).toEqual([null, 25]);
+    expect(shownLoad({ ...pending, done: true }, true)).toBeNull(); // logged without a load
+  });
+
+  it("counts no volume for a Pull-up pre-filled at 25 lb, made unweighted, then logged", () => {
+    const pullups = (weighted: boolean): Session => ({
+      ...buildSession("2026-11-16", { settings, exercises: [], maxEntries: [], sessions: [] }),
+      blocks: [
+        {
+          id: "b",
+          kind: "accessory",
+          exercises: [{ exerciseId: 30, measure: "reps", sets: [logAtTargets(blankSet({ targetReps: 10, targetWeight: 25 }), weighted)] }],
+        },
+      ],
+    });
+    expect(sessionVolume(pullups(false))).toBe(0);
+    expect(sessionVolume(pullups(true))).toBe(250);
+  });
+
+  it("asks for a load before one tap logs a weighted set that has none", () => {
+    const none = blankSet({ targetReps: 10 });
+    expect(needsLoadBeforeLogging(none, true)).toBe(true);
+    expect(needsLoadBeforeLogging({ ...none, targetWeight: 0 }, true)).toBe(true);
+    expect(needsLoadBeforeLogging({ ...none, targetWeight: 25 }, true)).toBe(false);
+    expect(needsLoadBeforeLogging({ ...none, weight: 25 }, true)).toBe(false);
+    expect(needsLoadBeforeLogging({ ...none, done: true }, true)).toBe(false); // unlogging needs nothing
+    expect(needsLoadBeforeLogging(none, false)).toBe(false);
+  });
+
+  it("adds a set after the last one: its load only for a weighted exercise", () => {
+    const legacy = blankSet({ targetReps: 10, targetWeight: 25, reps: 8, weight: 30, done: true });
+    expect(nextSetAfter(legacy, false)).toMatchObject({ targetReps: 8, targetWeight: null, weight: null, done: false });
+    expect(nextSetAfter(legacy, true)).toMatchObject({ targetReps: 8, targetWeight: 30, done: false });
+    expect(nextSetAfter(blankSet({ targetReps: 12, targetWeight: 25 }), true)).toMatchObject({ targetReps: 12, targetWeight: 25 });
+    expect(nextSetAfter(undefined, true)).toMatchObject({ targetReps: null, targetWeight: null });
+    expect(nextSetAfter(legacy, true).id).not.toBe(legacy.id);
   });
 });
 
@@ -519,9 +694,9 @@ describe("carrying numbers across weeks", () => {
   it("bases the progression hint on the last normal week, against that session's targets", () => {
     const normal = session("2026-11-23", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12, 12)] }]);
     const deload = session("2026-11-30", [{ exerciseId: 10, measure: "reps", sets: [set(40, 12, 12)] }]);
-    expect(accessoryHint(10, "2026-12-07", [normal, deload], 5)?.suggestedWeight).toBe(55);
+    expect(accessoryHint(10, "2026-12-07", [normal, deload], 5, W)?.suggestedWeight).toBe(55);
     const short = session("2026-11-23", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12, 11)] }]);
-    expect(accessoryHint(10, "2026-12-07", [short, deload], 5)).toMatchObject({ kind: "hold", suggestedWeight: 50 });
+    expect(accessoryHint(10, "2026-12-07", [short, deload], 5, W)).toMatchObject({ kind: "hold", suggestedWeight: 50 });
   });
 });
 

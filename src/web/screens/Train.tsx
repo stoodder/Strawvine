@@ -26,14 +26,19 @@ import {
   blankSet,
   buildSession,
   buildSessionFrom,
+  effectiveTargetWeight,
   isSessionStarted,
   isWeighted,
+  logAtTargets,
+  needsLoadBeforeLogging,
   newId,
+  nextSetAfter,
   planChanged,
   sessionCounts,
   sessionDoneEarly,
   sessionVolume,
   setsForAddedExercise,
+  shownLoad,
   targetsMetPhrase,
 } from "../../shared/session";
 import { useDockHeight, useDockTop } from "../components/Dock";
@@ -90,9 +95,8 @@ const PREVIEW_DAYS = 14;
 
 /** A set still to do that "log as planned" may fill in (an AMRAP needs its real rep count). */
 const loggable = (s: SetEntry) => !s.done && !s.amrap;
-/** Mark a set done at its targets. */
-const logAsPlanned = (s: SetEntry): SetEntry =>
-  loggable(s) ? { ...s, done: true, reps: s.reps ?? s.targetReps, weight: s.weight ?? s.targetWeight } : s;
+/** Mark a set done at its targets (an unweighted exercise's without a load). */
+const logAsPlanned = (s: SetEntry, weighted: boolean): SetEntry => (loggable(s) ? logAtTargets(s, weighted) : s);
 const lb = (v: number) => fmt(v, v % 1 ? 1 : 0);
 /**
  * A finished session stays consistent with its sets: once nothing is logged in it any more (an
@@ -211,6 +215,8 @@ export function TrainScreen() {
   const exName = (id: number) => exById(id)?.name ?? "Exercise";
   /** Whether an exercise tracks a load (an unknown one does). */
   const exWeighted = (id: number) => isWeighted(exById(id));
+  /** Whether a block's exercise logs a load: the main lift always does. */
+  const loadedIn = (block: Pick<Block, "kind">, exerciseId: number) => block.kind === "primary" || exWeighted(exerciseId);
 
   // --- Undo toasts --------------------------------------------------------------------------
   const lastToast = useRef<number | null>(null);
@@ -312,10 +318,12 @@ export function TrainScreen() {
     const found = findSet(session, ref);
     if (!found || found.block.skipped) return;
     if (found.set.amrap && !found.set.done) return setAmrap(ref);
+    const weighted = loadedIn(found.block, found.ex.exerciseId);
+    // A weighted accessory set with no load yet: a tap would log it without one, so the set
+    // editor opens to set the load first.
+    if (found.block.kind === "accessory" && needsLoadBeforeLogging(found.set, weighted)) return setEditing(ref);
     const logging = !found.set.done;
-    const next = mapSet(session, ref, (x) =>
-      x.done ? { ...x, done: false } : { ...x, done: true, reps: x.reps ?? x.targetReps, weight: x.weight ?? x.targetWeight },
-    );
+    const next = mapSet(session, ref, (x) => (x.done ? { ...x, done: false } : logAtTargets(x, weighted)));
     tick();
     // A main-lift set gets no undo toast: tapping the row again unlogs it, and the toast would sit
     // in the dock right over the next set. Accessory chips are small and dense, so they keep a
@@ -528,15 +536,9 @@ export function TrainScreen() {
     return ids;
   }, [data.sessions]);
 
-  /** Prefill new exercise from the last time it was performed. */
-  const lastSets = (exerciseId: number): SetEntry[] | null => {
-    for (const s of [...data.sessions].filter((x) => x.date < date).sort((a, b) => (a.date < b.date ? 1 : -1)))
-      for (const b of s.blocks) for (const e of b.exercises) if (e.exerciseId === exerciseId && e.sets.length) return e.sets;
-    return null;
-  };
-
   const addExercise = (ex: Exercise) => {
-    const sets = setsForAddedExercise(lastSets(ex.id), ex.measure, isWeighted(ex));
+    // Pre-filled from the last time it was done, as this session's own pre-fill would carry it.
+    const sets = setsForAddedExercise(ex, session, data);
     const item = { exerciseId: ex.id, measure: ex.measure, sets };
     if (adding?.mode === "pair") commit(mapBlock(session, adding.blockId, (b) => ({ ...b, exercises: [...b.exercises, item] })));
     else commit({ ...session, blocks: [...session.blocks, { id: newId(), kind: "accessory", exercises: [item] }] });
@@ -550,7 +552,8 @@ export function TrainScreen() {
     const logEx = (e: BlockExercise): BlockExercise => {
       if (e.skipped) return e;
       n += e.sets.filter(loggable).length;
-      return { ...e, sets: e.sets.map(logAsPlanned) };
+      const weighted = exWeighted(e.exerciseId);
+      return { ...e, sets: e.sets.map((x) => logAsPlanned(x, weighted)) };
     };
     const next =
       "exIdx" in scope
@@ -585,7 +588,8 @@ export function TrainScreen() {
         const i = e.skipped ? -1 : e.sets.findIndex(loggable);
         if (i === -1) return e;
         n++;
-        return { ...e, sets: e.sets.map((x, j) => (j === i ? logAsPlanned(x) : x)) };
+        const weighted = exWeighted(e.exerciseId);
+        return { ...e, sets: e.sets.map((x, j) => (j === i ? logAsPlanned(x, weighted) : x)) };
       }),
     }));
     if (!n) return;
@@ -632,10 +636,7 @@ export function TrainScreen() {
     commit(
       mapExercise(session, ref, (x) => {
         if (x.sets.length >= MAX_SETS) return x;
-        const last = x.sets[x.sets.length - 1];
-        // An unweighted exercise's new set has no load, even next to an old set that has one.
-        const targetWeight = exWeighted(x.exerciseId) ? (last?.weight ?? last?.targetWeight ?? null) : null;
-        return { ...x, sets: [...x.sets, blankSet({ targetReps: last?.reps ?? last?.targetReps ?? null, targetWeight })] };
+        return { ...x, sets: [...x.sets, nextSetAfter(x.sets[x.sets.length - 1], exWeighted(x.exerciseId))] };
       }),
     );
 
@@ -661,7 +662,8 @@ export function TrainScreen() {
   const nextUp = isPreview || session.completedAt || (!lastLogged && !isSessionStarted(session)) ? null : nextOpenSet(session, lastLogged);
   const nextIsBarbell =
     !!nextUp && nextUp.ex.measure === "reps" && (nextUp.block.kind === "primary" || exById(nextUp.ex.exerciseId)?.category === "primary");
-  const nextWeightLb = nextUp?.set.targetWeight ?? null;
+  // An unweighted exercise's next set has no load to show, whatever target it still holds.
+  const nextWeightLb = nextUp ? effectiveTargetWeight(nextUp.set, loadedIn(nextUp.block, nextUp.ex.exerciseId)) : null;
 
   /**
    * While resting, the next set stays clear of the dock: when the dock grows over it after the
@@ -1564,7 +1566,7 @@ export function TrainScreen() {
                   const unit = measureUnit(actionsEx.measure);
                   const weighted = exWeighted(actionsEx.exerciseId);
                   const reps = s.done ? s.reps : s.targetReps;
-                  const weight = s.done ? s.weight : s.targetWeight;
+                  const weight = shownLoad(s, weighted);
                   return (
                     <li key={s.id} className="flex items-center gap-2">
                       <button

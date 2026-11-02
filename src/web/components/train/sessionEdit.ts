@@ -3,6 +3,7 @@
  * helpers only (no training formulas): the plan itself comes from src/shared.
  */
 import type { Block, BlockExercise, Measure, Session, SetEntry } from "../../../shared/schemas";
+import { shownLoad } from "../../../shared/session";
 
 export type SetRef = { blockId: string; exIdx: number; setId: string };
 export type ExRef = { blockId: string; exIdx: number };
@@ -76,11 +77,12 @@ export function unitWord(m: Measure, n: number | null): string {
 /**
  * "10 reps at 50 lb", "30 seconds at 25 lb" — the spoken form of a set. A set of a weighted
  * exercise without a load yet says so ("10 reps (no load)"); otherwise a load is only mentioned
- * when there is one.
+ * when there is one. When `weighted` is given, the load is the one the set shows (`shownLoad`): an
+ * unweighted exercise's open set mentions no target load; without it (the main lift), any load.
  */
-export function describeSet(s: SetEntry, m: Measure, weighted = false): string {
+export function describeSet(s: SetEntry, m: Measure, weighted?: boolean): string {
   const reps = shownReps(s);
-  const weight = shownWeight(s);
+  const weight = weighted === undefined ? shownWeight(s) : shownLoad(s, weighted);
   const load = weight ? ` at ${weight} lb` : weighted ? " (no load)" : "";
   return `${reps ?? "no target"} ${reps === null ? "" : unitWord(m, reps)}${load}`.replace(/\s+/g, " ").trim();
 }
