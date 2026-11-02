@@ -43,6 +43,13 @@
       "when": 1793620694169,
       "tag": "0005_exercise_weighted",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793623221133,
+      "tag": "0006_exercise_weighted_backfill",
+      "breakpoints": true
     }
   ]
 }

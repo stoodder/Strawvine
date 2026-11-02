@@ -50,7 +50,7 @@ import {
 import { buildExport, toDay, toExercise, toMax } from "./backup";
 import type { Db } from "./db/client";
 import { dayLogs, exercises, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
-import { forgetMaxCreate, idempotency, type Tx } from "./idempotency";
+import { exerciseCreateHashes, forgetMaxCreate, idempotency, type Tx } from "./idempotency";
 
 export interface AppOptions {
   db: Db;
@@ -647,9 +647,12 @@ export function createApp(opts: AppOptions) {
   api.post("/exercises", async (c) => {
     const parsed = exerciseCreateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
+    // Hashed without `weighted` unless it is false; a retry matches whether or not the first attempt
+    // carried the flag (windows on different builds share a queued create, see exerciseCreateHashes).
+    const hashes = exerciseCreateHashes(parsed.data);
     return idempotent(
       c,
-      { path: "/api/exercises", body: parsed.data },
+      { path: "/api/exercises", body: hashes.body, alsoMatches: hashes.alsoMatches },
       async (tx) => {
         // A create that doesn't say is weighted (see exerciseCreateSchema).
         const [row] = await tx

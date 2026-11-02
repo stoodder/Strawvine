@@ -10,7 +10,7 @@ vi.mock("../components/Toast", () => ({ showToast: vi.fn(() => 0) }));
 type Sync = typeof import("./sync");
 type Reply = { status: number; body?: unknown };
 
-let calls: Array<{ method: string; path: string; headers: Record<string, string> }> = [];
+let calls: Array<{ method: string; path: string; headers: Record<string, string>; body?: unknown }> = [];
 let replies: Array<Reply | ((path: string) => Reply)> = [];
 
 async function load(): Promise<Sync> {
@@ -26,7 +26,12 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (url: string, init: RequestInit = {}) => {
       const path = url.replace(/^\/api/, "");
-      calls.push({ method: init.method ?? "GET", path, headers: { ...(init.headers as Record<string, string>) } });
+      calls.push({
+        method: init.method ?? "GET",
+        path,
+        headers: { ...(init.headers as Record<string, string>) },
+        body: init.body ? JSON.parse(init.body as string) : undefined,
+      });
       const next = replies.shift() ?? { status: 200, body: { ok: true } };
       const r = typeof next === "function" ? next(path) : next;
       return new Response(r.body === undefined ? "" : JSON.stringify(r.body), { status: r.status });
@@ -71,6 +76,70 @@ describe("idempotent creates", () => {
     await sync.initSync();
     await sync.syncNow();
     expect(calls.find((c) => c.path === "/exercises")?.headers["Idempotency-Key"]).toMatch(/^[A-Za-z0-9._:-]{8,80}$/);
+  });
+});
+
+describe("weighted exercise creates sent by a window on an older build", () => {
+  // That build drops `weighted` from a create this window queued, so the server saves it weighted.
+  const ackedElsewhere = () =>
+    JSON.stringify({
+      entries: [
+        {
+          seq: 1,
+          rev: 1,
+          op: { ...exercise, weighted: false, idemKey: "key-older-build-1" },
+          state: "acked",
+          result: { ...savedExercise, weighted: true },
+          ackNo: 1,
+        },
+      ],
+      nextSeq: 2,
+      nextAck: 2,
+      nextTemp: -2,
+      tempMap: { "-1": 42 },
+    });
+  const patches = () => calls.filter((c) => c.method === "PATCH").map((c) => [c.path, c.body]);
+
+  it("sends a weighted create without the flag, an unweighted one with it", async () => {
+    const sync = await load();
+    replies = [
+      { status: 201, body: { ...savedExercise, weighted: true } },
+      { status: 201, body: { ...savedExercise, id: 43, weighted: false } },
+    ];
+    sync.enqueue({ ...exercise, tempId: sync.takeTempId(), weighted: true });
+    sync.enqueue({ ...exercise, tempId: sync.takeTempId(), weighted: false });
+    await vi.waitFor(() => expect(calls.filter((c) => c.path === "/exercises")).toHaveLength(2));
+    const posts = calls.filter((c) => c.path === "/exercises");
+    expect(posts.map((c) => (c.body as { weighted?: boolean }).weighted)).toEqual([undefined, false]);
+    await sync.syncNow();
+    expect(patches()).toEqual([]);
+  });
+
+  it("turns the flag off when the other window's ack arrives", async () => {
+    localStorage.setItem("strawvine:signed-in", "1");
+    const sync = await load();
+    await sync.initSync();
+    replies = [{ status: 200, body: { ...savedExercise, weighted: false } }];
+    localStorage.setItem("strawvine:outbox", ackedElsewhere());
+    window.dispatchEvent(new StorageEvent("storage", { key: "strawvine:outbox", storageArea: localStorage }));
+    await sync.syncNow();
+    await vi.waitFor(() => expect(patches()).toEqual([["/exercises/42", { weighted: false }]]));
+    // Queued once, and every window sees it queued.
+    const stored = JSON.parse(localStorage.getItem("strawvine:outbox")!) as { entries: Array<{ weightedFix?: boolean }> };
+    expect(stored.entries[0]!.weightedFix).toBe(true);
+    window.dispatchEvent(new StorageEvent("storage", { key: "strawvine:outbox", storageArea: localStorage }));
+    await sync.syncNow();
+    expect(patches()).toHaveLength(1);
+  });
+
+  it("and when it's found on load", async () => {
+    localStorage.setItem("strawvine:signed-in", "1");
+    localStorage.setItem("strawvine:outbox", ackedElsewhere());
+    const sync = await load();
+    replies = [{ status: 200, body: { ...savedExercise, weighted: false } }];
+    await sync.initSync();
+    await sync.syncNow();
+    await vi.waitFor(() => expect(patches()).toEqual([["/exercises/42", { weighted: false }]]));
   });
 });
 

@@ -100,6 +100,8 @@ export interface Entry {
   srev?: string | null;
   /** Of an acked write: the dataset version before and after it (`x-dataset-etag-prev` / `x-dataset-etag`). */
   etags?: AckEtags;
+  /** Of an acked exercise create: its `weighted: false` follow-up is queued (see `queueWeightedFixes`). */
+  weightedFix?: boolean;
 }
 
 export interface AckEtags {
@@ -373,6 +375,41 @@ export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 
   }
   entries.push({ seq: withTab(s.nextSeq, tab), op, state: "pending" });
   return { ...s, entries, nextSeq: s.nextSeq + 1, ...(dropped.length ? { removed: tombstone(s, dropped) } : {}) };
+}
+
+/**
+ * Follow-ups for exercise creates the server saved weighted although they asked for unweighted:
+ * windows share the outbox, and one running a build from before the flag sends a create another
+ * window queued without the flag (the server then stores the default, weighted), or a retry
+ * replays such a first attempt. For each acked create like that, queues `updateExercise
+ * {weighted: false}` for the saved row (any build sends a patch as it is) and marks the entry
+ * (`weightedFix`) so it's queued once — unless an unsent patch of that exercise already sets the
+ * flag (a later choice). Returns the same state when there is nothing to do.
+ */
+export function queueWeightedFixes(s: OutboxState, inflight: number | null, tab = 0): OutboxState {
+  const due = s.entries.filter(
+    (e) =>
+      e.state === "acked" &&
+      !e.weightedFix &&
+      e.op.kind === "createExercise" &&
+      e.op.weighted === false &&
+      typeof (e.result as Exercise | null)?.id === "number" &&
+      (e.result as Exercise).weighted === true,
+  );
+  if (!due.length) return s;
+  const marked = new Set(due.map((e) => e.seq));
+  let next: OutboxState = {
+    ...s,
+    entries: s.entries.map((e) => (marked.has(e.seq) ? { ...e, weightedFix: true, rev: bump(e) } : e)),
+  };
+  for (const e of due) {
+    const id = (e.result as Exercise).id;
+    const decided = s.entries.some(
+      (x) => x.state !== "acked" && x.op.kind === "updateExercise" && x.op.id === id && x.op.patch.weighted !== undefined,
+    );
+    if (!decided) next = addOp(next, { kind: "updateExercise", id, patch: { weighted: false } }, inflight, tab);
+  }
+  return next;
 }
 
 /** A workout delete with nothing to delete on the server (see `addOp`): settled without a request. */
@@ -1024,14 +1061,15 @@ export function request(op: Op): OpRequest {
       return {
         method: "POST",
         path: "/exercises",
-        // `weighted` only when the op has it: a create queued before the flag existed is sent (and
-        // hashed for its Idempotency-Key) exactly as it was.
+        // `weighted` only when it turns the flag off (absent = weighted): a weighted create is sent
+        // exactly as builds and servers from before the flag send and accept it — so a server rolled
+        // back to one of them still takes it — and a create queued before the flag is sent as it was.
         body: {
           name: op.name,
           category: op.category,
           measure: op.measure,
           tracksMax: op.tracksMax,
-          ...(op.weighted === undefined ? {} : { weighted: op.weighted }),
+          ...(op.weighted === false ? { weighted: false } : {}),
         },
         headers: idemHeaders(op),
       };

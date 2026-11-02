@@ -16,6 +16,7 @@ import {
   overlay,
   pendingDates,
   pruneAcked,
+  queueWeightedFixes,
   request,
   retryFailed,
   validateOp,
@@ -159,10 +160,79 @@ describe("weighted exercises", () => {
     expect(overlay(boot(), s.entries, {}).exercises.at(-1)).toMatchObject({ id: -1, measure: "seconds", weighted: false });
   });
 
+  it("sends a weighted create without the flag, as builds and servers from before it do", () => {
+    const s = addOp(emptyOutbox(), { ...create, weighted: true }, null);
+    expect(request(s.entries[0]!.op).body).toEqual({ name: "Dead hang", category: "accessory", measure: "seconds", tracksMax: false });
+    expect(overlay(boot(), s.entries, {}).exercises.at(-1)).toMatchObject({ id: -1, weighted: true });
+  });
+
   it("sends a create queued before the flag existed as it was (same idempotency hash), shown as weighted", () => {
     const s = addOp(emptyOutbox(), create, null);
     expect(request(s.entries[0]!.op).body).toEqual({ name: "Dead hang", category: "accessory", measure: "seconds", tracksMax: false });
     expect(overlay(boot(), s.entries, {}).exercises.at(-1)).toMatchObject({ id: -1, weighted: true });
+  });
+
+  describe("a create that meant unweighted but was saved weighted (sent by a window on an older build)", () => {
+    const saved = (weighted: boolean | undefined) => ({
+      id: 42,
+      name: "Dead hang",
+      category: "accessory",
+      measure: "seconds",
+      tracksMax: false,
+      archived: false,
+      ...(weighted === undefined ? {} : { weighted }),
+    });
+    /** A create queued with `weighted` (or without it: "absent"), acked with `result`. */
+    const acked = (result: unknown, weighted: boolean | "absent" = false) => {
+      const s = addOp(emptyOutbox(), { ...create, ...(weighted === "absent" ? {} : { weighted }) }, null);
+      return ackEntry(s, s.entries[0]!.seq, result);
+    };
+
+    it("queues a patch turning it off for the saved row, once", () => {
+      const s = queueWeightedFixes(acked(saved(true)), null);
+      expect(s.entries.map((e) => [e.state, e.op.kind])).toEqual([
+        ["acked", "createExercise"],
+        ["pending", "updateExercise"],
+      ]);
+      const fix = s.entries[1]!;
+      expect(request(fix.op)).toEqual({ method: "PATCH", path: "/exercises/42", body: { weighted: false } });
+      expect(nextSendable(s.entries)).toBe(fix);
+      // Shown unweighted all along: the server's row, with the queued patch on top.
+      expect(overlay(applyAcked(boot(), s.entries), s.entries, {}).exercises.at(-1)).toMatchObject({ id: 42, weighted: false });
+      expect(queueWeightedFixes(s, null)).toBe(s);
+      // Another window's copy carries the mark too (the acked entry's rev moved).
+      const other = mergeOutbox(acked(saved(true)), s);
+      expect(queueWeightedFixes(other, null).entries).toHaveLength(2);
+    });
+
+    it("leaves creates the server saved as asked, weighted ones, and failed or pending ones alone", () => {
+      for (const s of [
+        acked(saved(false)),
+        acked(saved(true), true),
+        acked(saved(true), "absent"),
+        acked(saved(undefined)), // a server from before the flag: nothing to patch there
+        acked(null),
+        addOp(emptyOutbox(), { ...create, weighted: false }, null),
+      ])
+        expect(queueWeightedFixes(s, null)).toBe(s);
+    });
+
+    it("doesn't override a later choice of the flag already queued", () => {
+      const s = addOp(acked(saved(true)), { kind: "updateExercise", id: 42, patch: { weighted: true } }, null);
+      const fixed = queueWeightedFixes(s, null);
+      expect(fixed.entries.filter((e) => e.op.kind === "updateExercise").map((e) => e.op)).toEqual([
+        { kind: "updateExercise", id: 42, patch: { weighted: true } },
+      ]);
+      expect(queueWeightedFixes(fixed, null)).toBe(fixed);
+    });
+
+    it("merges into an unsent rename of the exercise", () => {
+      const s = addOp(acked(saved(true)), { kind: "updateExercise", id: 42, patch: { name: "Hang" } }, null);
+      const fixed = queueWeightedFixes(s, null);
+      expect(fixed.entries.filter((e) => e.state === "pending").map((e) => e.op)).toEqual([
+        { kind: "updateExercise", id: 42, patch: { name: "Hang", weighted: false } },
+      ]);
+    });
   });
 
   it("patches the flag like any other exercise field", () => {

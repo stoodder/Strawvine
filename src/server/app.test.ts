@@ -10,7 +10,7 @@ import { clampCreatedAt, createApp, LOGIN_BODY_LIMIT_BYTES } from "./app";
 import { deriveSessionKey, makeToken, MAX_AGE_S, RENEW_BELOW_S } from "./auth";
 import { buildExport, restoreExport, RestoreError } from "./backup";
 import { createDb, MigrationLockTimeout, runMigrations, withMigrationLock } from "./db/client";
-import { pruneIdempotencyKeys } from "./idempotency";
+import { pruneIdempotencyKeys, requestHash } from "./idempotency";
 import { ensureSeeded, prepareDatabase } from "./seed";
 import { assertDisposableDatabase } from "./testDb";
 
@@ -265,6 +265,54 @@ describe("idempotent creates", () => {
     expect(retry.headers.get("idempotent-replayed")).toBe("true");
     const other = await req("/api/exercises", withKey("key-body-0001", { name: "Seated row" }));
     expect(other.status).toBe(422);
+  });
+
+  it("replays an exercise create retried with or without the weighted flag the first attempt had", async () => {
+    // Windows on different builds share one queued create: a build from before the flag sends it
+    // without `weighted` (the response is lost), a newer one retries it with the flag.
+    const before = await count("exercises");
+    const base = { name: "Hollow rock", category: "core", measure: "seconds", tracksMax: false };
+    const first = await req("/api/exercises", withKey("key-weighted-0001", base));
+    expect(first.status).toBe(201);
+    const created = await first.json();
+    expect(created).toMatchObject({ weighted: true });
+    for (const weighted of [true, false]) {
+      const retry = await req("/api/exercises", withKey("key-weighted-0001", { ...base, weighted }));
+      expect(retry.status, String(weighted)).toBe(201);
+      expect(retry.headers.get("idempotent-replayed")).toBe("true");
+      // The first response, as stored (a create that meant unweighted is patched by the client).
+      expect(await retry.json()).toEqual(created);
+    }
+    // And the other way round: sent unweighted by a newer build, retried by an older one.
+    const unweighted = await (
+      await req("/api/exercises", withKey("key-weighted-0002", { ...base, name: "L-sit", weighted: false }))
+    ).json();
+    expect(unweighted).toMatchObject({ weighted: false });
+    const old = await req("/api/exercises", withKey("key-weighted-0002", { ...base, name: "L-sit" }));
+    expect(old.headers.get("idempotent-replayed")).toBe("true");
+    expect(await old.json()).toEqual(unweighted);
+    expect(await count("exercises")).toBe(before + 2);
+    // Anything else under the key is still another request.
+    expect((await req("/api/exercises", withKey("key-weighted-0001", { ...base, name: "V-up", weighted: true }))).status).toBe(422);
+    expect((await req("/api/exercises", withKey("key-weighted-0001", { ...base, measure: "reps" }))).status).toBe(422);
+  });
+
+  it("replays exercise creates stored by a server from before the weighted flag", async () => {
+    // Hash and response exactly as that server stored them: its parsed body (defaults applied).
+    const oldHash = requestHash({ name: "Kettlebell halo", category: "accessory", tracksMax: false, measure: "reps" });
+    const oldBody = { id: 4242, name: "Kettlebell halo", category: "accessory", tracksMax: false, measure: "reps", archived: false };
+    await db.execute(
+      sql`insert into idempotency_keys (key, method, path, status, body, request_hash)
+          values ('key-pre-weighted-1', 'POST', '/api/exercises', 201, ${JSON.stringify(oldBody)}::jsonb, ${oldHash})`,
+    );
+    const before = await count("exercises");
+    for (const body of [{ name: "Kettlebell halo" }, { name: "Kettlebell halo", weighted: true }]) {
+      const res = await req("/api/exercises", withKey("key-pre-weighted-1", body));
+      expect(res.status, JSON.stringify(body)).toBe(201);
+      expect(res.headers.get("idempotent-replayed")).toBe("true");
+      expect(await res.json()).toEqual(oldBody);
+    }
+    expect(await count("exercises")).toBe(before);
   });
 
   it("forgets the stored create when that max is deleted", async () => {
@@ -753,7 +801,7 @@ describe("export & restore", () => {
     const res = await req("/api/export");
     expect(res.headers.get("content-disposition")).toMatch(/^attachment; filename="strawvine-export-\d{4}-\d{2}-\d{2}\.json"$/);
     const exported = await res.json();
-    expect(exported).toMatchObject({ format: "strawvine-export", version: 2 });
+    expect(exported).toMatchObject({ format: "strawvine-export", version: 3 });
     expect(exported.seenAchievements.map((s: { key: string }) => s.key)).toEqual(["calib-1", "etag-test", "streak-3"]);
     expect(exported.exercises[0].createdAt).toMatch(/Z$/);
     expect(exported.exercises.find((e: { name: string }) => e.name === "Pull-up")).toMatchObject({ weighted: false });
@@ -788,6 +836,20 @@ describe("export & restore", () => {
       })
     ).json();
     expect(created.id).toBe(Math.max(...exported.exercises.map((e: { id: number }) => e.id)) + 1);
+  });
+
+  it("restores a v2 export (before the weighted flag) as weighted, and refuses newer versions", async () => {
+    const current = await buildExport(db);
+    expect(current.version).toBe(3);
+    expect(current.exercises.some((e) => !e.weighted)).toBe(true);
+    const v2 = { ...current, version: 2, exercises: current.exercises.map(({ weighted: _w, ...e }) => e) };
+    await expect(restoreExport(db, { ...current, version: 4 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
+    await restoreExport(db, v2, { force: true });
+    const after = await buildExport(db);
+    expect(after.exercises.map((e) => e.weighted)).toEqual(current.exercises.map(() => true));
+    // Back to the flags as they were, for the test below.
+    await restoreExport(db, current, { force: true });
+    expect((await buildExport(db)).exercises).toEqual(current.exercises);
   });
 
   it("accepts a pre-versioning export and replaces data only with force", async () => {

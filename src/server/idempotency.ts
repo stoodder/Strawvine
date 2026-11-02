@@ -9,7 +9,9 @@
  * (2xx) responses are stored. Keys expire after IDEMPOTENCY_TTL_MS.
  *
  * A stored key remembers the request it answered: method, canonical path and a hash of the
- * canonical parsed body. Reusing a key for anything else is a 422, never a replay.
+ * canonical parsed body. Reusing a key for anything else is a 422, never a replay. A route can
+ * name other bodies a retry of the same request may have been hashed as (`alsoMatches`), e.g.
+ * when windows running different builds share one queued create.
  */
 import { createHash } from "node:crypto";
 import { and, eq, lt, sql } from "drizzle-orm";
@@ -60,6 +62,25 @@ export const requestHash = (body: unknown) =>
     .digest("hex");
 
 /**
+ * The canonical body of an exercise create for its idempotency hash, and the other bodies the same
+ * queued create may have been hashed as. `weighted` is left out unless it is false (absent =
+ * weighted), which also hashes a create without the flag exactly as servers before it did. Builds
+ * from before the flag drop it from a create another window queued, and builds since may send it,
+ * so whichever window sent the first attempt, a retry from another must still replay: a stored
+ * hash of the body with `weighted` true, false or absent all match. (A replay can then disagree
+ * with the retry about the flag; the client patches it, see `queueWeightedFixes` in outbox-core.)
+ */
+export function exerciseCreateHashes<T extends { weighted?: boolean | undefined }>(
+  body: T,
+): { body: Omit<T, "weighted"> | T; alsoMatches: unknown[] } {
+  const { weighted, ...rest } = body;
+  return {
+    body: weighted === false ? body : rest,
+    alsoMatches: [rest, { ...rest, weighted: true }, { ...rest, weighted: false }],
+  };
+}
+
+/**
  * Forgets stored responses that created the max entry `id` (it was deleted), so they can't be
  * replayed as if the row still existed.
  */
@@ -72,8 +93,10 @@ export async function forgetMaxCreate(db: Db | Tx, id: number) {
 export interface IdempotentRequest {
   /** Canonical path of the resource being created (built from parsed parameters, not the raw URL). */
   path: string;
-  /** The parsed, validated body (hashed to tell a retry from a different request). */
+  /** The parsed, validated body (hashed to tell a retry from a different request; stored). */
   body: unknown;
+  /** Other bodies whose stored hash also counts as this request (checked on a replay only). */
+  alsoMatches?: unknown[];
 }
 
 const PRUNE_EVERY_MS = 60 * 60_000;
@@ -147,7 +170,8 @@ export function idempotency(db: Db, onError: (err: unknown) => void = () => {}) 
 
     if ("fresh" in outcome) return c.json(outcome.fresh.body as object, outcome.fresh.status);
     const row = outcome.replay;
-    if (row && (row.method !== method || row.path !== path || (row.requestHash !== null && row.requestHash !== hash)))
+    const sameBody = (stored: string) => stored === hash || (request.alsoMatches ?? []).some((b) => requestHash(b) === stored);
+    if (row && (row.method !== method || row.path !== path || (row.requestHash !== null && !sameBody(row.requestHash))))
       return c.json({ error: `${IDEMPOTENCY_HEADER} was already used for a different request` }, 422);
     if (!row || row.status === 0) return c.json({ error: "A request with this key is still in progress" }, 409);
     c.header("Idempotent-Replayed", "true");

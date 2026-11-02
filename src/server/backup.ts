@@ -35,8 +35,12 @@ import {
 } from "./db/schema";
 
 export const EXPORT_FORMAT = "strawvine-export";
-/** v1: unversioned exports without seen achievements or exercise timestamps. v2: complete. */
-export const EXPORT_VERSION = 2;
+/**
+ * v1: unversioned exports without seen achievements or exercise timestamps. v2: complete.
+ * v3: adds exercises[].weighted (v1/v2 exercises restore as weighted, as everything was then).
+ * A restore refuses versions newer than this one (fields it would silently drop).
+ */
+export const EXPORT_VERSION = 3;
 
 export interface ExportFile {
   format: typeof EXPORT_FORMAT;

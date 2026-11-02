@@ -57,6 +57,7 @@ import {
   overlay,
   pendingDates as pendingDatesOf,
   pruneAcked,
+  queueWeightedFixes,
   removeEntries,
   request,
   resolveConflict,
@@ -238,6 +239,12 @@ function refresh(): boolean {
   const next = mergeOutbox(ob, parseOutbox(raw));
   if (next === ob) return false;
   adopt(next);
+  // A window on an older build may have sent (and got acked) a create that meant unweighted.
+  const fixed = queueWeightedFixes(ob, sendingSeq(), TAB);
+  if (fixed !== ob) {
+    ob = fixed;
+    saveOutbox();
+  }
   return true;
 }
 
@@ -1182,7 +1189,7 @@ function onAcked(e: Entry, result: unknown, meta: AckMeta = {}) {
   const { seq, op } = e;
   const savedId = op.kind === "addMax" && op.markSeenOnAck ? (result as { id?: unknown } | null)?.id : undefined;
   mutate((s) => {
-    const next = { ...ackEntry(s, seq, result, meta), inflight: null };
+    const next = queueWeightedFixes({ ...ackEntry(s, seq, result, meta), inflight: null }, null, TAB);
     // Recorded on the server too; shown seen from this very update (see applyResult).
     return typeof savedId === "number" ? addOp(next, { kind: "seen", keys: [maxSeenKey(savedId)] }, null, TAB) : next;
   });
@@ -1533,8 +1540,9 @@ export async function initSync(): Promise<void> {
   started = true;
   migrateSignedInFlag();
   lastRaw = lsGet(OUTBOX_KEY);
-  ob = parseOutbox(lastRaw);
-  if (lastRaw !== null && JSON.stringify(ob) !== lastRaw) saveOutbox(); // persists idempotency keys given to an older outbox's creates
+  ob = queueWeightedFixes(parseOutbox(lastRaw), null, TAB);
+  // Persists idempotency keys given to an older outbox's creates, and weighted fixes (see refresh).
+  if (lastRaw !== null && JSON.stringify(ob) !== lastRaw) saveOutbox();
   const signedIn = isSignedIn();
   authPaused = !signedIn;
   channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("strawvine") : null;
