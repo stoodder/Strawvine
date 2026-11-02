@@ -1177,7 +1177,7 @@ export function TrainScreen() {
                         return (
                           <div key={exIdx} className={clsx(exIdx > 0 && "mt-5")}>
                             <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
-                              <div className="text-[0.9375rem]">
+                              <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
                                 {tagLabel}
                                 {name}
                               </div>
@@ -1188,7 +1188,7 @@ export function TrainScreen() {
                                   aria-haspopup="dialog"
                                   data-ex={`${b.id}:${exIdx}`}
                                   data-control="options"
-                                  className="tap -mr-3 grid h-11 w-11 place-items-center text-mute"
+                                  className="tap -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
                                   onClick={() => setActions({ ...ref, exerciseId: e.exerciseId })}
                                 >
                                   <MoreHorizontal size={16} />

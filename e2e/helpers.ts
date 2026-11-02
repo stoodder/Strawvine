@@ -1,4 +1,4 @@
-import { test as base, expect, type BrowserContext, type Page } from "@playwright/test";
+import { test as base, expect, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import type { Bootstrap } from "../src/shared/schemas";
 import { seedHistory as seedHistoryVia } from "../scripts/lib/seed-history.mjs";
 
@@ -286,5 +286,67 @@ export async function hideAmbientGlow(page: Page) {
     const sheet = new CSSStyleSheet();
     sheet.replaceSync("body::before { display: none !important; }");
     document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  });
+}
+
+/**
+ * Horizontal overflow, measured without the safety net: html and body clip sideways overflow
+ * (styles.css), which hides what sticks out from `scrollWidth` — so the clip is lifted first.
+ * null when the page fits; otherwise the widths and the first few elements that stick out.
+ */
+export function pageOverflow(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const doc = document.documentElement;
+    if (!doc.hasAttribute("data-overflow-probe")) {
+      doc.setAttribute("data-overflow-probe", "");
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync("html[data-overflow-probe], html[data-overflow-probe] body { overflow-x: visible !important; }");
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    }
+    if (doc.scrollWidth <= doc.clientWidth) return null;
+    const wide = [...document.querySelectorAll<HTMLElement>("body *")]
+      .filter((el) => el.getBoundingClientRect().right > doc.clientWidth + 0.5)
+      .slice(0, 5)
+      .map(
+        (el) =>
+          `${el.tagName.toLowerCase()}.${[...el.classList].slice(0, 4).join(".")} "${(el.textContent ?? "").trim().slice(0, 30)}" → ${Math.round(el.getBoundingClientRect().right)}px`,
+      );
+    return `scrollWidth ${doc.scrollWidth} > clientWidth ${doc.clientWidth}\n    ${wide.join("\n    ")}`;
+  });
+}
+
+/**
+ * Fixed layers (the dock, a sheet) don't widen the page, so the page check can't see them: every
+ * visible element inside `layer` must lie within the viewport, unless an ancestor inside the layer
+ * clips it; and nothing in it may scroll sideways (a sheet's panel scrolls vertically, which makes
+ * it a horizontal scroller as well). Returns what sticks out.
+ */
+export function outsideViewport(layer: Locator): Promise<string[]> {
+  return layer.evaluate((root) => {
+    const vw = document.documentElement.clientWidth;
+    const out: string[] = [];
+    const describe = (el: Element) =>
+      `${el.tagName.toLowerCase()}.${[...el.classList].slice(0, 4).join(".")} "${(el.textContent ?? "").trim().slice(0, 30)}"`;
+    for (const el of [root, ...root.querySelectorAll<HTMLElement>("*")]) {
+      const style = getComputedStyle(el);
+      if ((style.overflowX === "auto" || style.overflowX === "scroll") && el.scrollWidth > el.clientWidth + 1)
+        out.push(`${describe(el)} scrolls sideways: ${el.scrollWidth} > ${el.clientWidth} px`);
+      // The layer itself is a full-width fixed box (on a phone it follows the layout viewport,
+      // which a too-wide page stretches): what matters is what is drawn in it.
+      if (el === root) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || style.visibility === "hidden") continue;
+      if (r.left >= -0.5 && r.right <= vw + 0.5) continue;
+      let clipped = false;
+      for (let a = el.parentElement; a && a !== root.parentElement; a = a.parentElement)
+        if (getComputedStyle(a).overflowX !== "visible") {
+          const ar = a.getBoundingClientRect();
+          if (ar.left >= -0.5 && ar.right <= vw + 0.5) clipped = true;
+          break;
+        }
+      if (!clipped) out.push(`${describe(el)} spans ${Math.round(r.left)}–${Math.round(r.right)}px of ${vw}`);
+      if (out.length >= 5) break;
+    }
+    return out;
   });
 }

@@ -172,7 +172,7 @@ export function FinishPanel({
           )}
         </dl>
         {lines.length > 0 && (
-          <ul className="mt-4 space-y-1 text-sm text-balance">
+          <ul className="mt-4 space-y-1 text-sm text-balance wrap-anywhere">
             {lines.map((l, i) => (
               <motion.li
                 key={i}

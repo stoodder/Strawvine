@@ -124,11 +124,25 @@
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
     background: var(--color-ink-950);
+    /*
+     * Safety net against sideways panning (the layout itself must fit — e2e/13 and e2e/25 measure
+     * with this lifted): whatever still sticks out is clipped, and a horizontal swipe doesn't
+     * rubber-band the page on iOS. `clip`, not `hidden`: hidden makes body a scroll container,
+     * which breaks position: sticky and window scrolling. Body is `relative` so that absolutely
+     * positioned descendants are clipped by it too (with the initial containing block as theirs,
+     * a phone still widens the layout viewport to fit them). Fixed layers (dock, sheets) escape
+     * any clip: they must fit by themselves.
+     */
+    overflow-x: clip;
+    overscroll-behavior-x: none;
   }
   body {
     @apply bg-ink-950 text-fg font-sans antialiased;
+    position: relative;
     min-height: 100dvh;
     font-feature-settings: "cv11", "ss01";
+    overflow-x: clip;
+    overscroll-behavior-x: none;
     overscroll-behavior-y: none;
   }
   /* Ambient glow painted once at the top of the page (not fixed: fixed backgrounds cause

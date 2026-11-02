@@ -211,10 +211,10 @@ export function Celebrations() {
               <div id={tierId} className="label mb-3" style={{ color }}>
                 {TIER_LABEL[shown.tier]}
               </div>
-              <h2 id={titleId} className={clsx("text-4xl font-light tracking-tight", gold ? "glow-gold text-gold" : "glow")}>
+              <h2 id={titleId} className={clsx("text-4xl font-light tracking-tight wrap-anywhere", gold ? "glow-gold text-gold" : "glow")}>
                 {shown.title}
               </h2>
-              <p id={detailId} className="mx-auto mt-3 max-w-xs text-sm leading-relaxed text-fg-2">
+              <p id={detailId} className="mx-auto mt-3 max-w-xs text-sm leading-relaxed text-fg-2 wrap-anywhere">
                 {shown.detail}
               </p>
               <button

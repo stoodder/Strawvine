@@ -3,54 +3,8 @@
  * phone, no screen may scroll sideways — including Train with the dock full (rest timer + a
  * toast) and with its sheets open. Monday of week 1, so Train shows a full session with plates.
  */
-import type { Locator, Page } from "@playwright/test";
-import { expect, MONDAY, notifications, onboardedOn, test } from "./helpers";
-
-/** null when the page fits; otherwise the widths and the first few elements that stick out. */
-const overflow = (page: Page) =>
-  page.evaluate(() => {
-    const doc = document.documentElement;
-    if (doc.scrollWidth <= doc.clientWidth) return null;
-    const wide = [...document.querySelectorAll<HTMLElement>("body *")]
-      .filter((el) => el.getBoundingClientRect().right > doc.clientWidth + 0.5)
-      .slice(0, 5)
-      .map(
-        (el) =>
-          `${el.tagName.toLowerCase()}.${[...el.classList].slice(0, 4).join(".")} → ${Math.round(el.getBoundingClientRect().right)}px`,
-      );
-    return `scrollWidth ${doc.scrollWidth} > clientWidth ${doc.clientWidth}\n    ${wide.join("\n    ")}`;
-  });
-
-/**
- * Fixed layers (the dock, a sheet) don't widen the page, so the page check can't see them: every
- * visible element inside `layer` must lie within the viewport, unless an ancestor inside the layer
- * clips it (a deliberate horizontal scroller). Returns what sticks out.
- */
-const outside = (layer: Locator) =>
-  layer.evaluate((root) => {
-    const vw = document.documentElement.clientWidth;
-    const out: string[] = [];
-    // The layer itself is a full-width fixed box (on a phone it follows the layout viewport, which
-    // a too-wide page stretches): what matters is what is drawn in it.
-    for (const el of root.querySelectorAll<HTMLElement>("*")) {
-      const r = el.getBoundingClientRect();
-      if (r.width === 0 || r.height === 0 || getComputedStyle(el).visibility === "hidden") continue;
-      if (r.left >= -0.5 && r.right <= vw + 0.5) continue;
-      let clipped = false;
-      for (let a = el.parentElement; a && a !== root.parentElement; a = a.parentElement)
-        if (getComputedStyle(a).overflowX !== "visible") {
-          const ar = a.getBoundingClientRect();
-          if (ar.left >= -0.5 && ar.right <= vw + 0.5) clipped = true;
-          break;
-        }
-      if (!clipped)
-        out.push(
-          `${el.tagName.toLowerCase()}.${[...el.classList].slice(0, 4).join(".")} "${(el.textContent ?? "").trim().slice(0, 30)}" spans ${Math.round(r.left)}–${Math.round(r.right)}px of ${vw}`,
-        );
-      if (out.length >= 5) break;
-    }
-    return out;
-  });
+import type { Page } from "@playwright/test";
+import { expect, MONDAY, notifications, onboardedOn, outsideViewport as outside, pageOverflow as overflow, test } from "./helpers";
 
 const dock = (page: Page) => page.locator("[data-dock]");
 

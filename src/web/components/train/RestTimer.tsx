@@ -211,7 +211,7 @@ export function RestTimer({
           <motion.div
             role="group"
             aria-label="Rest timer"
-            className="hc-edge pointer-events-auto relative mx-auto flex w-fit max-w-[calc(100vw-2rem)] items-center overflow-hidden rounded-full bg-ink-800/90 text-sm shadow-lg ring-1 ring-white/[0.06] backdrop-blur-xl"
+            className="hc-edge pointer-events-auto relative mx-auto flex w-fit max-w-full items-center overflow-hidden rounded-full bg-ink-800/90 text-sm shadow-lg ring-1 ring-white/[0.06] backdrop-blur-xl"
             initial={{ y: 20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             transition={{ type: "spring", stiffness: 420, damping: 34 }}

@@ -137,7 +137,7 @@ export function AddExerciseSheet({
 
       {q.trim() && !exact && (
         <div className="mt-5 rounded-2xl bg-accent/[0.06] p-4 ring-1 ring-accent/20">
-          <div className="text-sm">
+          <div className="text-sm wrap-anywhere">
             Create <span className="text-accent">“{q.trim()}”</span>
           </div>
           <div className="label mt-3 mb-1.5" id="new-ex-category">
@@ -214,7 +214,7 @@ export function AddExerciseSheet({
                 setQ("");
               }}
             >
-              <span className="min-w-0 text-[0.9375rem]">{e.name}</span>
+              <span className="min-w-0 text-[0.9375rem] wrap-anywhere">{e.name}</span>
               <span className="label ml-auto text-right">{exerciseTag(e)}</span>
             </button>
           </li>

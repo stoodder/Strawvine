@@ -134,7 +134,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               )}
             >
               {/* The older of two toasts gives way to one line when the viewport is short (landscape, zoomed in). */}
-              <span className={clsx("min-w-0 flex-1", i < items.length - 1 && "[@media(max-height:30rem)]:line-clamp-1")}>{t.message}</span>
+              <span className={clsx("min-w-0 flex-1 wrap-anywhere", i < items.length - 1 && "[@media(max-height:30rem)]:line-clamp-1")}>{t.message}</span>
               {t.action && (
                 <button
                   type="button"
