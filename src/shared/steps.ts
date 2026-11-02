@@ -14,6 +14,11 @@ export interface StepsDay {
   steps: number | null;
   /** Weighted 7-day average of the counts ending this day (null when none of them is logged). */
   avgSteps: number | null;
+  /**
+   * The count is today's, still in progress ("so far"): shown apart from complete days — not in
+   * the trend, the chart's scale or its weekly means (SPEC §3.2).
+   */
+  partial: boolean;
 }
 
 /**
@@ -48,6 +53,7 @@ export function computeStepsSeries(
       steps: byDate.get(date) ?? null,
       // `weightedAverage` wants the most recent day first.
       avgSteps: inProgress ? null : weightedAverage([...window].reverse()),
+      partial: date === today && byDate.has(date),
     });
   }
   return out;

@@ -85,6 +85,47 @@ describe("Sheet", () => {
     );
     expect(root().inert).toBe(false);
   });
+
+  it("pins the page at its scroll position while open and restores body's own styles after", () => {
+    const body = document.body;
+    body.style.overflow = "auto"; // a value of its own, to be put back
+    Object.defineProperty(window, "scrollY", { value: 640, configurable: true });
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const sheets = (a: boolean, b: boolean) => (
+      <>
+        <Sheet open={a} onClose={() => {}} ariaLabel="A">
+          <button type="button">a</button>
+        </Sheet>
+        <Sheet open={b} onClose={() => {}} ariaLabel="B">
+          <button type="button">b</button>
+        </Sheet>
+      </>
+    );
+    try {
+      const { rerender } = render(sheets(true, false), { container: root() });
+      expect(body.style.position).toBe("fixed");
+      expect(body.style.top).toBe("-640px");
+      expect(body.style.overflow).toBe("hidden");
+      expect(document.documentElement.hasAttribute("data-scroll-locked")).toBe(true);
+      // A second sheet over the first: still pinned at the same place; closing one keeps it.
+      rerender(sheets(true, true));
+      rerender(sheets(false, true));
+      expect(body.style.top).toBe("-640px");
+      // Pinned, the page reads scrollY 0; on unlock it goes back to 640.
+      Object.defineProperty(window, "scrollY", { value: 0, configurable: true });
+      rerender(sheets(false, false));
+      expect(body.style.position).toBe("");
+      expect(body.style.top).toBe("");
+      expect(body.style.overflow).toBe("auto");
+      expect(document.documentElement.hasAttribute("data-scroll-locked")).toBe(false);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect(scrollTo).toHaveBeenCalledWith(0, 640);
+    } finally {
+      scrollTo.mockRestore();
+      Object.defineProperty(window, "scrollY", { value: 0, configurable: true });
+      body.style.overflow = "";
+    }
+  });
 });
 
 function StepperHarness({ onChange, initial = 100 }: { onChange: (v: number) => void; initial?: number }) {

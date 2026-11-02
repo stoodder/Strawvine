@@ -32,7 +32,10 @@ function collectInPage({ targets, within }) {
     for (let e = el; e; e = e.parentElement) {
       const s = getComputedStyle(e);
       if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return false;
-      // Visually hidden (sr-only: a 1 px clipped box) — read by screen readers, never seen.
+      // Visually hidden (sr-only: a 1 px clipped box) — read by screen readers, never seen. Not
+      // asked of <html>: while a sheet pins the page (body position: fixed) it has no in-flow
+      // content, so it is 0 px tall, and it clips sideways — yet everything in it shows.
+      if (e === document.documentElement) continue;
       const r = e.getBoundingClientRect();
       if ((r.width <= 1 || r.height <= 1) && (s.overflow !== "visible" || s.clip !== "auto" || s.clipPath !== "none")) return false;
     }
@@ -213,8 +216,11 @@ const HIDE_TEXT = `
  */
 export async function measureTextContrast(page, { targets, within, highContrast = false } = {}) {
   const viewport = page.viewportSize();
-  // Lay the whole page out in one viewport, so one screenshot covers every text box.
-  const height = await page.evaluate(() => Math.max(document.documentElement.scrollHeight, window.innerHeight));
+  // Lay the whole page out in one viewport, so one screenshot covers every text box. With a sheet
+  // open the page is pinned (body position: fixed, ui.tsx `lockPage`) and the document reports no
+  // scroll height, so body's own height counts too: the viewport still grows enough for a sheet's
+  // panel (a share of the viewport tall) to show all of its content.
+  const height = await page.evaluate(() => Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, window.innerHeight));
   if (viewport && height > viewport.height) await page.setViewportSize({ width: viewport.width, height: Math.min(height, 12_000) });
   try {
     await page.evaluate(() => window.scrollTo(0, 0));

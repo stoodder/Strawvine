@@ -153,21 +153,53 @@ export function CheckDot({
   );
 }
 
+type SeverityToken = "accent" | "caution" | "warn";
+
 /**
- * The over-target colour for a 0…1 severity (`overTargetSeverity`): lime at 0, caution yellow at
- * 0.5, warn red at 1, mixed in OKLCH in between so the hue walks lime → yellow → coral without a
+ * Where a 0…1 severity (`overTargetSeverity`) sits on the over-target scale: the two tokens it
+ * mixes and how far (0…1) toward the second. Monotonic, in two legs (SPEC §3.1):
+ *
+ * - 0: pure accent lime (on target).
+ * - (0, 0.5]: accent → caution, starting **halfway** (0.5 + s): anything past the tolerance is
+ *   already visibly off-lime (OKLCH hue ≈ 117° against lime's 129°), reaching caution yellow
+ *   (≈ 105°) at 0.5. A plain 2·s mix would be lime to the eye just past the tolerance.
+ * - (0.5, 1]: caution → warn, linear (2·(s − 0.5)), warn red at 1.
+ */
+export function severityMix(severity: number): { from: SeverityToken; to: SeverityToken; t: number } {
+  const s = Math.max(0, Math.min(1, severity || 0));
+  if (s === 0) return { from: "accent", to: "accent", t: 0 };
+  if (s <= 0.5) return { from: "accent", to: "caution", t: 0.5 + s };
+  return { from: "caution", to: "warn", t: (s - 0.5) * 2 };
+}
+
+/**
+ * The over-target colour for a 0…1 severity (`severityMix`): lime at 0, caution yellow at 0.5,
+ * warn red at 1, mixed in OKLCH in between so the hue walks lime → yellow → coral without a
  * muddy midpoint. Never gold: that stays for PRs and goals. A CSS colour, usable as a fill or as
- * text (every step is ≥ 8:1 on ink-950).
+ * text (every step is ≥ 8:1 on ink-950). Pair it with `severityClass`, which paints the nearest
+ * token where `color-mix()` isn't supported (Safari < 16.2).
  */
 export function severityColor(severity: number): string {
-  const s = Math.max(0, Math.min(1, severity || 0));
-  if (s === 0) return "var(--color-accent)";
-  if (s === 1) return "var(--color-warn)";
-  if (s === 0.5) return "var(--color-caution)";
-  const pct = (f: number) => `${Math.round(f * 1000) / 10}%`;
-  return s <= 0.5
-    ? `color-mix(in oklch, var(--color-accent), var(--color-caution) ${pct(s * 2)})`
-    : `color-mix(in oklch, var(--color-caution), var(--color-warn) ${pct((s - 0.5) * 2)})`;
+  const { from, to, t } = severityMix(severity);
+  if (t === 0) return `var(--color-${from})`;
+  if (t === 1) return `var(--color-${to})`;
+  return `color-mix(in oklch, var(--color-${from}), var(--color-${to}) ${Math.round(t * 1000) / 10}%)`;
+}
+
+// Spelled out so Tailwind generates them.
+const SEVERITY_CLASS = {
+  bg: { accent: "bg-accent", caution: "bg-caution", warn: "bg-warn" },
+  text: { accent: "text-accent", caution: "text-caution", warn: "text-warn" },
+} as const;
+
+/**
+ * The token nearest a severity's colour, as a class: the fallback under `severityColor`'s inline
+ * mix (an unsupported inline `color-mix()` is dropped, so the class shows through). Never lime
+ * once over: caution up to 0.75, warn from there.
+ */
+export function severityClass(severity: number, kind: "bg" | "text"): string {
+  const { from, to, t } = severityMix(severity);
+  return SEVERITY_CLASS[kind][t === 0 ? from : from === "accent" ? to : t < 0.5 ? from : to];
 }
 
 export function Bar({
@@ -189,7 +221,15 @@ export function Bar({
   const sev = severity === undefined ? null : Math.max(0, Math.min(1, severity || 0));
   const accent = sev === null ? tone === "accent" : sev === 0;
   const color =
-    sev !== null ? null : tone === "gold" ? "bg-gold" : tone === "mute" ? "bg-fg-2/50" : tone === "warn" ? "bg-warn" : "bg-accent";
+    sev !== null
+      ? severityClass(sev, "bg")
+      : tone === "gold"
+        ? "bg-gold"
+        : tone === "mute"
+          ? "bg-fg-2/50"
+          : tone === "warn"
+            ? "bg-warn"
+            : "bg-accent";
   return (
     <div className={clsx("h-[3px] overflow-hidden rounded-full bg-[var(--track)]", className)}>
       <motion.div
@@ -692,6 +732,38 @@ function setOpenSheets(n: number) {
   openSheets = n;
   if (was !== openSheets > 0) sheetListeners.forEach((l) => l());
 }
+/**
+ * The page behind open sheets doesn't scroll. `overflow: hidden` on <body> can't do it: html
+ * clips sideways overflow (styles.css), so body's overflow is no longer propagated to the
+ * viewport, and iOS chains touch scrolling past it anyway. Instead body is pinned where it is —
+ * `position: fixed`, offset by the scroll position — so the viewport has nothing to scroll (wheel,
+ * touch, keys or `scrollTo`), and the position is put back on unlock. A classic scrollbar keeps
+ * its track (html overflow-y: scroll) so the layout doesn't shift sideways. Every property set is
+ * restored to its previous inline value.
+ */
+const LOCK_STYLES = ["position", "top", "left", "right", "overflow"] as const;
+let pageLock: { y: number; body: string[]; htmlOverflowY: string } | null = null;
+function lockPage() {
+  if (pageLock) return;
+  const { body, documentElement: html } = document;
+  const y = window.scrollY;
+  const hasScrollbar = window.innerWidth - html.clientWidth > 0;
+  pageLock = { y, body: LOCK_STYLES.map((p) => body.style[p]), htmlOverflowY: html.style.overflowY };
+  Object.assign(body.style, { position: "fixed", top: `${-y}px`, left: "0", right: "0", overflow: "hidden" });
+  if (hasScrollbar) html.style.overflowY = "scroll";
+  html.dataset.scrollLocked = "";
+}
+function unlockPage() {
+  if (!pageLock) return;
+  const { body, documentElement: html } = document;
+  const { y } = pageLock;
+  LOCK_STYLES.forEach((p, i) => (body.style[p] = pageLock!.body[i]!));
+  html.style.overflowY = pageLock.htmlOverflowY;
+  delete html.dataset.scrollLocked;
+  pageLock = null;
+  if (window.scrollY !== y) window.scrollTo(window.scrollX, y);
+}
+
 /** Whether any Sheet is open (for useSyncExternalStore; e.g. the dock hides behind sheets). */
 export const anySheetOpen = () => openSheets > 0;
 export function subscribeSheets(l: () => void) {
@@ -730,8 +802,7 @@ export function Sheet({
       if (e.key === "Escape" && !e.defaultPrevented) onCloseRef.current();
     };
     window.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    if (openSheets === 0) lockPage();
 
     // Make the app behind the sheet inert (the sheet is portaled to <body>, outside #root).
     const root = document.getElementById("root");
@@ -751,9 +822,10 @@ export function Sheet({
 
     return () => {
       window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
       setOpenSheets(Math.max(0, openSheets - 1));
       if (root && openSheets === 0) root.inert = rootWasInert;
+      // Scroll back before focus returns to the trigger (focus doesn't scroll: it's where it was).
+      if (openSheets === 0) unlockPage();
       try {
         if (trigger && trigger.isConnected) trigger.focus({ preventScroll: true });
       } catch {
@@ -798,7 +870,7 @@ export function Sheet({
             tabIndex={-1}
             onKeyDown={onPanelKeyDown}
             className={clsx(
-              "absolute inset-x-0 bottom-0 mx-auto max-h-[88dvh] max-w-lg overflow-y-auto rounded-t-[28px] bg-ink-850/95 px-5 pt-3 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] shadow-[0_-20px_60px_-20px_rgba(0,0,0,0.8)] outline-none backdrop-blur-xl",
+              "absolute inset-x-0 bottom-0 mx-auto max-h-[88dvh] max-w-lg overflow-y-auto overscroll-contain rounded-t-[28px] bg-ink-850/95 px-5 pt-3 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] shadow-[0_-20px_60px_-20px_rgba(0,0,0,0.8)] outline-none backdrop-blur-xl",
               className,
             )}
             initial={{ y: "100%" }}

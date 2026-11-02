@@ -4,6 +4,7 @@ import {
   goalDirection,
   macrosFor,
   OVER_TARGET_SCALE,
+  overTarget,
   overTargetSeverity,
   project,
   PROTEIN_OVER_TARGET_SCALE,
@@ -198,6 +199,20 @@ describe("overTargetSeverity", () => {
     expect(overTargetSeverity(120, 0)).toBe(0); // a zero carb target has no bar
     expect(overTargetSeverity(120, null)).toBe(0);
     expect(overTargetSeverity(Number.NaN, 200)).toBe(0);
+  });
+
+  it("needs an overage of at least one whole unit (no '+0g over' on a tiny target)", () => {
+    expect(overTargetSeverity(4.3, 4)).toBe(0); // 7.5 % over, but +0.3 g
+    expect(overTarget(4.3, 4)).toEqual({ severity: 0, over: 0 });
+    // +0.5 g rounds to +1 g: 12.5 % over → (0.5 − 0.2) / 0.8.
+    expect(overTarget(4.5, 4)).toEqual({ severity: expect.closeTo(0.375), over: 1 });
+  });
+
+  it("pairs the severity with the rounded overage", () => {
+    expect(overTarget(230, 200)).toEqual({ severity: expect.closeTo(0.5), over: 30 });
+    expect(overTarget(210, 200)).toEqual({ severity: 0, over: 0 }); // within the tolerance: no note
+    expect(overTarget(2612.6, 2400).over).toBe(213);
+    expect(overTarget(null, 200)).toEqual({ severity: 0, over: 0 });
   });
 
   it("treats a degenerate scale as a step", () => {
