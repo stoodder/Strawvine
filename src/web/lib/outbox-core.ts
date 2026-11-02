@@ -12,7 +12,7 @@
  */
 import { formatShortDate } from "../../shared/dates";
 import { emptyDayLog } from "../../shared/empty";
-import { deepEqual, mergeSession, mergeSettings } from "./merge";
+import { deepEqual, fitSession, mergeSession, mergeSettingsDetailed, SESSION_LIMITS } from "./merge";
 import type {
   Bootstrap,
   DayLog,
@@ -200,10 +200,13 @@ function merge(a: Op, b: Op): Op {
   return b;
 }
 
-/** `op` with `from`'s document base (or none, when `from` had none). */
+/**
+ * `op` with `from`'s document base. When `from` has none (queued by a build that didn't record
+ * one for deletes, or from a copy without revisions), `op` keeps its own.
+ */
 function withDocBase<T extends Op & DocBase<unknown>>(op: T, from: DocBase<unknown>): T {
-  const { baseRev: _r, base: _b, ...rest } = op;
-  return ("baseRev" in from && from.baseRev !== undefined ? { ...rest, baseRev: from.baseRev, base: from.base ?? null } : rest) as T;
+  if (from.baseRev === undefined) return op;
+  return { ...op, baseRev: from.baseRev, base: from.base ?? null };
 }
 
 const isCreator = (op: Op): op is Extract<Op, { tempId: number }> => op.kind === "addMax" || op.kind === "createExercise";
@@ -315,7 +318,13 @@ export function tempRefs(op: Op): number[] {
  * moves to the end, after anything it may depend on). An entry that is in flight is never
  * touched, and nothing is merged into a rejected (failed) entry: a later day/exercise patch is
  * queued separately (it doesn't depend on the rejected fields), while a whole-document op
- * (session, settings) supersedes the rejected one — the caller validates it first.
+ * (session, settings) supersedes the rejected one — the caller validates it first. A document
+ * replacing queued or rejected copies was made on what they showed, so it takes over what the
+ * first of them was based on (`baseRev`/`base`).
+ *
+ * Deleting a workout the server never had (its only save is still unsent — or there was none):
+ * nothing is sent, and the unsent save goes too. A delete queued behind a save in flight stays
+ * (it's re-based on that save when it lands).
  */
 export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 0): OutboxState {
   let op = withIdempotencyKey(remapOp(input, s.tempMap));
@@ -344,6 +353,8 @@ export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 
         if (wholeDoc) {
           dropped.push(e.seq);
           entries.splice(i, 1);
+          // The rejected document is what the screen showed (a merged copy, after a conflict).
+          if ((e.op as DocBase<unknown>).baseRev !== undefined) op = withDocBase(op as Op & DocBase<unknown>, e.op as DocBase<unknown>);
           continue; // an older pending copy may sit before it
         }
         break;
@@ -354,9 +365,16 @@ export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 
       break;
     }
   }
+  if (op.kind === "session" && !op.doc && op.baseRev === null && !entries.some((e) => e.state !== "acked" && opKey(e.op) === key)) {
+    // Nothing of it on the server: there's nothing to delete.
+    return dropped.length ? { ...s, entries, removed: tombstone(s, dropped) } : s;
+  }
   entries.push({ seq: withTab(s.nextSeq, tab), op, state: "pending" });
   return { ...s, entries, nextSeq: s.nextSeq + 1, ...(dropped.length ? { removed: tombstone(s, dropped) } : {}) };
 }
+
+/** A workout delete with nothing to delete on the server (see `addOp`): settled without a request. */
+export const isNoopDelete = (op: Op) => op.kind === "session" && !op.doc && op.baseRev === null;
 
 /** The next entry to send: pending, and not waiting on a row it references being created. */
 export function nextSendable(entries: readonly Entry[]): Entry | undefined {
@@ -404,15 +422,158 @@ export function ackEntry(s: OutboxState, seq: number, result: unknown, meta: Ack
 function rebase(later: Op, saved: Op, result: unknown, srev: string | null): Op {
   if (later.kind === "session" && saved.kind === "session") {
     const server = saved.doc ? ((result as Session | null) ?? saved.doc) : null;
-    const doc = later.doc && saved.doc && server && !deepEqual(server, saved.doc) ? mergeSession(saved.doc, later.doc, server) : later.doc;
+    const doc =
+      later.doc && saved.doc && server && !deepEqual(server, saved.doc)
+        ? fitSession(mergeSession(saved.doc, later.doc, server)).doc
+        : later.doc;
     return { ...later, doc, baseRev: srev, base: server };
   }
   if (later.kind === "settings" && saved.kind === "settings") {
     const server = (result as Settings | null) ?? saved.settings;
-    const settings = deepEqual(server, saved.settings) ? later.settings : mergeSettings(saved.settings, later.settings, server);
+    const settings = deepEqual(server, saved.settings)
+      ? later.settings
+      : mergeSettingsDetailed(saved.settings, later.settings, server).value;
     return { ...later, settings, baseRev: srev, base: server };
   }
   return later;
+}
+
+/** The server's answer to a version-checked write that lost the race (409). */
+export interface Conflict {
+  /** Its current document (null: none). */
+  current: unknown;
+  /** That document's revision (null: none). */
+  rev: string | null;
+}
+
+export type ConflictResolution =
+  /** Merged onto the server's copy: send the entry again (it's next). */
+  | { kind: "retry"; state: OutboxState; tookServer: boolean; conflicts: string[] }
+  /** Merged and shown here, but not sent again: marked failed with `error` (Retry merges again). */
+  | { kind: "failed"; state: OutboxState; tookServer: boolean; conflicts: string[]; error: string }
+  /**
+   * The entry was dropped: a later queued edit of the same document already carries it
+   * (`later`: that edit's seq — merged too, so it's what reaches the server), or deletes it.
+   */
+  | { kind: "superseded"; state: OutboxState; tookServer: boolean; conflicts: string[]; later: number }
+  /** A delete the server's newer copy wins over: the entry was dropped and the server's copy stands. */
+  | { kind: "keptServer"; state: OutboxState }
+  /** Not a conflict this can resolve: treat as a rejection. */
+  | { kind: "none" };
+
+/**
+ * A 409 for entry `seq`: the document changed on the server since the edit's `baseRev`.
+ *
+ * - A save is merged onto the server's copy (`mergeSession` / `mergeSettings`, ancestor = the
+ *   edit's `base`), brought within the server's limits (`fitSession`), and re-based on the
+ *   server's revision. Later queued edits of the same document were made on top of the pre-merge
+ *   copy, so they're merged onto the merged one too (ancestor = the pre-merge copy) and re-based
+ *   likewise — otherwise, once the merged save lands, they'd overwrite it with what they were
+ *   built on. Then: sent again (`retry`), or, when `retry` is false (a second conflict in a row)
+ *   or the merge can't fit the limits, marked failed — unless a later queued edit of the same
+ *   document exists, which then carries it (`superseded`). When a later queued edit deletes the
+ *   document, the save is simply dropped.
+ * - A delete stands only if the server's copy is still what this device last saw (`base`): then
+ *   it's sent again at the new revision. Otherwise the server's copy (changed on another device)
+ *   is kept and the delete is dropped (`keptServer`).
+ */
+export function resolveConflict(s: OutboxState, seq: number, c: Conflict, retry: boolean): ConflictResolution {
+  const at = s.entries.findIndex((x) => x.seq === seq);
+  const e = s.entries[at];
+  if (!e || e.state === "acked") return { kind: "none" };
+  const op = e.op;
+  const key = opKey(op);
+  const laterIdx = s.entries.flatMap((x, i) => (i > at && x.state !== "acked" && opKey(x.op) === key ? [i] : []));
+  const rev = c.rev ?? null;
+
+  if (op.kind === "session" && !op.doc) {
+    const current = c.current as Session | null;
+    if (!current) return { kind: "keptServer", state: removeEntries(s, [seq]) }; // already gone
+    if (retry && op.base && deepEqual(current, op.base)) {
+      const next: Op = { ...op, baseRev: rev, base: current };
+      return { kind: "retry", state: replaceOp(s, seq, next), tookServer: false, conflicts: [] };
+    }
+    return { kind: "keptServer", state: removeEntries(s, [seq]) };
+  }
+
+  let next: Op;
+  let pre: Session | Settings;
+  let merged: Session | Settings;
+  let error: string | null = null;
+  let conflicts: string[] = [];
+  if (op.kind === "session" && op.doc) {
+    const current = c.current as Session | null;
+    const fit = fitSession(current ? mergeSession(op.base ?? null, op.doc, current) : op.doc);
+    error = fit.error;
+    pre = op.doc;
+    merged = fit.doc;
+    next = { ...op, doc: fit.doc, baseRev: rev, base: current };
+  } else if (op.kind === "settings" && c.current) {
+    const current = c.current as Settings;
+    const m = mergeSettingsDetailed(op.base ?? null, op.settings, current);
+    conflicts = m.conflicts;
+    pre = op.settings;
+    merged = m.value;
+    next = { ...op, settings: m.value, baseRev: rev, base: current };
+  } else return { kind: "none" };
+  const tookServer = !deepEqual(merged, pre);
+
+  const laterDelete = laterIdx.find((i) => {
+    const o = s.entries[i]!.op;
+    return o.kind === "session" && !o.doc;
+  });
+  if (laterDelete !== undefined) {
+    return { kind: "superseded", state: removeEntries(s, [seq]), tookServer: false, conflicts: [], later: s.entries[laterDelete]!.seq };
+  }
+
+  // Later edits of this document: merged onto the merged copy, based on the server's revision.
+  const laterSet = new Set(laterIdx);
+  const entries = s.entries.map((x, i) => {
+    if (x.seq === seq) return { ...x, op: next, rev: bump(x) };
+    if (!laterSet.has(i)) return x;
+    const lo = x.op;
+    let op2: Op = lo;
+    if (lo.kind === "session" && lo.doc && next.kind === "session" && next.doc)
+      op2 = { ...lo, doc: fitSession(mergeSession(pre as Session, lo.doc, next.doc)).doc, baseRev: rev, base: next.base ?? null };
+    else if (lo.kind === "settings" && next.kind === "settings") {
+      const m = mergeSettingsDetailed(pre as Settings, lo.settings, next.settings);
+      conflicts = [...new Set([...conflicts, ...m.conflicts])];
+      op2 = { ...lo, settings: m.value, baseRev: rev, base: next.base ?? null };
+    }
+    return op2 === lo ? x : { ...x, op: op2, rev: bump(x) };
+  });
+  let state: OutboxState = { ...s, entries };
+  if (!error && retry) return { kind: "retry", state, tookServer, conflicts };
+  const lastLater = laterIdx.at(-1);
+  if (lastLater !== undefined) {
+    return { kind: "superseded", state: removeEntries(state, [seq]), tookServer, conflicts, later: s.entries[lastLater]!.seq };
+  }
+  error ??= "Changed on another device again while saving — your changes are merged here; tap Retry.";
+  state = failEntry(state, seq, error);
+  return { kind: "failed", state, tookServer, conflicts, error };
+}
+
+function replaceOp(s: OutboxState, seq: number, op: Op): OutboxState {
+  return { ...s, entries: s.entries.map((x) => (x.seq === seq ? { ...x, op, rev: bump(x) } : x)) };
+}
+
+/**
+ * Marks a rejected entry failed — or, for a whole document with a later queued edit of it (made
+ * on top of this one, so carrying its changes), drops it: the later edit is what gets saved.
+ * Returns the later edit's seq when it superseded the rejected one.
+ */
+export function failOrSupersede(s: OutboxState, seq: number, error: string): { state: OutboxState; supersededBy: number | null } {
+  const at = s.entries.findIndex((x) => x.seq === seq);
+  const e = s.entries[at];
+  if (!e) return { state: s, supersededBy: null };
+  if (e.op.kind === "session" || e.op.kind === "settings") {
+    const key = opKey(e.op);
+    for (let i = s.entries.length - 1; i > at; i--) {
+      const x = s.entries[i]!;
+      if (x.state !== "acked" && opKey(x.op) === key) return { state: removeEntries(s, [seq]), supersededBy: x.seq };
+    }
+  }
+  return { state: failEntry(s, seq, error), supersededBy: null };
 }
 
 export function failEntry(s: OutboxState, seq: number, error: string): OutboxState {
@@ -716,7 +877,10 @@ export function overlay(base: Bootstrap, entries: readonly Entry[], cache: Overl
   const live = entries.filter((e) => e.state !== "acked");
   const out = { ...base } as Record<Coll, unknown>;
   for (const c of COLLS) {
-    const ops = live.filter((e) => collOf(e.op) === c).map((e) => (e.state === "failed" ? maskFailed(e, entries) : e.op));
+    const ops = live
+      .filter((e) => collOf(e.op) === c)
+      .map((e) => (e.state === "failed" ? maskFailed(e, entries) : e.op))
+      .filter((op): op is Op => op !== null);
     const hit = cache[c];
     if (hit && hit.base === base[c] && sameOps(hit.ops, ops)) {
       out[c] = hit.value;
@@ -738,8 +902,14 @@ const masked = new WeakMap<Op, { sig: string; op: Op }>();
  * A rejected patch, minus the fields a later edit of the same day/exercise set (acked or not):
  * the rejected value must not be shown over a newer one. Stable identity per (op, later fields).
  */
-function maskFailed(e: Entry, entries: readonly Entry[]): Op {
+function maskFailed(e: Entry, entries: readonly Entry[]): Op | null {
   const op = e.op;
+  if (op.kind === "session" || op.kind === "settings") {
+    // A later copy of the document (sent or not) replaces a rejected one.
+    const key = opKey(op);
+    const i = entries.indexOf(e);
+    return entries.some((x, n) => n > i && opKey(x.op) === key) ? null : op;
+  }
   if (op.kind !== "day" && op.kind !== "updateExercise") return op;
   const key = opKey(op);
   const later = new Set<string>();
@@ -829,7 +999,7 @@ export function request(op: Op): OpRequest {
     case "session":
       return op.doc
         ? { method: "PUT", path: `/sessions/${op.date}`, body: op.doc, headers: preconditionHeaders(op) }
-        : { method: "DELETE", path: `/sessions/${op.date}` };
+        : { method: "DELETE", path: `/sessions/${op.date}`, headers: preconditionHeaders(op) };
     case "settings":
       return { method: "PUT", path: "/settings", body: op.settings, headers: preconditionHeaders(op) };
     case "addMax":
@@ -866,9 +1036,7 @@ export function request(op: Op): OpRequest {
 // Cheap client-side validation (mirrors the server's limits that edits can actually hit)
 // ---------------------------------------------------------------------------
 
-const MAX_BLOCKS = 30;
-const MAX_SUPERSET = 6;
-const MAX_SETS = 30;
+const { blocks: MAX_BLOCKS, superset: MAX_SUPERSET, sets: MAX_SETS } = SESSION_LIMITS;
 
 /** Why the server would reject this op, for the limits a user can run into; null if it looks fine. */
 export function validateOp(op: Op): string | null {

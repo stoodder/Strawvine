@@ -22,30 +22,34 @@
  *   sign-in or download, cleared by sign-out and by a 401). Sign-out wipes the copy.
  * - Creates carry an idempotency key (persisted with the op), so a retried POST whose first
  *   response was lost doesn't create the row twice.
- * - Whole-document saves (workouts, settings) are version-checked: each carries the server
+ * - Whole-document saves and workout deletes are version-checked: each carries the server
  *   revision it was based on (`If-Match`). A 409 means another device saved the document since;
- *   the edit is merged onto the server's copy (./merge) and sent once more, and a toast says so.
+ *   the server's copy becomes this device's base, the edit (and any later queued edit of the
+ *   same document) is merged onto it (./merge, `resolveConflict`) and sent once more, and a
+ *   toast says so. A delete of a workout changed elsewhere since is dropped (the server's copy
+ *   stays).
  * - Every write answers with the dataset version before and after it; when the copy here was at
  *   the "before" version, it takes the "after" one, so the next revalidation is a 304.
  */
 import { onlineManager, QueryClient, replaceEqualDeep } from "@tanstack/react-query";
+import { formatShortDate } from "../../shared/dates";
 import type { Bootstrap, ConflictBody, Session, Settings } from "../../shared/schemas";
 import { showToast } from "../components/Toast";
 import { api, apiConditional, ApiError, flushPendingLogout, isTransient, serverLogout } from "./api";
 import { idbClear, idbReadSet, idbWritePlanned } from "./idb";
-import { mergeSession, mergeSettings } from "./merge";
 import {
   ackEntry,
   addOp,
   allocTempId,
   applyAcked,
-  deepEqual,
+  applyResult,
   dependentsOfFailed,
   describe,
   discardFailed as discardFailedCore,
   emptyOutbox,
   ensureIdempotencyKeys,
-  failEntry,
+  failOrSupersede,
+  isNoopDelete,
   maxSeenKey,
   mergeOutbox,
   nextSendable,
@@ -55,12 +59,14 @@ import {
   pruneAcked,
   removeEntries,
   request,
+  resolveConflict,
   retryFailed as retryFailedCore,
   TAB_SPACE,
   unsynced,
   validateOp,
   type AckEtags,
   type AckMeta,
+  type ConflictResolution,
   type Entry,
   type Op,
   type OutboxState,
@@ -818,10 +824,10 @@ export function enqueue(input: Op): number {
     publish();
     return -1;
   }
-  const op = withDocBase(input);
   let seq = -1;
   mutate((s) => {
-    const next = addOp(s, op, sendingSeq(), TAB);
+    // Based on `base` as of now: `mutate` has just taken in what other windows got acked.
+    const next = addOp(s, withDocBase(input), sendingSeq(), TAB);
     if (next.nextSeq !== s.nextSeq) seq = next.entries.at(-1)!.seq;
     return next;
   });
@@ -831,14 +837,14 @@ export function enqueue(input: Op): number {
 }
 
 /**
- * A whole-document edit with what it was based on: the server's revision and copy of the
- * document as this device knows it now (see `request`). Copies from before revisions existed
- * give none, and the save goes unchecked.
+ * A whole-document edit (or a workout delete) with what it was based on: the server's revision
+ * and copy of the document as this device knows it now (see `request`). Copies from before
+ * revisions existed give none, and the save goes unchecked.
  */
 function withDocBase(op: Op): Op {
   const revs = base?.revs;
   if (!revs || !base) return op;
-  if (op.kind === "session" && op.doc && op.baseRev === undefined) {
+  if (op.kind === "session" && op.baseRev === undefined) {
     const doc = base.sessions.find((x) => x.date === op.date) ?? null;
     return { ...op, baseRev: revs.sessions[op.date] ?? null, base: doc };
   }
@@ -1004,6 +1010,18 @@ async function replay() {
       refresh();
       const e = nextSendable(ob.entries);
       if (!e) break;
+      if (isNoopDelete(e.op)) {
+        // Deleting a workout the server doesn't have (as far as this device knows): nothing to send.
+        mutate((s) => removeEntries(s, [e.seq]));
+        publish();
+        continue;
+      }
+      // A merge (or an older build's queue) can produce something the server would refuse.
+      const problem = validateOp(e.op);
+      if (problem) {
+        onRejected(e.seq, e.op, problem);
+        continue;
+      }
       renewLease();
       inflight = e.seq;
       mutate((s) => ({ ...s, inflight: { seq: e.seq, at: Date.now() } }));
@@ -1020,7 +1038,7 @@ async function replay() {
         });
       } catch (err) {
         inflight = null;
-        if (err instanceof ApiError && err.status === 409 && mergeConflict(e, err.body)) continue; // send the merged edit
+        if (err instanceof ApiError && err.status === 409 && onConflict(e, err.body)) continue; // e.g. send the merged edit
         if (err instanceof ApiError && err.status === 401) {
           // api() already signalled sign-out; resume after sign-in.
           clearSending(e.seq);
@@ -1057,38 +1075,84 @@ async function replay() {
   }
 }
 
-/** Seqs re-written by a merge (in this window), and whether the merge took anything from the server. */
-const merged = new Map<number, boolean>();
+/** Seqs that had their one automatic merge-and-resend (this window); a second conflict in a row fails. */
+const mergedOnce = new Set<number>();
+/**
+ * Seqs whose document took changes from another device in a merge, with the settings lists that
+ * couldn't be combined (this device's kept): a toast says so once the merged copy is saved.
+ */
+const merges = new Map<number, string[]>();
+
+function mergedMessage(conflicts: string[]) {
+  return conflicts.length
+    ? `Merged changes from another device (kept this device's ${conflicts.join(" and ")})`
+    : "Merged changes from another device";
+}
 
 /**
- * A 409 on a version-checked save: re-applies the edit on top of the server's current copy and
- * rewrites the queued entry (merged document, now based on the server's revision), to be sent
- * next. Once per entry: a second conflict is reported like any rejection. Returns whether it merged.
+ * The server's copy of a document, from a 409: it's the newest thing known about it, so it
+ * becomes part of `base` (edits made from now on start from it, and a merge has the right
+ * ancestor). Counts as an ack for snapshots in flight (they may predate it).
  */
-function mergeConflict(e: Entry, body: unknown): boolean {
+function learnServerCopy(op: Op, current: unknown, rev: string | null) {
+  if (!base) return;
+  let next = base;
+  if (op.kind === "session")
+    next = applyResult(base, { kind: "session", date: op.date, doc: (current as Session | null) ?? null }, current, rev);
+  else if (op.kind === "settings" && current) next = applyResult(base, { kind: "settings", settings: current as Settings }, current, rev);
+  if (next === base) return;
+  base = next;
+  ackCount++;
+  baseStamp = Math.max(baseStamp, Date.now());
+  schedulePersist();
+}
+
+/**
+ * A 409 on a version-checked write (see `resolveConflict`): takes in the server's copy, then
+ * merges and re-sends once, reports a second conflict like a rejection (the merged copy stays
+ * on screen; Retry merges again), or keeps the server's copy over a delete. Returns whether it
+ * was handled.
+ */
+function onConflict(e: Entry, body: unknown): boolean {
   const c = body as ConflictBody<Session | Settings> | null;
-  if (!c || c.error !== "conflict" || merged.has(e.seq)) return false;
-  const op = e.op;
-  let next: Op;
-  let changed: boolean;
-  if (op.kind === "session" && op.doc) {
-    const current = c.current as Session | null;
-    const doc = current ? mergeSession(op.base ?? null, op.doc, current) : op.doc;
-    changed = !deepEqual(doc, op.doc);
-    next = { ...op, doc, baseRev: c.rev ?? undefined, base: current };
-  } else if (op.kind === "settings" && c.current) {
-    const current = c.current as Settings;
-    const settings = mergeSettings(op.base ?? null, op.settings, current);
-    changed = !deepEqual(settings, op.settings);
-    next = { ...op, settings, baseRev: c.rev ?? undefined, base: current };
-  } else return false;
-  if (c.rev === null) delete (next as { baseRev?: unknown }).baseRev; // nothing on the server to check against
-  merged.set(e.seq, changed);
-  mutate((s) => ({
-    ...s,
-    inflight: s.inflight?.seq === e.seq ? null : s.inflight,
-    entries: s.entries.map((x) => (x.seq === e.seq ? { ...x, op: next, rev: (x.rev ?? 0) + 1 } : x)),
-  }));
+  if (!c || c.error !== "conflict" || !("current" in c)) return false;
+  let res: ConflictResolution = { kind: "none" };
+  mutate((s) => {
+    res = resolveConflict(s, e.seq, { current: c.current, rev: c.rev ?? null }, !mergedOnce.has(e.seq));
+    if (res.kind === "none") return s;
+    return { ...res.state, inflight: res.state.inflight?.seq === e.seq ? null : res.state.inflight };
+  });
+  const r = res as ConflictResolution;
+  if (r.kind === "none") return false;
+  learnServerCopy(e.op, c.current, c.rev ?? null);
+  const took = (x: { tookServer: boolean; conflicts: string[] }) => x.tookServer || x.conflicts.length > 0;
+  switch (r.kind) {
+    case "retry":
+      mergedOnce.add(e.seq);
+      if (took(r)) merges.set(e.seq, [...new Set([...(merges.get(e.seq) ?? []), ...r.conflicts])]);
+      break;
+    case "superseded": {
+      // A later queued edit carries this one (merged too): it's what reaches the server.
+      const carried = [...(merges.get(e.seq) ?? []), ...r.conflicts];
+      if (took(r) || merges.has(e.seq)) merges.set(r.later, [...new Set([...(merges.get(r.later) ?? []), ...carried])]);
+      mergedOnce.delete(e.seq);
+      merges.delete(e.seq);
+      break;
+    }
+    case "failed":
+      mergedOnce.delete(e.seq);
+      merges.delete(e.seq);
+      reconcileOwed = true;
+      toastRejected(e.op, r.error);
+      break;
+    case "keptServer":
+      mergedOnce.delete(e.seq);
+      merges.delete(e.seq);
+      reconcileOwed = true;
+      if (e.op.kind === "session" && c.current)
+        showToast({ message: `Your workout for ${formatShortDate(e.op.date)} changed on another device, so it wasn't deleted.` });
+      break;
+  }
   publish();
   return true;
 }
@@ -1137,22 +1201,44 @@ function onAcked(e: Entry, result: unknown, meta: AckMeta = {}) {
   publish();
   schedulePersist();
   settleAck(seq, op, result);
-  if (merged.get(seq)) showToast({ message: "Merged changes from another device" });
-  merged.delete(seq);
+  const conflicts = merges.get(seq);
+  if (conflicts) showToast({ message: mergedMessage(conflicts) });
+  merges.delete(seq);
+  mergedOnce.delete(seq);
   if (op.kind === "settings" && op.settings.onboarded) requestPersistentStorage();
 }
 
 function onRejected(seq: number, op: Op, message: string) {
-  merged.delete(seq);
+  mergedOnce.delete(seq);
   if (op.kind === "seen") {
     // Bookkeeping only; not worth bothering anyone about.
+    merges.delete(seq);
     mutate((s) => ({ ...removeEntries(s, [seq]), inflight: null }));
     publish();
     return;
   }
-  mutate((s) => ({ ...failEntry(s, seq, message), inflight: null }));
+  let supersededBy: number | null = null;
+  mutate((s) => {
+    const r = failOrSupersede(s, seq, message);
+    supersededBy = r.supersededBy;
+    return { ...r.state, inflight: s.inflight?.seq === seq ? null : r.state.inflight };
+  });
+  const later = supersededBy as number | null;
+  if (later !== null) {
+    // A later edit of the same document (made on top of this one) replaces it: that's what gets sent.
+    const carried = merges.get(seq);
+    if (carried) merges.set(later, [...new Set([...(merges.get(later) ?? []), ...carried])]);
+    merges.delete(seq);
+    publish();
+    return;
+  }
+  merges.delete(seq);
   reconcileOwed = true;
   publish();
+  toastRejected(op, message);
+}
+
+function toastRejected(op: Op, message: string) {
   showToast({
     message: `Couldn't save ${describe(op)}: ${message.length > 90 ? `${message.slice(0, 90)}…` : message}`,
     tone: "warn",
@@ -1328,20 +1414,66 @@ export async function signOut(opts: { keepUnsynced?: boolean } = {}): Promise<{ 
   return serverLogout();
 }
 
+export interface ForgetOptions {
+  /** Called with the number of changes still unsynced, at the start and whenever it changes while waiting. */
+  onProgress?: (unsynced: number) => void;
+  /** Give up waiting after this long without a single change getting through (default 15 s). */
+  patienceMs?: number;
+  /** Never wait longer than this overall (default 2 min). */
+  maxWaitMs?: number;
+}
+
+export interface ForgetResult {
+  /** Unsynced changes discarded with this device's data (rejected ones, and any that couldn't be sent). */
+  pendingDropped: number;
+}
+
 /**
- * "Forget this device": sends what can be sent first, then asks the server to sign this browser
- * out and drop its known-device mark (other devices stay signed in), and wipes everything this
- * device holds — the copy, the outbox (unsynced edits are discarded: check `unsynced` first) and
- * the signed-in flag. Rejects, changing nothing, when the server can't be reached or refuses.
+ * "Forget this device": first sends what can be sent — waiting as long as sending makes
+ * progress (each change that gets through restarts `patienceMs`; at most `maxWaitMs`), with the
+ * live count through `onProgress` (and `getSyncInfo().unsynced`) — then asks the server to sign
+ * this browser out and drop its known-device mark (other devices stay signed in), and wipes
+ * everything this device holds: the copy, the outbox and the signed-in flag. Resolves with how
+ * many unsynced changes were discarded (0 when everything got through). Rejects, changing
+ * nothing, when the server can't be reached or refuses.
  */
-export async function forgetDevice(): Promise<void> {
-  if (onlineManager.isOnline() && !authPaused) await within(run(), 5_000);
+export async function forgetDevice(opts: ForgetOptions = {}): Promise<ForgetResult> {
+  const { onProgress, patienceMs = 15_000, maxWaitMs = 120_000 } = opts;
+  const count = () => unsynced(ob).filter((e) => e.op.kind !== "seen").length;
+  const sendable = () => !authPaused && onlineManager.isOnline() && !!nextSendable(ob.entries);
+  refresh();
+  let last = count();
+  onProgress?.(last);
+  const start = Date.now();
+  let progressAt = start;
+  while (sendable()) {
+    // Straight away, skipping any retry backoff.
+    failures = 0;
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      timer = undefined;
+    }
+    const before = last;
+    await within(run(), Math.max(0, Math.min(patienceMs - (Date.now() - progressAt), maxWaitMs - (Date.now() - start))));
+    refresh();
+    last = count();
+    if (last !== before) {
+      progressAt = Date.now();
+      onProgress?.(last);
+    }
+    const now = Date.now();
+    if (now - progressAt >= patienceMs || now - start >= maxWaitMs) break;
+    // Nothing got through (another window is sending, or the last try failed): look again shortly.
+    if (last === before && sendable()) await new Promise((r) => window.setTimeout(r, 500));
+  }
+  const pendingDropped = count();
   await api("/auth/forget-device", { method: "POST", timeoutMs: 8_000 });
   lsDel(SIGNED_IN_KEY);
   lsDel(LOGOUT_WARN_KEY);
   wipeLocalData({ keepOutbox: false });
   post({ type: "signed-out" });
   enterSignedOut();
+  return { pendingDropped };
 }
 
 /** @deprecated Use `signOut()`. Signs out keeping unsynced edits on this device. */

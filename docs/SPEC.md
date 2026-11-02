@@ -261,12 +261,25 @@ optional note.
     accessory blocks by their exercises, sets in order): a set logged or edited on this device wins; sets and blocks only
     the other device has are kept; something one device removed stays removed unless the other changed it; the
     workout's own fields (notes, finish, skip) merge like settings;
-  - settings merge field by field: the fields this device changed, the server's for everything else;
-  - a second conflict in a row marks the edit "not saved" (Retry merges again); saves without a revision (older app
-    versions) are accepted as before;
+  - exercises are matched by the sets they hold (not their position), so splitting or joining a superset on one device
+    while the other logs never duplicates an exercise or a set; a set added on both devices keeps both;
+  - if the merge leaves two main lifts (a session rebuilt on one device), the one matching the session's plan is kept and
+    the other's logged sets are folded onto it (same lift) or kept as an accessory block (different lift) — logged work
+    is never dropped;
+  - a merged workout over the server's limits (30 sets, 6 per superset, 30 blocks) is trimmed of unlogged work; if logged
+    work alone is over a limit, the edit is marked "not saved" with the reason;
+  - settings merge field by field: the fields this device changed, the server's for everything else; strength targets
+    merge by id, the weekday schedules and program weeks element by element; for other lists both devices changed, this
+    device's wins and the toast names it;
+  - edits made while a conflicting save was in flight are re-merged onto the merged copy (never sent over it); every 409
+    teaches the device the server's current copy and revision;
+  - a second conflict in a row keeps the merged copy and marks the edit "not saved" (Retry merges again); saves without
+    a revision (older app versions) are accepted as before;
   - deleting a workout carries the revision too: when another device changed it since, the delete is refused and that
-    device's copy is kept; a workout "new" on two devices at once is saved by the first, and the second merges onto it.
+    device's copy is kept ("…changed on another device, so it wasn't deleted"); a create then delete that never reached
+    the server sends nothing; a workout "new" on two devices at once is saved by the first, and the second merges onto it.
 - **Forget this device** signs only this device out — its session is revoked on the server too, so a copy of the cookie
   stops working — drops its known-device mark (it's treated like any unknown device at sign-in) and wipes everything the
-  app stored on it, after sending what it can.
+  app stored on it, after sending what it can (it keeps going while changes get through, shows how many remain, and
+  reports how many unsynced changes were discarded).
 - Pure, unit-tested domain modules for all calculations.

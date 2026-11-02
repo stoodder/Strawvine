@@ -1,3 +1,5 @@
+// First: configures zod before anything can parse with it (no eval probe → no CSP violation reports).
+import "./lib/zod-setup";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";

@@ -40,7 +40,7 @@ import {
 } from "./sync";
 
 export { BOOT_KEY, clearCache, forgetDevice, queryClient, signOut } from "./sync";
-export type { RefusedEdit } from "./sync";
+export type { ForgetOptions, ForgetResult, RefusedEdit } from "./sync";
 import { BOOT_KEY } from "./sync";
 
 /** Latest cached session for a date (for handlers that run after an await). */
