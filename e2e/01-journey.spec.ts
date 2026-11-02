@@ -4,6 +4,9 @@
  */
 import { dismissCelebrations, expect, fillNumber, PASSWORD, startClockAt, SUNDAY, test } from "./helpers";
 
+// Onboarding itself: start from an empty database rather than the onboarded template.
+test.use({ emptyDatabase: true });
+
 test("sign in, onboard and close the first day", async ({ page }) => {
   await startClockAt(page, SUNDAY);
   const celebrated = await dismissCelebrations(page);

@@ -1,23 +1,89 @@
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type BrowserContext, type Page } from "@playwright/test";
 import type { Bootstrap } from "../src/shared/schemas";
+import { seedHistory as seedHistoryVia } from "../scripts/lib/seed-history.mjs";
 
 export { expect };
 export const PASSWORD = process.env.E2E_PASSWORD ?? "e2e-password-not-secret";
 
 /**
- * The suite's `test`: before each test (and each retry) the runner (scripts/e2e.mjs) restarts
- * the server on an empty database, so every test is self-sufficient and nothing leaks between
- * them. Without E2E_CONTROL_URL (running Playwright by hand) the database is left alone.
+ * Playwright's clock (`page.clock.install`) fakes `performance.now()` and the timestamps given to
+ * `requestAnimationFrame`, but not the document timeline Web Animations run on. Motion starts its
+ * WAAPI animations at its own (fake) time, which drifts ahead of the real timeline under load:
+ * an animation then starts seconds "in the future" — a sheet stays off screen, a fade stays at
+ * opacity 0 — and tests time out on an element that never arrives. Starting times in the future
+ * are clamped to the timeline's now. (Only the test clock causes this; a real browser has one
+ * clock.) Contexts a test opens itself (a second device) call it themselves.
  */
-export const test = base.extend<{ freshDatabase: void }>({
+export async function keepAnimationsOnTheRealTimeline(context: BrowserContext) {
+  await context.addInitScript(() => {
+    const desc = Object.getOwnPropertyDescriptor(Animation.prototype, "startTime");
+    if (!desc?.set || !desc.get) return;
+    Object.defineProperty(Animation.prototype, "startTime", {
+      ...desc,
+      set(this: Animation, value: CSSNumberish | null) {
+        const now = document.timeline?.currentTime;
+        desc.set!.call(this, typeof value === "number" && typeof now === "number" && value > now ? now : value);
+      },
+    });
+  });
+}
+
+/** What the runner's control endpoint (scripts/e2e.mjs) has counted: CSP report-only violations logged by the server. */
+async function cspLog(control: string): Promise<{ count: number; lines: string[] }> {
+  const res = await fetch(`${control}/csp`);
+  return res.ok ? res.json() : { count: 0, lines: [] };
+}
+
+/**
+ * CSP reports during a test fail it: the app must run under its policy without tripping it (e.g.
+ * zod compiling validators with `new Function`). Counted twice — POSTs to /api/csp-report seen
+ * from this test's context, and the server's log (which also covers extra contexts a test opens).
+ * E2E_CSP_REPORTS=warn downgrades a report to an annotation (a known, tracked violation).
+ */
+const CSP_REPORTS: "fail" | "warn" = process.env.E2E_CSP_REPORTS === "warn" ? "warn" : "fail";
+
+/**
+ * The suite's `test`: before each test (and each retry) the runner (scripts/e2e.mjs) restarts
+ * the server on a known database, so every test is self-sufficient and nothing leaks between
+ * them. That database is the onboarded template (onboarded Sunday 2026-10-25 with bench press
+ * 225, see global-setup.ts): `login()` just signs in. A test that exercises onboarding itself
+ * declares `test.use({ emptyDatabase: true })`. Without E2E_CONTROL_URL (running Playwright by
+ * hand) the database is left alone.
+ */
+export const test = base.extend<{ emptyDatabase: boolean; freshDatabase: void; noCspReports: void }>({
+  context: async ({ context }, use) => {
+    await keepAnimationsOnTheRealTimeline(context);
+    await use(context);
+  },
+  emptyDatabase: [false, { option: true }],
   freshDatabase: [
-    async ({}, use) => {
+    async ({ emptyDatabase }, use) => {
       const control = process.env.E2E_CONTROL_URL;
       if (control) {
-        const res = await fetch(`${control}/reset`, { method: "POST" });
+        const res = await fetch(`${control}/reset${emptyDatabase ? "?fresh=1" : ""}`, { method: "POST" });
         if (!res.ok) throw new Error(`Resetting the e2e database failed: ${res.status} ${await res.text()}`);
       }
       await use();
+    },
+    { auto: true },
+  ],
+  noCspReports: [
+    async ({ context, freshDatabase: _ }, use, testInfo) => {
+      const control = process.env.E2E_CONTROL_URL;
+      const fromPage: string[] = [];
+      context.on("request", (req) => {
+        if (req.method() === "POST" && new URL(req.url()).pathname === "/api/csp-report") fromPage.push(req.postData()?.slice(0, 300) ?? "");
+      });
+      const before = control ? (await cspLog(control)).count : 0;
+      await use();
+      // report-uri reports are sent right away, but asynchronously: give the last ones a moment.
+      await new Promise((r) => setTimeout(r, 300));
+      const fromServer = control ? (await cspLog(control)).lines.slice(before) : [];
+      if (!fromPage.length && !fromServer.length) return;
+      const detail = [...new Set(fromServer.length ? fromServer : fromPage)].slice(0, 5).join("\n  ");
+      const message = `${Math.max(fromPage.length, fromServer.length)} CSP report(s) during the test:\n  ${detail}`;
+      if (CSP_REPORTS === "warn") testInfo.annotations.push({ type: "warning", description: message });
+      else throw new Error(message);
     },
     { auto: true },
   ],
@@ -193,3 +259,32 @@ export const notifications = (page: Page) => page.getByRole("region", { name: "N
  */
 export const toastMessage = (page: Page, text: string | RegExp) =>
   notifications(page).locator(":not([role=status]) > span").filter({ hasText: text });
+
+/**
+ * Three weeks of history before the template's onboarding day (day logs with every field, a
+ * missed day a week, completed Monday / Wednesday sessions, older maxes, a weight goal and a
+ * strength target), written through the API with this page's session — so screens are tested
+ * with charts, trends and carried-over accessories instead of empty states. Reload afterwards.
+ */
+export async function seedHistory(page: Page, opts?: { through?: string; weeks?: number }) {
+  await seedHistoryVia(async (method, path, body) => {
+    const res = await page.request.fetch(path, { method, ...(body !== undefined ? { data: body } : {}) });
+    if (!res.ok()) throw new Error(`${method} ${path} → ${res.status()} ${await res.text()}`);
+    return res.status() === 204 ? null : res.json();
+  }, opts);
+}
+
+/**
+ * Hide the ambient glow (body::before, a gradient behind everything): with it, axe can't tell any
+ * text's background and reports every color-contrast check as "incomplete" instead of passing or
+ * failing it. The glow is at most 7% lime over ink-950, so contrast is measured on the plain surface.
+ */
+export async function hideAmbientGlow(page: Page) {
+  // A constructed stylesheet rather than a <style> tag, which the report-only CSP (no inline
+  // styles) would report.
+  await page.evaluate(() => {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync("body::before { display: none !important; }");
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  });
+}

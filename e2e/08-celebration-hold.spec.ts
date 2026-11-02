@@ -29,7 +29,8 @@ test("a benchmark PR celebration waits until the Metcon editor is collapsed", as
   const score = page.getByRole("textbox", { name: "Benchmark score" });
   await score.fill("4:30");
   await score.press("Enter");
-  await expect(page.getByText(/Best\s*5:00/)).toBeVisible();
+  // "Prev. best 5:00" once the new score beats it.
+  await expect(page.getByText(/best\s*5:00/i)).toBeVisible();
 
   // Nothing focused, editor still open: several calm checks go by without an overlay.
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());

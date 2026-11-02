@@ -16,6 +16,9 @@
  *                 minimums) and a `hover:`/`active:` surface next to a plain `text-mute` are ignored.
  *                 After measuring ≥ 4.5:1 on the real surface, mark the line with `// contrast-ok`
  *                 (same line or the line above).
+ *                 It reads class strings only, so grey text in a nested element inside a tinted
+ *                 parent escapes it: `npm run audit:contrast` (scripts/contrast-audit.mjs) measures
+ *                 every rendered text against the pixels behind it and catches those.
  *   type-scale    arbitrary font sizes (`text-[0.8rem]`, `text-[clamp(…)]`) must be on the type scale
  *                 below (TYPE_SCALE). Tailwind's named sizes (text-xs … text-5xl) are always fine.
  *                 To add a size: add it to TYPE_SCALE with the role it plays, in the same change.
@@ -75,13 +78,12 @@ export const ALLOW = {
     "src/web/components/charts.tsx": ["0.02"], // the table under a chart: a barely-there well
     "src/web/components/progress/IntakeStrip.tsx": ["0.035"], // intake bars' track
     "src/web/components/train/SetControls.tsx": ["0.035"], // unlogged set chip
-    "src/web/components/train/RestTimer.tsx": ["0.07"], // plate chips in the rest pill
     "src/web/components/ui.tsx": ["0.1"], // active:bg of round icon buttons
   },
   "mute-on-tint": {
     // Unselected toggle chips on the page background (ink-950 + white/0.04 ≈ 4.8:1 — passes there,
     // but would not on a sheet). Candidates for text-fg-2.
-    "src/web/screens/Settings.tsx": 3,
+    "src/web/screens/Settings.tsx": 2,
   },
   "type-scale": {},
 };

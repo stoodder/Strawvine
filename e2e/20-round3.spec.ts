@@ -4,7 +4,7 @@
  * version conflict between two devices editing the same session.
  */
 import type { Page } from "@playwright/test";
-import { dismissCelebrations, expect, expectFocusNotOnBody, expectSynced, MONDAY, MONDAY_ISO, onboardedOn, serverData, test, toastMessage } from "./helpers";
+import { dismissCelebrations, expect, expectFocusNotOnBody, expectSynced, keepAnimationsOnTheRealTimeline, MONDAY, MONDAY_ISO, onboardedOn, serverData, test, toastMessage } from "./helpers";
 
 const SUNDAY_ISO = "2026-10-25";
 
@@ -107,6 +107,7 @@ test("two devices edit the same session: the stale one merges and both changes r
 
   // A second device (its own storage), on the same Monday.
   const other = await browser.newContext({ baseURL: new URL(page.url()).origin, storageState: await page.context().storageState() });
+  await keepAnimationsOnTheRealTimeline(other);
   try {
     const b = await other.newPage();
     await b.clock.install({ time: MONDAY });

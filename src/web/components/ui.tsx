@@ -280,6 +280,7 @@ export function NumberInput({
   className,
   inputClassName,
   unit,
+  unitClassName,
   ariaLabel,
   autoFocus,
   min,
@@ -300,6 +301,8 @@ export function NumberInput({
   className?: string;
   inputClassName?: string;
   unit?: ReactNode;
+  /** Unit text classes (default text-mute; boxed fields use text-fg-2 to keep 4.5:1 on their tint). */
+  unitClassName?: string;
   ariaLabel: string;
   autoFocus?: boolean;
   min?: number;
@@ -367,7 +370,7 @@ export function NumberInput({
         className={clsx(classes, !callerSized && "size-to-content")}
         style={style}
       />
-      {unit && <span className="text-xs text-mute">{unit}</span>}
+      {unit && <span className={clsx("text-xs", unitClassName ?? "text-mute")}>{unit}</span>}
     </label>
   );
 }
@@ -379,6 +382,7 @@ export function BoxNumber(props: Parameters<typeof NumberInput>[0]) {
       {...props}
       className={cx("box-field rounded-xl bg-white/[0.05] px-3 py-2", props.className)}
       inputClassName={cx("text-right text-base", props.inputClassName)}
+      unitClassName={props.unitClassName ?? "text-fg-2"}
     />
   );
 }

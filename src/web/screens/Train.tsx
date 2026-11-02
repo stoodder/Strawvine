@@ -927,8 +927,10 @@ export function TrainScreen() {
                 // Skipped today: one dimmed row; its sets count toward nothing until it's unskipped.
                 <div className="flex min-h-11 flex-wrap items-center justify-between gap-x-3">
                   <div className="min-w-0 truncate text-[0.9375rem] text-mute">{primaryName}</div>
-                  <div className="ml-auto flex shrink-0 items-center">
-                    <span className="label">Skipped today</span>
+                  <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end">
+                    <span className="label">
+                      Skipped<span className="max-[16rem]:hidden"> today</span>
+                    </span>
                     {!isPreview && (
                       <>
                         <span className="label px-1.5" aria-hidden>
@@ -1140,8 +1142,10 @@ export function TrainScreen() {
                                 {tagLabel}
                                 {name}
                               </div>
-                              <div className="ml-auto flex shrink-0 items-center">
-                                <span className="label">Skipped today</span>
+                              <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end">
+                                <span className="label">
+                                  Skipped<span className="max-[16rem]:hidden"> today</span>
+                                </span>
                                 {!isPreview && (
                                   <>
                                     <span className="label px-1.5" aria-hidden>

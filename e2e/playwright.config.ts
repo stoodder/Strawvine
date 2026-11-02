@@ -12,8 +12,11 @@ const executablePath = process.env.E2E_CHROMIUM || undefined;
 
 export default defineConfig({
   testDir: ".",
-  // One server and one database: tests run one at a time. Each starts from an empty database
-  // (the `test` fixture in helpers.ts resets it), so they're independent and a retry starts clean.
+  // Onboards once and saves the result as the template every test's database is cloned from.
+  globalSetup: "./global-setup.ts",
+  // One server and one database: tests run one at a time. Each starts from a copy of the
+  // onboarded template, or an empty database when it asks for one (the `test` fixture in
+  // helpers.ts resets it), so they're independent and a retry starts clean.
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,

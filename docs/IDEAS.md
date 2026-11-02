@@ -1,66 +1,56 @@
 # Ideas & follow-ups
 
-Collected from two rounds of adversarial reviews (security, data integrity, UX, design/accessibility,
+Collected from three rounds of adversarial reviews (security, data integrity, UX, design/accessibility,
 performance/ops/CI) and the implementation passes. Nothing here is required for daily use; it's a menu.
 Rough priority within each group. Items already built have been removed.
 
 ## Data & sync
 
-- **Version-checked whole-document saves.** Sessions and settings are saved whole; a stale window that saves before
-  its revalidation returns can still overwrite. Add `If-Match` (revision / `updatedAt`) → 409 → reload and re-apply.
-- **Writes return the new dataset version** so the client's stored ETag stays current (today, returning to the app
-  after your own writes costs one full download instead of a 304).
-- **Incremental sync** (`/bootstrap?since=`, per-collection deltas) for multi-year datasets.
-- Client-generated UUIDs for rows (removes temp-id remapping and dependency holds).
-- Idempotency: also verify the body hash on replay from older clients; move the login limiter state to Postgres so it
-  holds across dynos.
-- A "Couldn't save" banner in Settings → Sync for edits refused at queue time (today: a toast).
-- Cross-window sender lock in a SharedWorker where available.
+- **Incremental sync** (`/bootstrap?since=<version>`, per-collection deltas): sessions are ~80% of a multi-year
+  payload, and any device switch currently means one full download.
+- Bootstrap's data queries in one REPEATABLE READ snapshot with the version, so tag and body always match exactly.
+- Client-generated UUIDs for rows (removes temp-id remapping and dependency holds); stable ids for block exercises.
+- Persist the "merge once" state and pending merge toasts in the outbox entry so they survive a reload / window handoff.
+- Pair rebuilt accessory blocks by exercise fingerprint when two devices rebuilt the same session.
+- Version-check day-log patches field by field (today they're last-writer-wins per field).
+- A periodic prune of `revoked_sessions`; move session-prefill helpers onto a per-weekday index.
 
 ## Training
 
-- "Do this session today": swap a previewed day into today (travel / rest-day Sunday).
-- "Skip main lift today" (injury) without unlogged-set prompts.
-- Per-exercise rest targets; next set's plates inside the rest pill.
+- A per-set `skipped` flag so "skip rest of main lift" keeps the sets visible (today they're removed, with Restore).
+- On the source day of a moved session, offer "Do today's own plan instead".
+- Plate inventory and bar weight in Settings (`platesPerSide` uses defaults; odd loads show a remainder).
 - Interleaved superset order (A1, B1, A2, B2); swipe-to-skip on accessory rows.
-- Progression hint: "dismiss for today", a "hold" hint after missed reps, pyramid-aware suggestions
-  (today it suggests the heaviest load + increment for every open set).
-- Preview: projected AMRAP-driven max changes; a configurable horizon; link from Today's next session.
-- A per-benchmark history sheet; "CAP+12" time-capped scores; kg/lb preference.
-- Explicit choice whether a correction should hide the PR earned by the typo it fixes.
+- `accessoryHint` returning its date as a field; a "dismiss for today" that also covers hold hints across devices.
+- Preview: projected AMRAP-driven max changes; a configurable horizon.
+- Benchmark history rows link to their day and show a sparkline; "CAP+12" scores; kg/lb preference.
 
 ## Daily logging
 
 - Settings-level aliases for app-specific nutrition labels; optional one-decimal macros.
-- Heatmap: long-press preview before navigating, month labels.
+- Heatmap long-press preview; a 1-year / 2-year range on Progress between 90 days and All.
 - Evening steps reminder (web push; iOS requires the installed app).
-- Bigger / tappable pending-sync indicator on Today's date ("tap to sync now").
 
 ## Motivation & feedback
 
-- Shareable session recap and weekly check-in (best hint applied, skipped exercises, vs. last same weekday).
-- Day-closed sweep also when returning to Today after finishing a lift elsewhere; optional soft sound.
+- Shareable session recap and weekly check-in images (best hint applied, skipped exercises, vs. last same weekday).
+- Recap line "Bench press · 3 sets skipped" after skip-rest.
 - Streak protection tied to deload/rest days.
 - Optional AI-written weekly check-in on top of the rule-based signals.
 
 ## Design & accessibility
 
-- Settings jump list (the page is long at 320 px); rest settings shown as m:ss.
-- Downsample the bodyweight dots to weekly points for ranges over ~1 year.
-- Profile IntakeStrip (`targetsFor` ×7 per render) and the remaining ~150 ms model build on 10-year data.
-- `useFocusAfter` that retries a few frames and skips inert targets (Train uses a local `focusWhenReady`).
-- `DateJump` optional `max` prop (Train passes today + 14 as `today`); dock top edge in context for scroll helpers.
-- Small leftovers: focus after the skip toast's Undo; rest pill widens slightly when "/3:00" appears.
-- Lint: flag `text-mute` on tinted surfaces; arbitrary rem sizes outside the type scale; `bg-white/[…]` bypassing tokens.
+- Heatmap partial vs. empty cells at 3:1 (today ≈1.35:1 — would change the look; the data is in each cell's label).
+- A dedicated high-contrast top edge for sheets.
+- `content-visibility: auto` on the full achievements list; rest-time "3:30?" preview under the field instead of inline.
+- Lint: arbitrary rem sizes outside the type scale and `bg-white/[…]` alphas are already checked; next, a contrast unit
+  test computed from the `@theme` tokens.
 
 ## Engineering
 
-- Pin GitHub Actions to commit SHAs (Dependabot keeps them current); `lock_timeout` on migration statements.
-- A periodic "restore the export into a fresh database" check; Server-Timing headers on `/api/bootstrap`.
-- e2e: paste → Undo, the sign-out question, celebration hold, Settings renames, high-contrast persistence,
-  a toast's Undo while a sheet is open, axe checks per sheet, `activeElement !== body` after key actions,
-  `scrollWidth <= clientWidth` per screen at 195 px.
-- `LazyMotion` (`m.*` everywhere) for ~60–100 KB; name the shared vendor chunk.
-- Optional passkey / PIN app lock before showing cached data; "forget this device"; login alerts;
-  zxcvbn-style check for `APP_PASSWORD`.
-- CSP: trial dropping `style-src 'unsafe-inline'` with Report-Only.
+- Drop `'unsafe-inline'` from the enforced CSP once the Report-Only trial stays empty for a week.
+- Move GitHub Actions to their Node 24 majors when Dependabot proposes them; pin images by digest.
+- Shard e2e or snapshot one onboarded database per worker; run axe on a several-year dataset.
+- Reorder the idempotent exercise create's locks to match restore's (removes a rare deadlock window).
+- `LazyMotion` (`m.*` everywhere) for ~60–100 KB once the bottom-nav and sheet animations can use `domAnimation`.
+- Optional passkey / PIN app lock before showing cached data; login alerts; zxcvbn-style `APP_PASSWORD` check.

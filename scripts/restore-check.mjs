@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 /**
- * Restore round trip (CI: the weekly `restore-check` job): an export must restore into a fresh
- * database and export again unchanged.
+ * Restore round trip (CI: the `check` job on every push, and the weekly `restore-check` job): an
+ * export must restore into a fresh database and export again unchanged.
  *
  *   npm run build && node scripts/restore-check.mjs
  *   RESTORE_APP_DIR=… node scripts/restore-check.mjs   # use another build (<dir>/dist, <dir>/drizzle)
  *
  * 1. starts the production server (dist/server/index.js) on a fresh database A and signs in;
- * 2. seeds a small but varied dataset through the API (days with every kind of field, a
- *    benchmark, unicode notes, settings changes, a new exercise, max entries, a session, seen
- *    achievements);
- * 3. GET /api/export → A.json;
+ * 2. seeds a dataset through the API with every column non-null (or true) somewhere: day logs
+ *    with micros, sleep score, HRV, energy/soreness, zone 2, metcon notes and benchmarks, unicode
+ *    journal; exercises of every measure, one archived, tracked lifts; max entries of every source
+ *    (incl. a correction); settings with a weight goal, strength targets, training and display
+ *    prefs; sessions with an applied AMRAP bump, a superset, a skipped exercise, a skipped main
+ *    lift, a moved session (plannedFor) and a plan signature; seen achievements;
+ * 3. GET /api/export → A.json, checked to really have every field set somewhere;
  * 4. restores A.json into a second fresh database B with dist/server/restore.js;
  * 5. starts the server on B, signs in, exports again → B.json;
  * 6. compares the two exports, ignoring `exportedAt`; any difference fails with its path.
@@ -146,10 +149,16 @@ const addDays = (iso, n) => {
   return d.toISOString().slice(0, 10);
 };
 
-/** A small dataset touching every table and most column types. */
+/**
+ * A dataset with every column non-null somewhere (and every boolean true somewhere), so a restore
+ * that drops or defaults any field changes the second export and fails. `checkCoverage` below
+ * verifies the seed really reached the export that way.
+ */
 async function seed(call) {
   const boot = await call("GET", "/api/bootstrap");
-  const bench = boot.exercises.find((e) => e.name === "Bench press");
+  const byName = (name) => boot.exercises.find((e) => e.name === name);
+  const bench = byName("Bench press");
+  const squat = byName("Back squat");
   const start = "2026-09-01";
   for (let i = 0; i < 12; i++) {
     const date = addDays(start, i);
@@ -157,39 +166,142 @@ async function seed(call) {
       weightLb: 200 - i * 0.3,
       calories: 2300 + (i % 3) * 50,
       proteinG: 190 + i,
-      carbsG: 220,
+      carbsG: 220.5,
       fatG: 70,
+      micros: { fiberG: 30 + i, sodiumMg: 2300, "vitamin D µg": 12.5 },
       steps: 12000 + i * 250,
+      sleepScore: 80 + (i % 10),
+      hrvMs: 60.5 + i,
       sleepMinutes: 420 + i,
-      ...(i % 4 === 0 ? { metconDone: true, metconBenchmark: "Fran", metconScore: `${4 + (i % 3)}:${String(10 + i).padStart(2, "0")}` } : {}),
+      energy: 1 + (i % 5),
+      soreness: 5 - (i % 5),
+      zone2Done: i % 2 === 0,
+      zone2Minutes: i % 2 === 0 ? 40 + i : null,
+      ...(i % 4 === 0
+        ? {
+            metconDone: true,
+            metconNotes: "21-15-9 thrusters / pull-ups",
+            metconBenchmark: "Fran",
+            metconScore: `${4 + (i % 3)}:${String(10 + i).padStart(2, "0")}`,
+          }
+        : {}),
       ...(i === 3 ? { journal: "Felt strong — ünïcödé ✓, \"quotes\" and a\nnewline." } : {}),
     });
   }
-  await call("PUT", "/api/settings", { ...boot.settings, program: { ...boot.settings.program, name: "Restore check program" } });
-  const row = await call("POST", "/api/exercises", { name: "Restore-check curl", category: "accessory", measure: "reps" });
-  await call("POST", `/api/exercises/${bench.id}/maxes`, { date: start, valueLb: 225, source: "manual", note: "start" });
-  await call("POST", `/api/exercises/${bench.id}/maxes`, { date: addDays(start, 7), valueLb: 230, source: "manual", note: null });
-  const set = (id, done) => ({ id, targetReps: 10, targetWeight: 50, reps: done ? 10 : null, weight: done ? 50 : null, done, amrap: false, appliedProgressionLb: null });
+
+  const curl = await call("POST", "/api/exercises", { name: "Restore-check curl", category: "accessory", measure: "reps" });
+  const carry = await call("POST", "/api/exercises", { name: "Restore-check carry", category: "carry", measure: "meters", tracksMax: false });
+  const plank = await call("POST", "/api/exercises", { name: "Restore-check plank", category: "core", measure: "seconds" });
+  const old = await call("POST", "/api/exercises", { name: "Restore-check retired lift", category: "primary", measure: "reps", tracksMax: true });
+  await call("PATCH", `/api/exercises/${old.id}`, { archived: true });
+
+  await call("POST", `/api/exercises/${bench.id}/maxes`, { date: start, valueLb: 225, source: "initial", note: "start" });
+  await call("POST", `/api/exercises/${bench.id}/maxes`, { date: addDays(start, 7), valueLb: 230, source: "amrap", note: null, createdAt: `${addDays(start, 7)}T18:05:00.000Z` });
+  await call("POST", `/api/exercises/${bench.id}/maxes`, { date: addDays(start, 8), valueLb: 228, source: "correction", note: "typo fix" });
+  await call("POST", `/api/exercises/${squat.id}/maxes`, { date: start, valueLb: 315, source: "manual", note: "belt" });
+
+  // Settings: every optional block present and changed from the defaults.
+  await call("PUT", "/api/settings", {
+    ...boot.settings,
+    onboarded: true,
+    targets: { steps: 11000, zone2Minutes: 45 },
+    nutrition: { ...boot.settings.nutrition, initialTdee: 2900 },
+    weightGoal: { targetLb: 190, pacePctPerWeek: 0.6, setOn: start, startLb: 200 },
+    strengthTargets: [
+      { id: "t-bench", exerciseId: bench.id, targetLb: 275, setOn: start },
+      { id: "t-squat", exerciseId: squat.id, targetLb: 365, setOn: addDays(start, 1) },
+    ],
+    program: { ...boot.settings.program, name: "Restore check program", cycleStartDate: "2026-08-31" },
+    training: { restSecondsMain: 210, restSecondsAccessory: 75, accessoryIncrementLb: 2.5 },
+    display: { highContrast: true },
+  });
+
+  const set = (id, done, extra = {}) => ({
+    id,
+    targetReps: 10,
+    targetWeight: 50,
+    reps: done ? 10 : null,
+    weight: done ? 50 : null,
+    done,
+    amrap: false,
+    appliedProgressionLb: null,
+    ...extra,
+  });
+  // A completed session: an AMRAP that applied a bump, a superset, a skipped exercise.
   await call("PUT", `/api/sessions/${addDays(start, 7)}`, {
     date: addDays(start, 7),
     label: "Push",
     cycle: 1,
-    week: 1,
+    week: 2,
     deload: false,
     primaryMaxLb: 225,
     blocks: [
       {
         id: "b1",
         kind: "primary",
-        exercises: [{ exerciseId: bench.id, measure: "reps", sets: [set("s1", true), { ...set("s2", true), amrap: true, reps: 14 }] }],
+        exercises: [{ exerciseId: bench.id, measure: "reps", sets: [set("s1", true), { ...set("s2", true), amrap: true, reps: 14, appliedProgressionLb: 5 }] }],
       },
-      { id: "b2", kind: "accessory", exercises: [{ exerciseId: row.id, measure: "reps", sets: [set("s3", true), set("s4", false)] }] },
+      {
+        id: "b2",
+        kind: "accessory",
+        exercises: [
+          { exerciseId: curl.id, measure: "reps", sets: [set("s3", true), set("s4", false)] },
+          { exerciseId: carry.id, measure: "meters", sets: [set("s5", true, { targetReps: 40, reps: 40 })] },
+        ],
+      },
+      { id: "b3", kind: "accessory", exercises: [{ exerciseId: plank.id, measure: "seconds", sets: [set("s6", false)], skipped: true }] },
     ],
     notes: "Restore check",
     completedAt: `${addDays(start, 7)}T18:00:00.000Z`,
+    planSig: "restore-check-plan-signature",
+  });
+  // A moved session ("do this session today") with the main lift skipped; a deload week.
+  await call("PUT", `/api/sessions/${addDays(start, 9)}`, {
+    date: addDays(start, 9),
+    label: "Legs",
+    cycle: 1,
+    week: 4,
+    deload: true,
+    primaryMaxLb: 315,
+    blocks: [{ id: "b4", kind: "primary", skipped: true, exercises: [{ exerciseId: squat.id, measure: "reps", sets: [set("s7", false)] }] }],
+    notes: "",
+    completedAt: null,
     planSig: null,
+    plannedFor: addDays(start, 8),
   });
   await call("POST", "/api/achievements/seen", { keys: ["first-entry", "restore-check"] });
+}
+
+/**
+ * The seed must have reached the export with every field set somewhere — otherwise a restore that
+ * drops that field would go unnoticed. Returns what is missing.
+ */
+function checkCoverage(exp) {
+  const missing = [];
+  const everyKey = (rows, what, skip = []) => {
+    const keys = new Set(rows.flatMap((r) => Object.keys(r)));
+    for (const k of keys) {
+      if (skip.includes(k)) continue;
+      if (!rows.some((r) => r[k] !== null && r[k] !== undefined && r[k] !== false)) missing.push(`${what}.${k}`);
+    }
+  };
+  everyKey(exp.days, "days");
+  everyKey(exp.exercises, "exercises");
+  everyKey(exp.maxEntries, "maxEntries");
+  everyKey(exp.sessions, "sessions");
+  everyKey(exp.sessions.flatMap((s) => s.blocks), "blocks");
+  everyKey(exp.sessions.flatMap((s) => s.blocks.flatMap((b) => b.exercises)), "block exercises");
+  everyKey(exp.sessions.flatMap((s) => s.blocks.flatMap((b) => b.exercises.flatMap((e) => e.sets))), "sets");
+  everyKey([exp.settings], "settings");
+  everyKey([exp.settings.weightGoal ?? {}], "settings.weightGoal");
+  everyKey([exp.settings.nutrition], "settings.nutrition");
+  for (const source of ["initial", "manual", "amrap", "correction"])
+    if (!exp.maxEntries.some((m) => m.source === source)) missing.push(`maxEntries.source=${source}`);
+  for (const measure of ["reps", "seconds", "meters"])
+    if (!exp.exercises.some((e) => e.measure === measure)) missing.push(`exercises.measure=${measure}`);
+  if (!exp.settings.strengthTargets?.length) missing.push("settings.strengthTargets");
+  if (!exp.seenAchievements.length) missing.push("seenAchievements");
+  return missing;
 }
 
 /** The first path at which a and b differ, or null. */
@@ -218,6 +330,11 @@ async function main() {
     exportA = await call("GET", "/api/export");
   } finally {
     await a.stop();
+  }
+  const missing = checkCoverage(exportA);
+  if (missing.length) {
+    console.error(`restore-check: the seed didn't reach every field (a restore dropping these would go unnoticed): ${missing.join(", ")}`);
+    process.exit(1);
   }
   const fileA = path.join(outDir, "export-a.json");
   writeFileSync(fileA, JSON.stringify(exportA, null, 2));
