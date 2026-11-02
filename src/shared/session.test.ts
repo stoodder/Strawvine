@@ -3,7 +3,18 @@ import { defaultSettings } from "./defaults";
 import { buildModel } from "./insights";
 import { achievements, checklist, streaks, type AppData } from "./gamify";
 import { emptyDayLog, type Exercise, type MaxEntry, type Session } from "./schemas";
-import { accessoryHint, blankSet, buildSession, planChanged, planMatches, planSignature, sessionCounts, sessionVolume } from "./session";
+import {
+  accessoryHint,
+  blankSet,
+  buildSession,
+  buildSessionFrom,
+  nextSession,
+  planChanged,
+  planMatches,
+  planSignature,
+  sessionCounts,
+  sessionVolume,
+} from "./session";
 import { addDays } from "./dates";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -283,6 +294,7 @@ describe("accessoryHint", () => {
       [null, 12, 50, false], // not logged: doesn't count
     ]);
     expect(accessoryHint(10, "2026-11-16", [last], 5)).toEqual({
+      kind: "increase",
       lastWeight: 50,
       suggestedWeight: 55,
       reason: expect.stringContaining("+5 lb"),
@@ -290,20 +302,23 @@ describe("accessoryHint", () => {
     expect(accessoryHint(10, "2026-11-16", [last], 2.5)?.suggestedWeight).toBe(52.5);
   });
 
-  it("has no hint when a set fell short, had no load, or nothing was logged", () => {
-    expect(
-      accessoryHint(
-        10,
-        "2026-11-16",
-        [
-          sess("2026-11-09", [
-            [12, 12, 50, true],
-            [10, 12, 50, true],
-          ]),
-        ],
-        5,
-      ),
-    ).toBeNull();
+  it("holds the load when a set fell short of its target", () => {
+    const short = sess("2026-11-09", [
+      [12, 12, 50, true],
+      [10, 12, 50, true],
+    ]);
+    expect(accessoryHint(10, "2026-11-16", [short], 5)).toEqual({
+      kind: "hold",
+      lastWeight: 50,
+      suggestedWeight: 50,
+      reason: "Missed reps at 50 lb on Nov 9 — hold",
+    });
+    // Hints off: no hold either.
+    expect(accessoryHint(10, "2026-11-16", [short], 0)).toBeNull();
+  });
+
+  it("has no hint when a set had no load or target, or nothing was logged", () => {
+    expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, null, 50, true]])], 5)).toBeNull();
     expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, 12, null, true]])], 5)).toBeNull();
     expect(accessoryHint(10, "2026-11-16", [], 5)).toBeNull();
     expect(accessoryHint(10, "2026-11-16", [sess("2026-11-09", [[12, 12, 50, true]])], 0)).toBeNull();
@@ -314,7 +329,7 @@ describe("accessoryHint", () => {
     const short = sess("2026-11-09", [[8, 12, 50, true]]);
     const skipped = sess("2026-11-16", [[12, 12, 60, true]], true);
     const unlogged = sess("2026-11-17", [[null, 12, 60, false]]);
-    expect(accessoryHint(10, "2026-11-23", [good, short, skipped, unlogged], 5)).toBeNull(); // Nov 9 fell short
+    expect(accessoryHint(10, "2026-11-23", [good, short, skipped, unlogged], 5)).toMatchObject({ kind: "hold", lastWeight: 50 }); // Nov 9 fell short
     expect(accessoryHint(10, "2026-11-09", [good, short, skipped, unlogged], 5)?.suggestedWeight).toBe(45); // before Nov 9
   });
 });
@@ -361,7 +376,7 @@ describe("carrying numbers across weeks", () => {
     const deload = session("2026-11-30", [{ exerciseId: 10, measure: "reps", sets: [set(40, 12, 12)] }]);
     expect(accessoryHint(10, "2026-12-07", [normal, deload], 5)?.suggestedWeight).toBe(55);
     const short = session("2026-11-23", [{ exerciseId: 10, measure: "reps", sets: [set(50, 12, 11)] }]);
-    expect(accessoryHint(10, "2026-12-07", [short, deload], 5)).toBeNull();
+    expect(accessoryHint(10, "2026-12-07", [short, deload], 5)).toMatchObject({ kind: "hold", suggestedWeight: 50 });
   });
 });
 
@@ -430,5 +445,123 @@ describe("sessionCounts", () => {
       ],
     };
     expect(sessionCounts(s)).toEqual({ done: 2, total: 3 });
+  });
+});
+
+describe("skipping the main lift", () => {
+  const ctx = { settings, exercises, maxEntries, sessions: [] as Session[] };
+  const skipMain = (s: Session): Session => ({ ...s, blocks: s.blocks.map((b) => (b.kind === "primary" ? { ...b, skipped: true } : b)) });
+
+  it("leaves its sets out of the counts and the volume", () => {
+    const s = buildSession("2026-11-02", ctx);
+    const withAccessory: Session = {
+      ...s,
+      blocks: [
+        ...s.blocks.map((b) => ({
+          ...b,
+          exercises: b.exercises.map((e) => ({ ...e, sets: e.sets.map((x) => ({ ...x, done: true, reps: 6 })) })),
+        })),
+        {
+          id: "acc",
+          kind: "accessory",
+          exercises: [{ exerciseId: 10, measure: "reps", sets: [blankSet({ done: true, reps: 10, weight: 50 }), blankSet()] }],
+        },
+      ],
+    };
+    expect(sessionCounts(withAccessory)).toEqual({ done: 5, total: 6 });
+    const skipped = skipMain(withAccessory);
+    expect(sessionCounts(skipped)).toEqual({ done: 1, total: 2 });
+    expect(sessionVolume(skipped)).toBe(500);
+    // Nothing else to log: a session with only the skipped main lift has no open sets to finish.
+    expect(sessionCounts(skipMain(s))).toEqual({ done: 0, total: 0 });
+  });
+
+  it("is not a plan change", () => {
+    const s = buildSession("2026-11-02", ctx);
+    expect(planChanged(skipMain(s), ctx)).toBe(false);
+    const { planSig: _sig, ...legacy } = skipMain(s);
+    expect(planChanged(legacy, ctx)).toBe(false);
+  });
+});
+
+describe("buildSessionFrom (do this session today)", () => {
+  const ctx = { settings, exercises, maxEntries, sessions: [] as Session[] };
+
+  it("saves the source day's plan under the target date", () => {
+    // Monday's bench, done on Sunday.
+    const s = buildSessionFrom("2026-11-09", "2026-11-08", ctx);
+    const monday = buildSession("2026-11-09", ctx);
+    expect(s.date).toBe("2026-11-08");
+    expect(s.plannedFor).toBe("2026-11-09");
+    expect(s.label).toBe(monday.label);
+    expect([s.cycle, s.week, s.deload, s.primaryMaxLb]).toEqual([monday.cycle, monday.week, monday.deload, monday.primaryMaxLb]);
+    expect(s.blocks[0]!.exercises[0]!.sets.map((x) => [x.targetReps, x.targetWeight, x.amrap])).toEqual(
+      monday.blocks[0]!.exercises[0]!.sets.map((x) => [x.targetReps, x.targetWeight, x.amrap]),
+    );
+    expect(s.planSig).toBe(monday.planSig);
+    // The plan check follows the source day, not the date it was moved to.
+    expect(planChanged(s, ctx)).toBe(false);
+    expect(planMatches(s, ctx)).toBe(true);
+    // Same day: nothing moved.
+    expect(buildSessionFrom("2026-11-09", "2026-11-09", ctx).plannedFor).toBeNull();
+  });
+
+  it("carries the source day's accessories, and later counts as a session of that day type", () => {
+    const lastMonday: Session = {
+      ...buildSession("2026-11-02", ctx),
+      blocks: [
+        {
+          id: "acc",
+          kind: "accessory",
+          exercises: [{ exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 12, weight: 50, reps: 12, done: true })] }],
+        },
+      ],
+    };
+    const moved = buildSessionFrom("2026-11-09", "2026-11-08", { ...ctx, sessions: [lastMonday] });
+    const acc = moved.blocks.find((b) => b.kind === "accessory")!;
+    expect(acc.exercises[0]!.sets.map((x) => [x.targetReps, x.targetWeight])).toEqual([[12, 50]]);
+    // The Sunday session (a Monday plan) is the template for the next Monday.
+    const done: Session = {
+      ...moved,
+      blocks: [
+        {
+          id: "acc2",
+          kind: "accessory",
+          exercises: [{ exerciseId: 10, measure: "reps", sets: [blankSet({ targetReps: 12, weight: 55, reps: 12, done: true })] }],
+        },
+      ],
+    };
+    const next = buildSession("2026-11-16", { ...ctx, sessions: [lastMonday, done] });
+    expect(next.blocks.find((b) => b.kind === "accessory")!.exercises[0]!.sets[0]!.targetWeight).toBe(55);
+  });
+});
+
+describe("nextSession", () => {
+  it("is the next program day after today, with its lift and week", () => {
+    // Program starts Mon Nov 2; Mon–Thu have main lifts, Fri is carries.
+    expect(nextSession("2026-11-01", { settings, exercises })).toEqual({
+      date: "2026-11-02",
+      label: "Push",
+      liftName: "Bench press",
+      weekLabel: settings.program.weeks[0]!.label,
+    });
+    expect(nextSession("2026-11-02", { settings, exercises })).toMatchObject({ date: "2026-11-03", liftName: "Deadlift" });
+    // Friday → the carry day has no main lift.
+    expect(nextSession("2026-11-05", { settings, exercises })).toMatchObject({ date: "2026-11-06", liftName: null });
+    // Weekend → Monday of week 2.
+    expect(nextSession("2026-11-07", { settings, exercises })).toMatchObject({
+      date: "2026-11-09",
+      weekLabel: settings.program.weeks[1]!.label,
+    });
+  });
+
+  it("passes over a day whose session was done early, and gives up after 14 days", () => {
+    const early = { ...buildSessionFrom("2026-11-09", "2026-11-08", { settings, exercises, maxEntries, sessions: [] }) };
+    expect(nextSession("2026-11-08", { settings, exercises, sessions: [early] })).toMatchObject({ date: "2026-11-10" });
+    const noDays = { ...settings, program: { ...settings.program, days: {} } };
+    expect(nextSession("2026-11-08", { settings: noDays, exercises })).toBeNull();
+    // Before the first cycle starts, nothing is scheduled.
+    const late = { ...settings, program: { ...settings.program, cycleStartDate: "2027-01-04" } };
+    expect(nextSession("2026-11-08", { settings: late, exercises })).toBeNull();
   });
 });

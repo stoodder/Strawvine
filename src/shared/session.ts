@@ -3,8 +3,8 @@
  * plan at the gym: the main lift is calculated, accessories are carried over from the last
  * session of the same day type (deloaded when appropriate).
  */
-import { formatShortDate, weekdayOf, type ISODate } from "./dates";
-import { cyclePosition, currentMax, mainLiftSets, programDayFor, roundTo } from "./program";
+import { addDays, formatShortDate, weekdayOf, type ISODate } from "./dates";
+import { cyclePosition, currentMax, mainLiftSets, programDayFor, roundTo, scheduledProgramDay } from "./program";
 import type { Block, BlockExercise, Exercise, MaxEntry, Session, SetEntry, Settings } from "./schemas";
 
 export function newId(): string {
@@ -34,11 +34,17 @@ export interface BuildContext {
   sessions: ReadonlyArray<Session>;
 }
 
-/** Most recent earlier session on the same weekday, preferring non-deload weeks. */
+/**
+ * The date whose program day a session follows: `plannedFor` when it was moved ("do this session
+ * today"), else its own date. A Monday plan done on a Sunday is a Monday session for pre-fill.
+ */
+export const planDateOf = (s: Pick<Session, "date" | "plannedFor">): ISODate => s.plannedFor ?? s.date;
+
+/** Most recent earlier session of the same day type (weekday of its plan), preferring non-deload weeks. */
 function templateSource(date: ISODate, sessions: ReadonlyArray<Session>): Session | null {
   const wd = weekdayOf(date);
   const prior = sessions
-    .filter((s) => s.date < date && weekdayOf(s.date) === wd && s.blocks.some((b) => b.kind === "accessory"))
+    .filter((s) => s.date < date && weekdayOf(planDateOf(s)) === wd && s.blocks.some((b) => b.kind === "accessory"))
     .sort((a, b) => (a.date < b.date ? 1 : -1));
   return prior.find((s) => !s.deload) ?? prior[0] ?? null;
 }
@@ -98,7 +104,7 @@ function lastPerformance(
   for (const deload of [false, true])
     for (const sameDay of [true, false])
       for (const s of prior) {
-        if (s.deload !== deload || (weekdayOf(s.date) === wd) !== sameDay) continue;
+        if (s.deload !== deload || (weekdayOf(planDateOf(s)) === wd) !== sameDay) continue;
         const exercise = find(s);
         if (exercise) return { session: s, exercise };
       }
@@ -178,6 +184,54 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
   };
 }
 
+/**
+ * "Do this session today": the plan for `sourceDate` — its main lift for that program day and
+ * week, and the accessories carried into it — saved under `targetDate`. Keeps the source day's
+ * label, cycle, week and plan signature, and records `plannedFor: sourceDate` so pre-fill, the
+ * plan-changed check and recalculation keep following the source day.
+ */
+export function buildSessionFrom(sourceDate: ISODate, targetDate: ISODate, ctx: BuildContext): Session {
+  const planned = buildSession(sourceDate, ctx);
+  return { ...planned, date: targetDate, plannedFor: sourceDate === targetDate ? null : sourceDate };
+}
+
+export interface NextSession {
+  date: ISODate;
+  /** The program day's label ("Push"). */
+  label: string;
+  /** The day's main lift, or null when it has none (or it's unknown). */
+  liftName: string | null;
+  /** The program week's label ("Week 3", "Deload"). */
+  weekLabel: string;
+}
+
+/** How far ahead `nextSession` looks. */
+export const NEXT_SESSION_HORIZON_DAYS = 14;
+
+/**
+ * The next program day after `today` (within NEXT_SESSION_HORIZON_DAYS), or null. A day whose
+ * plan was already done early ("do this session today", a session with `plannedFor` that day
+ * dated before it) is passed over.
+ */
+export function nextSession(
+  today: ISODate,
+  data: Pick<BuildContext, "settings" | "exercises"> & { sessions?: ReadonlyArray<Session> },
+): NextSession | null {
+  const { program } = data.settings;
+  const pulledForward = new Set(
+    (data.sessions ?? []).filter((s) => s.plannedFor && s.date < s.plannedFor && s.plannedFor > today).map((s) => s.plannedFor!),
+  );
+  for (let i = 1; i <= NEXT_SESSION_HORIZON_DAYS; i++) {
+    const date = addDays(today, i);
+    const day = scheduledProgramDay(program, date);
+    const pos = day ? cyclePosition(program, date) : null;
+    if (!day || !pos || pulledForward.has(date)) continue;
+    const lift = day.primaryExerciseId != null ? data.exercises.find((e) => e.id === day.primaryExerciseId) : undefined;
+    return { date, label: day.label, liftName: lift?.name ?? null, weekLabel: pos.week.label };
+  }
+  return null;
+}
+
 type PlannedPrimary = ReturnType<typeof plannedPrimary>;
 
 function signatureOf(block: Block | null, pos: PlannedPrimary["pos"]): string | null {
@@ -208,20 +262,22 @@ export function planSignature(date: ISODate, ctx: Omit<BuildContext, "sessions">
  * saved sets with a fresh plan (`planMatches`).
  */
 export function planChanged(session: Session, ctx: Omit<BuildContext, "sessions">): boolean {
-  if (session.planSig !== undefined) return planSignature(session.date, ctx) !== session.planSig;
+  if (session.planSig !== undefined) return planSignature(planDateOf(session), ctx) !== session.planSig;
   return !planMatches(session, ctx);
 }
 
-/** Logged and total sets of a session, leaving out exercises skipped today. */
+/** Logged and total sets of a session, leaving out exercises (and a main lift) skipped today. */
 export function sessionCounts(session: Session): { done: number; total: number } {
   let done = 0;
   let total = 0;
-  for (const b of session.blocks)
+  for (const b of session.blocks) {
+    if (b.skipped) continue;
     for (const e of b.exercises) {
       if (e.skipped) continue;
       total += e.sets.length;
       for (const s of e.sets) if (s.done) done++;
     }
+  }
   return { done, total };
 }
 
@@ -234,7 +290,7 @@ const sameNum = (a: number | null, b: number | null) => (a === null || b === nul
  * with no main lift matches when none is planned either.
  */
 export function planMatches(session: Session, ctx: Omit<BuildContext, "sessions">): boolean {
-  const { block, pos } = plannedPrimary(session.date, ctx);
+  const { block, pos } = plannedPrimary(planDateOf(session), ctx);
   const deload = pos?.week.deload ?? false;
   const saved = session.blocks.find((b) => b.kind === "primary")?.exercises[0];
   const fresh = block?.exercises[0];
@@ -248,18 +304,26 @@ export function planMatches(session: Session, ctx: Omit<BuildContext, "sessions"
 }
 
 export interface AccessoryHint {
+  /**
+   * "increase": every logged set met its target → suggest a heavier load. "hold": a set fell
+   * short of its target → stay at the same load.
+   */
+  kind: "increase" | "hold";
   /** Heaviest load logged last time. */
   lastWeight: number;
+  /** `lastWeight + incrementLb` for "increase", `lastWeight` for "hold". */
   suggestedWeight: number;
-  /** Short explanation, e.g. "All reps at 50 lb on Nov 2 → +5 lb". */
+  /** Short explanation, e.g. "All reps at 50 lb on Nov 2 → +5 lb" / "Missed reps at 50 lb on Nov 2 — hold". */
   reason: string;
 }
 
 /**
- * Progression hint for an accessory: when every logged set of its most recent (non-skipped,
- * started, non-deload) performance before `beforeDate` met that session's target reps with a
- * load, suggest the heaviest of those loads + `incrementLb`. Deload weeks are ignored: their
- * light loads say nothing about progress. Null otherwise, or when the increment is 0.
+ * Progression hint for an accessory, from its most recent (non-skipped, started, non-deload)
+ * performance before `beforeDate`. When every logged set met that session's target reps with a
+ * load: "increase" to the heaviest of those loads + `incrementLb`. When a set fell short: "hold"
+ * at that load. Deload weeks are ignored: their light loads say nothing about progress. Null when
+ * a logged set has no target or no load, when nothing was logged, or when the increment is 0
+ * (hints off).
  */
 export function accessoryHint(
   exerciseId: number,
@@ -277,30 +341,31 @@ export function accessoryHint(
       .flatMap((e) => e.sets.filter((x) => x.done));
     if (!logged.length) continue;
     let lastWeight = 0;
+    let missed = false;
     for (const x of logged) {
       const reps = x.reps ?? x.targetReps;
       const weight = x.weight ?? x.targetWeight;
-      if (x.targetReps === null || reps === null || reps < x.targetReps || weight === null || weight <= 0) return null;
+      if (x.targetReps === null || reps === null || weight === null || weight <= 0) return null;
+      if (reps < x.targetReps) missed = true;
       lastWeight = Math.max(lastWeight, weight);
     }
+    const on = formatShortDate(s.date);
+    if (missed) return { kind: "hold", lastWeight, suggestedWeight: lastWeight, reason: `Missed reps at ${lastWeight} lb on ${on} — hold` };
     const suggestedWeight = Math.round((lastWeight + incrementLb) * 100) / 100;
-    return {
-      lastWeight,
-      suggestedWeight,
-      reason: `All reps at ${lastWeight} lb on ${formatShortDate(s.date)} → +${incrementLb} lb`,
-    };
+    return { kind: "increase", lastWeight, suggestedWeight, reason: `All reps at ${lastWeight} lb on ${on} → +${incrementLb} lb` };
   }
   return null;
 }
 
-/** Total load moved (weight × reps) across completed sets of rep-measured, not-skipped exercises. */
+/** Total load moved (weight × reps) across completed sets of rep-measured, not-skipped exercises (and main lift). */
 export function sessionVolume(session: Session): number {
   let total = 0;
   for (const b of session.blocks)
-    for (const e of b.exercises) {
-      if (e.measure !== "reps" || e.skipped) continue;
-      for (const s of e.sets) if (s.done) total += (s.weight ?? s.targetWeight ?? 0) * (s.reps ?? s.targetReps ?? 0);
-    }
+    if (!b.skipped)
+      for (const e of b.exercises) {
+        if (e.measure !== "reps" || e.skipped) continue;
+        for (const s of e.sets) if (s.done) total += (s.weight ?? s.targetWeight ?? 0) * (s.reps ?? s.targetReps ?? 0);
+      }
   return total;
 }
 

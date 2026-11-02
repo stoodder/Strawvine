@@ -200,6 +200,15 @@ optional note.
 - **Skip today:** an accessory can be marked skipped for one session. It stays in the session (and in next week's
   pre-fill, un-skipped, with the numbers from the last time it was actually done), but its sets don't count toward
   volume, PRs or hints.
+- **Skip the main lift** (e.g. an injury): the main-lift block is marked skipped for that session. Its sets count toward
+  nothing (set counts, volume, AMRAP PRs — not even as a baseline), so the session can be finished without being asked
+  about unlogged sets. Skipping isn't a plan change.
+- **Do this session today:** any upcoming day's plan (e.g. tomorrow's, for travel or a rest-day Sunday) can be done
+  today: its main lift for that program day and week plus the accessories carried into it, under its own label, saved
+  under today's date with `plannedFor` = the source day. Pre-fill, the plan-changed check and recalculation follow the
+  source day (a Monday plan done on a Sunday is a Monday session for next Monday's pre-fill), and that day no longer
+  shows as the next session.
+- **Next session:** the next program day after today (looking 14 days ahead), with its label, main lift and week.
 - **Plan changed:** a saved session nothing has been logged in yet is flagged when the program now prescribes something
   different for its main lift than when the session was built (lift, week, deload, reps, AMRAP flags, target weights —
   stored with the session as its plan signature), with a one-tap recalculation. The athlete's own edits to targets never
@@ -207,6 +216,7 @@ optional note.
   back-off sets are ignored.)
 - **Progression hint:** when every logged set of an accessory's last (non-skipped, non-deload) performance met that
   session's target reps with a load, the next session suggests that load + **5 lb** (editable; 0 turns hints off).
+  When a set fell short of its target, the hint says **hold** at the same load ("Missed reps at 50 lb on Nov 2 — hold").
 - Rest timer (targets editable: **180 s** after main-lift sets, **90 s** after accessories); plate calculator.
 
 ## 7. Gamification & feedback
@@ -214,6 +224,9 @@ optional note.
 - **Close the day**: today's checklist (weigh-in, nutrition, steps target, zone 2, metcon, lift as
   scheduled) — closing every item extends the streak.
 - Streaks, PR moments, cycle completions, calibration milestones, strength-target hits, goal weight.
+- Each achievement is celebrated once. A max gain the screen already showed (applying an AMRAP bump) is filed as seen
+  in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or
+  only after the device comes back online.
 - Rule-based insights (protein adherence, sleep, HRV trend, steps, rate-of-change safety).
 - Tasteful motion: smooth fills, a satisfying check, a restrained glow for PRs. Haptics where available.
 - Optional **high-contrast "outdoor" mode** (brighter secondary text, thicker chart lines) for gym glare.
@@ -232,6 +245,21 @@ optional note.
   an `Idempotency-Key`, so a retry after a lost response never duplicates a row (keys are kept 7 days). Settings shows
   when the device last synced, what is still unsynced, and "Sync now"; Today marks rows with unsynced edits and ticks
   "saved" when the server confirms one. The data set is never kept in the browser's HTTP cache; the app revalidates its
-  own copy with an ETag (304 when nothing changed). After onboarding the app asks the browser for persistent storage so the
-  offline copy isn't evicted.
+  own copy with an ETag (304 when nothing changed). Every write answers with the data set's version before and after it,
+  so a device whose copy was current stays current after its own edits (the next revalidation is a 304). After
+  onboarding the app asks the browser for persistent storage so the offline copy isn't evicted.
+- Edits the server would reject (limits a person can hit: too many sets, an overlong note…) are refused before they are
+  queued; Settings → Sync lists the last 20 with why, until cleared.
+- **Version-checked saves.** Workouts and settings are saved as whole documents, each with a server revision. An edit
+  carries the revision it was made on; when another device saved the document since, the server answers 409 with its
+  copy and the edit is merged onto it and sent once more ("Merged changes from another device"):
+  - workouts merge per set (by id; two sessions built separately on two devices are paired up main lift to main lift,
+    accessory blocks by their exercises, sets in order): a set logged or edited on this device wins; sets and blocks only
+    the other device has are kept; something one device removed stays removed unless the other changed it; the
+    workout's own fields (notes, finish, skip) merge like settings;
+  - settings merge field by field: the fields this device changed, the server's for everything else;
+  - a second conflict in a row marks the edit "not saved" (Retry merges again); saves without a revision (older app
+    versions) are accepted as before.
+- **Forget this device** signs only this device out, drops its known-device mark (it's treated like any unknown device
+  at sign-in) and wipes everything the app stored on it, after sending what it can.
 - Pure, unit-tested domain modules for all calculations.

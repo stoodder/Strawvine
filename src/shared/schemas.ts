@@ -276,6 +276,11 @@ export const blockSchema = z.object({
   kind: z.enum(["primary", "accessory"]),
   /** More than one exercise = superset. */
   exercises: z.array(blockExerciseSchema).min(1).max(6),
+  /**
+   * The main lift skipped today (e.g. an injury): its sets count toward nothing and the session can
+   * still be finished. Not part of the plan signature. Absent = not skipped.
+   */
+  skipped: z.boolean().optional(),
 });
 export type Block = z.infer<typeof blockSchema>;
 
@@ -295,12 +300,27 @@ export const sessionSchema = z.object({
    * null when nothing was. Absent on sessions saved before it existed.
    */
   planSig: safeString().max(2000).nullable().optional(),
+  /**
+   * The program day this session was planned for when it was moved to another date ("do this
+   * session today", `buildSessionFrom`); null/absent = the session's own date.
+   */
+  plannedFor: isoDate.nullable().optional(),
 });
 export type Session = z.infer<typeof sessionSchema>;
 
 // ---------------------------------------------------------------------------
 // Bootstrap payload
 // ---------------------------------------------------------------------------
+
+/**
+ * Server revisions of the whole-document resources (opaque strings). A save sends the revision
+ * it was based on as `If-Match`; a stale one is answered 409 (see docs/SPEC.md §8).
+ */
+export interface Revs {
+  settings: string;
+  /** Per session date. A date without an entry has no saved session. */
+  sessions: Record<string, string>;
+}
 
 export interface Bootstrap {
   settings: Settings;
@@ -309,4 +329,15 @@ export interface Bootstrap {
   maxEntries: MaxEntry[];
   sessions: Session[];
   seenAchievements: string[];
+  /** Always sent by the server; absent on copies cached before revisions existed. */
+  revs?: Revs;
+}
+
+/** Body of a 409 answer to a version-checked save (`If-Match` / `If-None-Match: *`). */
+export interface ConflictBody<T> {
+  error: "conflict";
+  /** The server's current document (null: there is none). */
+  current: T | null;
+  /** Its revision (null: there is none). */
+  rev: string | null;
 }

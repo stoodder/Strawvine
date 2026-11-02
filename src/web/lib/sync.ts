@@ -22,23 +22,31 @@
  *   sign-in or download, cleared by sign-out and by a 401). Sign-out wipes the copy.
  * - Creates carry an idempotency key (persisted with the op), so a retried POST whose first
  *   response was lost doesn't create the row twice.
+ * - Whole-document saves (workouts, settings) are version-checked: each carries the server
+ *   revision it was based on (`If-Match`). A 409 means another device saved the document since;
+ *   the edit is merged onto the server's copy (./merge) and sent once more, and a toast says so.
+ * - Every write answers with the dataset version before and after it; when the copy here was at
+ *   the "before" version, it takes the "after" one, so the next revalidation is a 304.
  */
 import { onlineManager, QueryClient, replaceEqualDeep } from "@tanstack/react-query";
-import type { Bootstrap } from "../../shared/schemas";
+import type { Bootstrap, ConflictBody, Session, Settings } from "../../shared/schemas";
 import { showToast } from "../components/Toast";
 import { api, apiConditional, ApiError, flushPendingLogout, isTransient, serverLogout } from "./api";
 import { idbClear, idbReadSet, idbWritePlanned } from "./idb";
+import { mergeSession, mergeSettings } from "./merge";
 import {
   ackEntry,
   addOp,
   allocTempId,
   applyAcked,
+  deepEqual,
   dependentsOfFailed,
   describe,
   discardFailed as discardFailedCore,
   emptyOutbox,
   ensureIdempotencyKeys,
   failEntry,
+  maxSeenKey,
   mergeOutbox,
   nextSendable,
   opLabel,
@@ -51,6 +59,8 @@ import {
   TAB_SPACE,
   unsynced,
   validateOp,
+  type AckEtags,
+  type AckMeta,
   type Entry,
   type Op,
   type OutboxState,
@@ -91,6 +101,9 @@ const SIGNED_IN_KEY = "strawvine:signed-in";
 const AUTH_MIGRATED_KEY = "strawvine:signed-in-v";
 /** Replay lease (`<tab>:<until ms>`) for browsers without Web Locks. */
 const LEASE_KEY = "strawvine:replay-lease";
+/** Edits refused at queue time (the last REFUSED_KEEP), for Settings → Sync. */
+const REFUSED_KEY = "strawvine:refused";
+export const REFUSED_KEEP = 20;
 const LOCK_NAME = "strawvine-outbox";
 
 /** Fired on window when this device signs out (here or in another window) / back in from another window. */
@@ -106,6 +119,15 @@ let displayed: Bootstrap | undefined;
 let baseEtag: string | null = null;
 /** When `base` last took in server information (snapshot or ack); a persisted copy never goes back in time. */
 let baseStamp = 0;
+
+/**
+ * After an ack was applied to `base`: when `base` was at the dataset version the write started
+ * from, it is now exactly at the version the write produced (so the next revalidation is a 304);
+ * otherwise the version of `base` is no longer known (the next revalidation downloads).
+ */
+function chainEtag(etags: AckEtags | undefined) {
+  baseEtag = etags && etags.prev !== null && baseEtag !== null && etags.prev === baseEtag ? etags.next : null;
+}
 let ob: OutboxState = emptyOutbox();
 /** Seq this window is sending right now. */
 let inflight: number | null = null;
@@ -222,6 +244,7 @@ function adopt(next: OutboxState) {
   if (base) {
     base = applyAcked(base, fresh);
     baseStamp = Math.max(baseStamp, Date.now());
+    for (const e of fresh) chainEtag(e.etags);
   }
   for (const e of fresh) {
     appliedAcks.add(e.seq);
@@ -250,7 +273,9 @@ function sendingSeq(): number | null {
 // ---------------------------------------------------------------------------
 
 type Message =
-  { type: "ack"; seq: number; op: Op; result: unknown; stamp: number } | { type: "snapshot"; stamp: number } | { type: "signed-out" };
+  | { type: "ack"; seq: number; op: Op; result: unknown; stamp: number; srev?: string | null; etags?: AckEtags }
+  | { type: "snapshot"; stamp: number }
+  | { type: "signed-out" };
 
 let channel: BroadcastChannel | null = null;
 
@@ -269,8 +294,9 @@ function onMessage(m: Message) {
       appliedAcks.add(m.seq);
       ackCount++;
       if (base) {
-        base = applyAcked(base, [{ seq: m.seq, op: m.op, state: "acked", result: m.result, ackNo: 0 }]);
+        base = applyAcked(base, [{ seq: m.seq, op: m.op, state: "acked", result: m.result, ackNo: 0, srev: m.srev }]);
         baseStamp = Math.max(baseStamp, m.stamp);
+        chainEtag(m.etags);
       }
       refresh();
       settleAck(m.seq, m.op, m.result);
@@ -313,6 +339,7 @@ function piecesOf(b: Bootstrap): Map<string, unknown> {
     ["b:maxEntries", b.maxEntries],
     ["b:seen", b.seenAchievements],
   ]);
+  if (b.revs) m.set("b:revs", b.revs);
   const byYear = (prefix: string, xs: readonly { date: string }[]) => {
     let start = 0;
     for (let i = 1; i <= xs.length; i++) {
@@ -361,7 +388,8 @@ async function readDisk(): Promise<{ data: Bootstrap; meta?: DiskMeta } | undefi
     const sessions = joinPieces(values, meta.keys, "b:sessions:");
     if (!settings || !Array.isArray(exercises) || !Array.isArray(maxEntries) || !Array.isArray(seen) || !days || !sessions)
       return undefined;
-    const data = { settings, exercises, maxEntries, seenAchievements: seen, days, sessions } as Bootstrap;
+    const revs = values.get("b:revs") as Bootstrap["revs"] | undefined;
+    const data = { settings, exercises, maxEntries, seenAchievements: seen, days, sessions, ...(revs ? { revs } : {}) } as Bootstrap;
     return { data, meta };
   }
   const legacy = values.get(LEGACY_BASE_KEY) as Bootstrap | undefined;
@@ -633,6 +661,50 @@ export interface SyncInfoState {
   /** When everything was last known to be on the server, or null if never on this device. */
   lastSyncedAt: number | null;
   items: SyncItem[];
+  /** Edits refused before they were queued (they'd be rejected by the server), newest last; the last 20. */
+  refused: RefusedEdit[];
+}
+
+/** An edit refused at queue time (see `validateOp`): never stored, never sent. */
+export interface RefusedEdit {
+  id: string;
+  /** What it was ("Workout · Nov 3"). */
+  label: string;
+  /** Why ("An exercise can have at most 30 sets."). */
+  reason: string;
+  /** When (ms since epoch). */
+  at: number;
+}
+
+function readRefused(): RefusedEdit[] {
+  try {
+    const v = JSON.parse(lsGet(REFUSED_KEY) ?? "[]") as unknown;
+    return Array.isArray(v) ? (v as RefusedEdit[]).filter((r) => r && typeof r.id === "string").slice(-REFUSED_KEEP) : [];
+  } catch {
+    return [];
+  }
+}
+
+let refused: RefusedEdit[] = readRefused();
+let refusedCount = 0;
+
+function setRefused(next: RefusedEdit[]) {
+  refused = next;
+  if (next.length) lsSet(REFUSED_KEY, JSON.stringify(next));
+  else lsDel(REFUSED_KEY);
+  emit();
+}
+
+function noteRefused(op: Op, reason: string) {
+  const at = Date.now();
+  setRefused(
+    [...refused, { id: `${at.toString(36)}-${TAB.toString(36)}-${++refusedCount}`, label: opLabel(op), reason, at }].slice(-REFUSED_KEEP),
+  );
+}
+
+/** Empties the list of refused edits. */
+export function clearRefused() {
+  if (refused.length) setRefused([]);
 }
 
 function readLastSynced(): number | null {
@@ -641,7 +713,7 @@ function readLastSynced(): number | null {
 }
 
 let lastSyncedAt: number | null = readLastSynced();
-let infoState: SyncInfoState = { online: true, pending: 0, failed: 0, unsynced: 0, lastSyncedAt, items: [] };
+let infoState: SyncInfoState = { online: true, pending: 0, failed: 0, unsynced: 0, lastSyncedAt, items: [], refused };
 let datesState: Set<string> = new Set<string>();
 
 /** Everything is on the server as of now (the outbox just drained, or a snapshot arrived). */
@@ -692,6 +764,7 @@ function emit() {
     unsynced: items.length,
     lastSyncedAt,
     items: sameItems(items, infoState.items) ? infoState.items : items,
+    refused,
   };
   if ((Object.keys(info) as (keyof SyncInfoState)[]).some((k) => info[k] !== infoState[k])) {
     infoState = info;
@@ -737,13 +810,15 @@ const ackWaiters = new Map<number, (result: unknown) => void>();
  * Records an edit durably, shows it, and starts sending. Returns the entry's seq, or -1 when
  * the edit was refused (it would be rejected by the server; a toast says why) or cancelled out.
  */
-export function enqueue(op: Op): number {
-  const problem = validateOp(op);
+export function enqueue(input: Op): number {
+  const problem = validateOp(input);
   if (problem) {
+    noteRefused(input, problem);
     showToast({ message: `Not saved: ${problem}`, tone: "warn" });
     publish();
     return -1;
   }
+  const op = withDocBase(input);
   let seq = -1;
   mutate((s) => {
     const next = addOp(s, op, sendingSeq(), TAB);
@@ -753,6 +828,22 @@ export function enqueue(op: Op): number {
   publish();
   kick();
   return seq;
+}
+
+/**
+ * A whole-document edit with what it was based on: the server's revision and copy of the
+ * document as this device knows it now (see `request`). Copies from before revisions existed
+ * give none, and the save goes unchecked.
+ */
+function withDocBase(op: Op): Op {
+  const revs = base?.revs;
+  if (!revs || !base) return op;
+  if (op.kind === "session" && op.doc && op.baseRev === undefined) {
+    const doc = base.sessions.find((x) => x.date === op.date) ?? null;
+    return { ...op, baseRev: revs.sessions[op.date] ?? null, base: doc };
+  }
+  if (op.kind === "settings" && op.baseRev === undefined) return { ...op, baseRev: revs.settings, base: base.settings };
+  return op;
 }
 
 /** A fresh temporary (negative) id for a row created before the server assigns one. */
@@ -919,10 +1010,17 @@ async function replay() {
       emit();
       const req = request(e.op);
       let result: unknown;
+      let headers: Headers | null = null;
       try {
-        result = await api<unknown>(req.path, { method: req.method, body: req.body, headers: req.headers });
+        result = await api<unknown>(req.path, {
+          method: req.method,
+          body: req.body,
+          headers: req.headers,
+          onHeaders: (h) => (headers = h),
+        });
       } catch (err) {
         inflight = null;
+        if (err instanceof ApiError && err.status === 409 && mergeConflict(e, err.body)) continue; // send the merged edit
         if (err instanceof ApiError && err.status === 401) {
           // api() already signalled sign-out; resume after sign-in.
           clearSending(e.seq);
@@ -949,7 +1047,7 @@ async function replay() {
       inflight = null;
       failures = 0;
       retrying = false;
-      onAcked(e, result);
+      onAcked(e, result, ackMeta(e.op, headers));
     }
   } finally {
     running = false;
@@ -959,31 +1057,93 @@ async function replay() {
   }
 }
 
+/** Seqs re-written by a merge (in this window), and whether the merge took anything from the server. */
+const merged = new Map<number, boolean>();
+
+/**
+ * A 409 on a version-checked save: re-applies the edit on top of the server's current copy and
+ * rewrites the queued entry (merged document, now based on the server's revision), to be sent
+ * next. Once per entry: a second conflict is reported like any rejection. Returns whether it merged.
+ */
+function mergeConflict(e: Entry, body: unknown): boolean {
+  const c = body as ConflictBody<Session | Settings> | null;
+  if (!c || c.error !== "conflict" || merged.has(e.seq)) return false;
+  const op = e.op;
+  let next: Op;
+  let changed: boolean;
+  if (op.kind === "session" && op.doc) {
+    const current = c.current as Session | null;
+    const doc = current ? mergeSession(op.base ?? null, op.doc, current) : op.doc;
+    changed = !deepEqual(doc, op.doc);
+    next = { ...op, doc, baseRev: c.rev ?? undefined, base: current };
+  } else if (op.kind === "settings" && c.current) {
+    const current = c.current as Settings;
+    const settings = mergeSettings(op.base ?? null, op.settings, current);
+    changed = !deepEqual(settings, op.settings);
+    next = { ...op, settings, baseRev: c.rev ?? undefined, base: current };
+  } else return false;
+  if (c.rev === null) delete (next as { baseRev?: unknown }).baseRev; // nothing on the server to check against
+  merged.set(e.seq, changed);
+  mutate((s) => ({
+    ...s,
+    inflight: s.inflight?.seq === e.seq ? null : s.inflight,
+    entries: s.entries.map((x) => (x.seq === e.seq ? { ...x, op: next, rev: (x.rev ?? 0) + 1 } : x)),
+  }));
+  publish();
+  return true;
+}
+
+/** What a write's response headers say: the document's new revision, the dataset versions around it. */
+function ackMeta(op: Op, headers: Headers | null): AckMeta {
+  const meta: AckMeta = {};
+  if (op.kind === "session" && !op.doc) meta.srev = null;
+  else if (op.kind === "session" || op.kind === "settings") {
+    const tag = headers?.get("etag");
+    if (tag)
+      meta.srev = tag
+        .trim()
+        .replace(/^W\//, "")
+        .replace(/^"(.*)"$/, "$1");
+  }
+  const next = headers?.get("x-dataset-etag");
+  if (next) meta.etags = { prev: headers?.get("x-dataset-etag-prev") ?? null, next };
+  return meta;
+}
+
 function clearSending(seq: number) {
   mutate((s) => (s.inflight?.seq === seq ? { ...s, inflight: null } : s));
 }
 
-function onAcked(e: Entry, result: unknown) {
+function onAcked(e: Entry, result: unknown, meta: AckMeta = {}) {
   const { seq, op } = e;
-  mutate((s) => ({ ...ackEntry(s, seq, result), inflight: null }));
+  const savedId = op.kind === "addMax" && op.markSeenOnAck ? (result as { id?: unknown } | null)?.id : undefined;
+  mutate((s) => {
+    const next = { ...ackEntry(s, seq, result, meta), inflight: null };
+    // Recorded on the server too; shown seen from this very update (see applyResult).
+    return typeof savedId === "number" ? addOp(next, { kind: "seen", keys: [maxSeenKey(savedId)] }, null, TAB) : next;
+  });
   ackCount++;
   if (!appliedAcks.has(seq)) {
     appliedAcks.add(seq);
     if (base) {
       // Apply just this result; the overlay drops the op now that it's acked.
-      base = applyAcked(base, [{ seq, op, state: "acked", result, ackNo: 0 }]);
+      base = applyAcked(base, [{ seq, op, state: "acked", result, ackNo: 0, srev: meta.srev }]);
       baseStamp = Date.now();
+      chainEtag(meta.etags);
     }
   }
   if (!unsynced(ob).length) markSynced();
-  post({ type: "ack", seq, op, result, stamp: baseStamp });
+  post({ type: "ack", seq, op, result, stamp: baseStamp, srev: meta.srev, etags: meta.etags });
   publish();
   schedulePersist();
   settleAck(seq, op, result);
+  if (merged.get(seq)) showToast({ message: "Merged changes from another device" });
+  merged.delete(seq);
   if (op.kind === "settings" && op.settings.onboarded) requestPersistentStorage();
 }
 
 function onRejected(seq: number, op: Op, message: string) {
+  merged.delete(seq);
   if (op.kind === "seen") {
     // Bookkeeping only; not worth bothering anyone about.
     mutate((s) => ({ ...removeEntries(s, [seq]), inflight: null }));
@@ -1106,6 +1266,8 @@ function wipeLocalData({ keepOutbox }: { keepOutbox: boolean }) {
   for (const k of Object.keys(overlayCache)) delete overlayCache[k as keyof OverlayCache];
   lastSyncedAt = null;
   lsDel(LAST_SYNCED_KEY);
+  refused = [];
+  lsDel(REFUSED_KEY);
   if (!keepOutbox) {
     refresh();
     ob = { ...emptyOutbox(), nextSeq: ob.nextSeq, nextTemp: ob.nextTemp, epoch: Math.max(Date.now(), (ob.epoch ?? 0) + 1) };
@@ -1164,6 +1326,22 @@ export async function signOut(opts: { keepUnsynced?: boolean } = {}): Promise<{ 
   post({ type: "signed-out" });
   enterSignedOut();
   return serverLogout();
+}
+
+/**
+ * "Forget this device": sends what can be sent first, then asks the server to sign this browser
+ * out and drop its known-device mark (other devices stay signed in), and wipes everything this
+ * device holds — the copy, the outbox (unsynced edits are discarded: check `unsynced` first) and
+ * the signed-in flag. Rejects, changing nothing, when the server can't be reached or refuses.
+ */
+export async function forgetDevice(): Promise<void> {
+  if (onlineManager.isOnline() && !authPaused) await within(run(), 5_000);
+  await api("/auth/forget-device", { method: "POST", timeoutMs: 8_000 });
+  lsDel(SIGNED_IN_KEY);
+  lsDel(LOGOUT_WARN_KEY);
+  wipeLocalData({ keepOutbox: false });
+  post({ type: "signed-out" });
+  enterSignedOut();
 }
 
 /** @deprecated Use `signOut()`. Signs out keeping unsynced edits on this device. */

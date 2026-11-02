@@ -22,6 +22,7 @@ import {
 } from "../../shared/gamify";
 import type { Bootstrap, DayLogPatch, Exercise, MaxEntry, MaxSource, Session, Settings } from "../../shared/schemas";
 import {
+  clearRefused,
   currentData,
   discardFailed,
   enqueue,
@@ -38,7 +39,8 @@ import {
   type SyncInfoState,
 } from "./sync";
 
-export { BOOT_KEY, clearCache, queryClient, signOut } from "./sync";
+export { BOOT_KEY, clearCache, forgetDevice, queryClient, signOut } from "./sync";
+export type { RefusedEdit } from "./sync";
 import { BOOT_KEY } from "./sync";
 
 /** Latest cached session for a date (for handlers that run after an await). */
@@ -146,6 +148,15 @@ export function useSaveSettings() {
   }, []);
 }
 
+export interface AddMaxOptions {
+  /**
+   * Mark the saved entry's achievement (`max-<id>`) seen in the very update that applies the
+   * server's row (and on the server), for a gain the screen has already shown — so the full-screen
+   * celebration never fires for it, however the ack and the caller's own code interleave.
+   */
+  markSeenOnAck?: boolean;
+}
+
 /**
  * Records a max. Resolves with the server's entry when it arrives promptly; offline (or slow),
  * with the local entry, whose temporary id is swapped for the real one everywhere once it syncs.
@@ -153,7 +164,10 @@ export function useSaveSettings() {
  */
 export function useAddMax() {
   return useCallback(
-    async (input: { exerciseId: number; valueLb: number; date: string; source: MaxSource; note?: string | null }): Promise<MaxEntry> => {
+    async (
+      input: { exerciseId: number; valueLb: number; date: string; source: MaxSource; note?: string | null },
+      opts: AddMaxOptions = {},
+    ): Promise<MaxEntry> => {
       const local: MaxEntry = {
         id: takeTempId(),
         exerciseId: input.exerciseId,
@@ -164,7 +178,7 @@ export function useAddMax() {
         createdAt: new Date().toISOString(),
       };
       const { id, ...rest } = local;
-      const seq = enqueue({ kind: "addMax", tempId: id, ...rest });
+      const seq = enqueue({ kind: "addMax", tempId: id, ...rest, ...(opts.markSeenOnAck ? { markSeenOnAck: true } : {}) });
       const saved = (await waitForAck(seq, CREATE_WAIT_MS)) as MaxEntry | undefined;
       return saved && typeof saved.id === "number" ? saved : local;
     },
@@ -233,12 +247,14 @@ export interface SyncInfo extends SyncInfoState {
   retryFailed(): void;
   /** Drop the rejected changes and re-read the server's copy. */
   discardFailed(): void;
+  /** Empty `refused` (edits refused before they were queued). */
+  clearRefused(): void;
 }
 
 /** Online state, unsynced changes (and which failed), and when everything was last on the server. */
 export function useSyncInfo(): SyncInfo {
   const info = useSyncExternalStore(subscribeSync, getSyncInfo, getSyncInfo);
-  return useMemo(() => ({ ...info, syncNow, retryFailed, discardFailed }), [info]);
+  return useMemo(() => ({ ...info, syncNow, retryFailed, discardFailed, clearRefused }), [info]);
 }
 
 /** Dates whose day log or workout has edits not yet confirmed by the server. */

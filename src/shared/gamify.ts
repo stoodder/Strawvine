@@ -224,7 +224,7 @@ export interface AmrapPr {
 /**
  * AMRAP rep PRs: a completed AMRAP set with more reps than every earlier AMRAP set of the same
  * lift at the same or a heavier load (a first AMRAP at a load only sets the baseline). One per
- * lift per session — its best set. Skipped exercises and unsaved (temporary-id) lifts are ignored.
+ * lift per session — its best set. Skipped exercises (and a skipped main lift) and unsaved (temporary-id) lifts are ignored.
  * A PR depends only on earlier sessions, so `upTo` just cuts the list.
  */
 export function amrapPrs(sessions: ReadonlyArray<Session>, upTo?: ISODate): AmrapPr[] {
@@ -244,7 +244,7 @@ function computeAmrapPrs(sessions: ReadonlyArray<Session>): AmrapPr[] {
     const today = new Map<number, Array<{ reps: number; weightLb: number }>>();
     for (const b of s.blocks)
       for (const e of b.exercises) {
-        if (e.skipped || e.exerciseId < 0) continue;
+        if (b.skipped || e.skipped || e.exerciseId < 0) continue;
         for (const set of e.sets) {
           const weightLb = set.weight ?? set.targetWeight;
           if (!set.amrap || !set.done || set.reps === null || weightLb === null) continue;

@@ -141,11 +141,57 @@ while (429 with `Retry-After`). Beyond 50 failures an hour across all clients, s
 down (a serialised tarpit, doubling delays capped at 10 s; refused when the queue is longer). A successful sign-in marks
 the browser as a **known device** (`sv_device`, a signed, httpOnly 400-day cookie kept across sign-outs; a password change
 forgets every device): known devices skip the tarpit and are limited per device rather than per network, so the owner
-isn't locked out by someone else's guessing.
+isn't locked out by someone else's guessing. Settings → **Forget this device** (`POST /api/auth/forget-device`) signs
+only that browser out, drops its known-device cookie and wipes everything the app stored there; other devices stay
+signed in.
 
 `GET /api/bootstrap` is sent with `Cache-Control: no-store` (health data never lands in the browser's HTTP cache) and an
 `ETag` computed from a cheap version stamp of every table; a request with a matching `If-None-Match` gets a `304` without
-the data set being read. JSON responses are compressed with Brotli (or gzip).
+the data set being read. JSON responses are compressed with Brotli (or gzip). Every successful write answers with the
+data set's new ETag (`x-dataset-etag`) and the one just before it (`x-dataset-etag-prev`); a client whose copy was at the
+"before" version adopts the new one, so coming back to the app after your own edits is a `304` instead of a full download
+(3-year data set: 165 KB Brotli / ~70 ms → 0 B / ~5 ms). Writes are serialised per process so the two versions bracket
+one write; with several web dynos a write on another dyno can slip in between, which costs at most an unneeded download
+— never a missed change, because a client only adopts the new version when `prev` matches its own.
+
+`Server-Timing` is sent on `/api/bootstrap` (`db` = version stamp + queries, `build` = JSON, `compress` = Brotli/gzip) and
+on writes (`db` = the handler, `etag` = reading the data-set version twice). Browser dev tools show it under Network →
+Timing; from a shell: `curl -s -D - -o /dev/null -b cookies.txt -H 'accept-encoding: br' https://<app>/api/bootstrap`.
+
+Workouts and settings are saved as whole documents and **version-checked**: `GET /api/bootstrap` includes `revs`
+(the settings' revision and each session's — Postgres' `xmin` for the row, no column of its own), the client sends the
+revision an edit was based on as `If-Match` (or `If-None-Match: *` for a workout it believes is new), and a stale one is
+answered `409 { error: "conflict", current, rev }`. The client merges its edit onto `current` and retries once (see
+docs/SPEC.md §8). Saves without either header are accepted as before (older clients). A restore or `pg_restore` changes
+every revision, so each device's next save of a workout or the settings goes through one merge.
+
+### Content-Security-Policy trial
+
+The enforced policy still allows inline styles (`style-src 'self' 'unsafe-inline'`). Every response also carries
+`Content-Security-Policy-Report-Only` with the same policy **without** `'unsafe-inline'`, reporting to
+`POST /api/csp-report` (`report-uri`, which every engine delivers right away; `report-to` is left out because Chromium
+then ignores `report-uri` and batches reports through the Reporting API). Nothing is blocked by it. The endpoint needs no sign-in, takes at most 8 KB, is rate limited (30 reports a minute per
+network, 300 overall; 429 beyond) and logs one line per violation with only the directive and the blocked resource's
+host or keyword — never the page, the source file or a sample:
+
+```
+CSP violation (report-only) {"directive":"style-src-attr","blocked":"inline"}
+```
+
+To read the results, use the app normally for a few days (every screen, sheets, charts, celebrations), then:
+
+```sh
+heroku logs -n 1500 --source app | grep 'CSP violation' | sed 's/.*{/{/' | sort | uniq -c | sort -rn
+```
+
+`style-src-attr … inline` means a `style="…"` attribute in markup (index.html, an HTML/SVG string, `setAttribute("style",
+…)`) — styles React (`style={{…}}`) and motion set through `element.style` are not affected — and
+`style-src-elem … inline` a `<style>` element (in index.html or added at runtime). When the list stays empty across a full week of use,
+`'unsafe-inline'` can be dropped from the enforced policy (`CSP` in `src/server/app.ts`) and the report-only header
+removed. A local probe of every screen (Chromium, 3-year data set) produced no style reports. Expect
+`{"directive":"script-src","blocked":"eval"}` on opening Settings: zod (used there to validate the program) probes whether
+`Function("")` is allowed inside a `try`; the enforced policy blocks it the same way, and zod falls back to its
+interpreter (`z.config({ jitless: true })` would skip the probe).
 
 ### Offline writes
 

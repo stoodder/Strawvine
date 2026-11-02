@@ -298,6 +298,13 @@ describe("AMRAP rep PRs", () => {
     expect(repPrs([amrapSession("2026-11-02", 9, 200), amrapSession("2026-12-07", 12, 200, { skipped: true })])).toEqual([]);
     expect(repPrs([amrapSession("2026-11-02", 9, 200), amrapSession("2026-12-07", 12, 200, { exerciseId: 2 })])).toEqual([]);
   });
+
+  it("ignores a main lift skipped today", () => {
+    const skippedMain = (s: Session): Session => ({ ...s, blocks: s.blocks.map((b) => ({ ...b, skipped: true })) });
+    expect(repPrs([amrapSession("2026-11-02", 9, 200), skippedMain(amrapSession("2026-12-07", 12, 200))])).toEqual([]);
+    // …and it doesn't set a baseline either.
+    expect(repPrs([skippedMain(amrapSession("2026-11-02", 9, 200)), amrapSession("2026-12-07", 12, 200)])).toEqual([]);
+  });
 });
 
 describe("benchmark PR achievements", () => {

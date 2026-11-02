@@ -26,6 +26,8 @@ export interface ApiInit {
   timeoutMs?: number;
   /** Max wait for the whole body once headers arrived (default 60 s). */
   bodyTimeoutMs?: number;
+  /** Called with the response headers as soon as they arrive (errors included). */
+  onHeaders?: (headers: Headers) => void;
 }
 
 /** A readable message from the server's error body (`{ error, issues? }`). */
@@ -85,6 +87,7 @@ async function send<T>(path: string, init: ApiInit, conditional: boolean): Promi
       // created rows twice. Writes survive page close via the persisted outbox instead.
     });
     noteServerBuild(res.headers.get("x-strawvine-build"));
+    init.onHeaders?.(res.headers);
     if (conditional && res.status === 304) {
       void res.body?.cancel().catch(() => {});
       return { status: 304, etag: res.headers.get("etag") } as T;

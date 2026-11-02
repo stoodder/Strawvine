@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +9,7 @@ import { asc, eq, sql } from "drizzle-orm";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
+import { deleteCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { routePath } from "hono/route";
 import { secureHeaders } from "hono/secure-headers";
@@ -22,6 +24,7 @@ import {
   sessionSchema,
   settingsSchema,
   type Bootstrap,
+  type Revs,
 } from "../shared/schemas";
 import {
   clearSessionCookie,
@@ -30,6 +33,7 @@ import {
   currentSession,
   dbEpochStore,
   deriveDeviceKey,
+  deviceCookieName,
   knownDevice,
   loginLimiter,
   passwordMatches,
@@ -44,7 +48,7 @@ import {
 import { buildExport, toDay, toExercise, toMax } from "./backup";
 import type { Db } from "./db/client";
 import { dayLogs, exercises, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
-import { forgetMaxCreate, idempotency } from "./idempotency";
+import { forgetMaxCreate, idempotency, type Tx } from "./idempotency";
 
 export interface AppOptions {
   db: Db;
@@ -68,6 +72,12 @@ export interface AppOptions {
 
 export const BODY_LIMIT_BYTES = 1024 * 1024;
 export const LOGIN_BODY_LIMIT_BYTES = 4 * 1024;
+export const CSP_REPORT_BODY_LIMIT_BYTES = 8 * 1024;
+/** CSP reports accepted per client per minute, and from everyone per minute. */
+export const CSP_REPORTS_PER_CLIENT_PER_MIN = 30;
+export const CSP_REPORTS_PER_MIN = 300;
+/** How long a write waits for the one before it (see `writeLock`) before going ahead unchained. */
+export const WRITE_LOCK_WAIT_MS = 5_000;
 const HEALTH_TIMEOUT_MS = 2_000;
 
 function badRequest(error: z.ZodError) {
@@ -95,6 +105,14 @@ export function clampCreatedAt(createdAt: string | undefined, now = Date.now()):
   return new Date(Math.min(now + MAX_CREATED_AT_FUTURE_MS, Math.max(now - MAX_CREATED_AT_PAST_MS, t)));
 }
 
+/**
+ * A row's revision for version-checked saves: Postgres' `xmin` (the id of the transaction that
+ * last wrote the row) — new on every write, never reused for another row version, and needing no
+ * column of its own. A restore rewrites every row, so revisions held by devices go stale (their
+ * next save merges, see docs/SPEC.md §8).
+ */
+const xmin = (table: typeof sessions | typeof settings) => sql<string>`${table}.xmin::text`.mapWith(String);
+
 const brotli = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
 /** Smaller JSON responses aren't worth compressing. */
@@ -121,6 +139,7 @@ const compressJson: MiddlewareHandler = async (c, next) => {
   const header = c.req.header("Accept-Encoding") ?? "";
   const encoding = accepts(header, "br") ? "br" : accepts(header, "gzip") ? "gzip" : null;
   if (!encoding) return;
+  const t0 = performance.now();
   const raw = Buffer.from(await res.arrayBuffer());
   const body =
     raw.length < COMPRESS_MIN_BYTES
@@ -134,6 +153,7 @@ const compressJson: MiddlewareHandler = async (c, next) => {
   c.res.headers.delete("Content-Length");
   c.res.headers.append("Vary", "Accept-Encoding");
   if (body !== raw) c.res.headers.set("Content-Encoding", encoding);
+  if (c.res.headers.has("Server-Timing")) c.res.headers.append("Server-Timing", timing({ compress: performance.now() - t0 }));
 };
 
 /** Whether an `If-None-Match` header lists `etag` (weak comparison). */
@@ -143,9 +163,117 @@ function etagMatches(header: string | undefined, etag: string): boolean {
   return header.split(",").some((t) => t.trim() === "*" || strip(t) === strip(etag));
 }
 
+/** An entity tag's opaque value: `W/"abc"`, `"abc"` and a bare `abc` all give `abc`. */
+export function opaqueTag(value: string): string {
+  return value
+    .trim()
+    .replace(/^W\//, "")
+    .replace(/^"(.*)"$/, "$1");
+}
+
+/**
+ * The precondition of a version-checked save: `If-Match: <rev>` (the revision the edit was based
+ * on), `If-None-Match: *` (the client knows of no saved document), or none (older clients: the
+ * save is accepted as before). `If-Match: *` only asks that a document exists, which a save
+ * doesn't need, so it's accepted.
+ */
+type Precondition = { kind: "match"; rev: string } | { kind: "absent" } | null;
+function precondition(c: Context): Precondition {
+  const match = c.req.header("if-match");
+  if (match !== undefined && match.trim() !== "*" && match.trim() !== "") return { kind: "match", rev: opaqueTag(match.split(",")[0]!) };
+  if (c.req.header("if-none-match")?.trim() === "*") return { kind: "absent" };
+  return null;
+}
+
+/** Whether a document at `rev` (null: none saved) fails the precondition. A document deleted since is not a conflict. */
+const conflicts = (pre: Precondition, rev: string | null) => pre !== null && rev !== null && (pre.kind === "absent" || pre.rev !== rev);
+
+/** `Server-Timing` entries (ms, one decimal). */
+const timing = (entries: Record<string, number>) =>
+  Object.entries(entries)
+    .map(([name, ms]) => `${name};dur=${ms.toFixed(1)}`)
+    .join(", ");
+
+/**
+ * Serialises writes in this process, so the dataset version read just before a write and the one
+ * just after it bracket that write alone (see the `x-dataset-etag-prev` header). A write that
+ * waited longer than `waitMs` goes ahead unserialised (`acquire` resolves null) rather than
+ * stalling behind a stuck one.
+ */
+export function writeLock(waitMs = WRITE_LOCK_WAIT_MS) {
+  let tail: Promise<void> = Promise.resolve();
+  return {
+    async acquire(): Promise<(() => void) | null> {
+      let release!: () => void;
+      const mine = new Promise<void>((r) => (release = r));
+      const before = tail;
+      tail = tail.then(() => mine);
+      let timer: NodeJS.Timeout | undefined;
+      const got = await Promise.race([before.then(() => true), new Promise<false>((r) => (timer = setTimeout(() => r(false), waitMs)))]);
+      clearTimeout(timer);
+      if (got) return release;
+      // Gave up waiting: don't hold up those queued behind us once our turn comes.
+      void before.then(release);
+      return null;
+    },
+  };
+}
+
+/** A fixed-window counter per key (and in total) for unauthenticated endpoints. */
+function windowLimiter(perKey: number, total: number, windowMs = 60_000) {
+  let start = 0;
+  let all = 0;
+  const counts = new Map<string, number>();
+  return (key: string, now = Date.now()): boolean => {
+    if (now - start >= windowMs) {
+      start = now;
+      all = 0;
+      counts.clear();
+    }
+    const n = counts.get(key) ?? 0;
+    if (n >= perKey || all >= total) return false;
+    if (counts.size < 10_000) counts.set(key, n + 1);
+    all++;
+    return true;
+  };
+}
+
+/**
+ * What a CSP violation report says, reduced to what may be logged: the violated directive and the
+ * blocked resource's host (or keyword: "inline", "eval", "data", …). Never the document, the
+ * source file or a sample. Accepts the classic `report-uri` body and Reporting API arrays.
+ */
+export function cspViolations(body: unknown): Array<{ directive: string; blocked: string }> {
+  const out: Array<{ directive: string; blocked: string }> = [];
+  const clean = (v: unknown, max: number) => (typeof v === "string" ? v.replace(/[^\w\-.:'*]/g, "").slice(0, max) : "");
+  const hostOf = (v: unknown): string => {
+    if (typeof v !== "string" || !v) return "";
+    try {
+      const u = new URL(v);
+      return u.host || u.protocol.replace(/:$/, "");
+    } catch {
+      return clean(v.split(/[\s/?#]/)[0], 40); // "inline", "eval", "data", "self"…
+    }
+  };
+  const add = (r: Record<string, unknown> | null | undefined) => {
+    if (!r || typeof r !== "object") return;
+    const raw = r["effective-directive"] ?? r["violated-directive"] ?? r.effectiveDirective ?? r.violatedDirective;
+    const directive = clean(typeof raw === "string" ? raw.trim().split(/\s/)[0] : "", 60);
+    const blocked = hostOf(r["blocked-uri"] ?? r.blockedURL ?? r.blockedUri);
+    if (directive) out.push({ directive, blocked: blocked || "unknown" });
+  };
+  if (Array.isArray(body)) {
+    for (const r of body.slice(0, 10))
+      if (r && typeof r === "object" && (r as { type?: unknown }).type === "csp-violation")
+        add((r as { body?: Record<string, unknown> }).body);
+  } else if (body && typeof body === "object") add((body as Record<string, Record<string, unknown>>)["csp-report"]);
+  return out;
+}
+
 const tooLarge = (c: Context) => c.json({ error: "Request body too large" }, 413);
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+export const CSP_REPORT_PATH = "/api/csp-report";
 
 /**
  * CSRF guard for the JSON API. Hono's `csrf()` only inspects "simple" form content types and
@@ -155,7 +283,7 @@ const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
  * preflight, which this API never grants).
  */
 const jsonApiGuard: MiddlewareHandler = async (c, next) => {
-  if (!MUTATING.has(c.req.method)) return next();
+  if (!MUTATING.has(c.req.method) || c.req.path === CSP_REPORT_PATH) return next();
   const site = c.req.header("sec-fetch-site");
   if (site && site !== "same-origin" && site !== "none") return c.json({ error: "Cross-site request refused" }, 403);
   const origin = c.req.header("origin");
@@ -176,6 +304,22 @@ const jsonApiGuard: MiddlewareHandler = async (c, next) => {
     return c.json({ error: "Expected application/json" }, 415);
   }
   return next();
+};
+
+/** The enforced Content-Security-Policy. */
+export const CSP = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'"],
+  styleSrc: ["'self'", "'unsafe-inline'"],
+  imgSrc: ["'self'", "data:"],
+  fontSrc: ["'self'", "data:"],
+  connectSrc: ["'self'"],
+  manifestSrc: ["'self'"],
+  workerSrc: ["'self'"],
+  objectSrc: ["'none'"],
+  baseUri: ["'self'"],
+  formAction: ["'self'"],
+  frameAncestors: ["'none'"],
 };
 
 export function createApp(opts: AppOptions) {
@@ -214,20 +358,12 @@ export function createApp(opts: AppOptions) {
   app.use(
     "*",
     secureHeaders({
-      contentSecurityPolicy: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", "data:"],
-        fontSrc: ["'self'", "data:"],
-        connectSrc: ["'self'"],
-        manifestSrc: ["'self'"],
-        workerSrc: ["'self'"],
-        objectSrc: ["'none'"],
-        baseUri: ["'self'"],
-        formAction: ["'self'"],
-        frameAncestors: ["'none'"],
-      },
+      contentSecurityPolicy: CSP,
+      // Trial (README "Content-Security-Policy trial"): the same policy without inline styles,
+      // reported (never enforced) to /api/csp-report. `report-uri` only: Chromium ignores it once
+      // `report-to` is present and then batches reports through the Reporting API (in testing,
+      // none arrived within a minute), while every engine delivers `report-uri` reports at once.
+      contentSecurityPolicyReportOnly: { ...CSP, styleSrc: ["'self'"], reportUri: CSP_REPORT_PATH },
       strictTransportSecurity: "max-age=31536000; includeSubDomains",
       xFrameOptions: "DENY",
       permissionsPolicy: { camera: [], microphone: [], geolocation: [], payment: [], usb: [] },
@@ -244,8 +380,25 @@ export function createApp(opts: AppOptions) {
     if (opts.buildId) c.res.headers.set("x-strawvine-build", opts.buildId);
   });
   app.use("/api/auth/login", bodyLimit({ maxSize: LOGIN_BODY_LIMIT_BYTES, onError: tooLarge }));
+  app.use(CSP_REPORT_PATH, bodyLimit({ maxSize: CSP_REPORT_BODY_LIMIT_BYTES, onError: tooLarge }));
   app.use("/api/*", bodyLimit({ maxSize: BODY_LIMIT_BYTES, onError: tooLarge }));
   app.use("/api/*", jsonApiGuard);
+
+  // ---- CSP reports (Report-Only trial) ----------------------------------------
+  // No auth (browsers send reports without credentials), small bodies, rate-limited; logs only
+  // the violated directive and the blocked resource's host.
+  const cspLimit = windowLimiter(CSP_REPORTS_PER_CLIENT_PER_MIN, CSP_REPORTS_PER_MIN);
+  app.post(CSP_REPORT_PATH, async (c) => {
+    if (!cspLimit(clientKey(clientIp(c, !!opts.trustProxy)))) return c.body(null, 429);
+    let body: unknown = null;
+    try {
+      body = JSON.parse(await c.req.text());
+    } catch {
+      return c.body(null, 400);
+    }
+    for (const v of cspViolations(body)) log("CSP violation (report-only)", v);
+    return c.body(null, 204);
+  });
 
   app.get("/api/health", async (c) => {
     let timer: NodeJS.Timeout | undefined;
@@ -299,7 +452,51 @@ export function createApp(opts: AppOptions) {
   const api = new Hono();
   api.use("*", requireAuth(session));
 
+  // ---- dataset version on writes ------------------------------------------------
+  // Every successful write answers with the dataset's new version (`x-dataset-etag`, the ETag
+  // /bootstrap would give now) and the version just before it (`x-dataset-etag-prev`). Writes in
+  // this process are serialised so the two bracket this write alone: a client whose copy was at
+  // `prev` holds exactly the `x-dataset-etag` version once it applies the response, and its next
+  // revalidation is a 304. (`prev` is left out when a write couldn't be serialised in time.)
+  const writes = writeLock();
+  /** The dataset tag, or null when it can't be read (a write never fails over its version header). */
+  const tagOrNull = () => datasetTag().catch(() => null);
+  api.use("*", async (c, next) => {
+    if (!MUTATING.has(c.req.method) || c.req.path.startsWith("/api/auth/")) return next();
+    const release = await writes.acquire();
+    try {
+      const t0 = performance.now();
+      const prev = release ? await tagOrNull() : null;
+      const t1 = performance.now();
+      await next();
+      const t2 = performance.now();
+      let stampMs = t1 - t0;
+      if (c.res.status >= 200 && c.res.status < 300) {
+        const tag = await tagOrNull();
+        stampMs += performance.now() - t2;
+        if (tag) {
+          c.res.headers.set("x-dataset-etag", tag);
+          if (prev) c.res.headers.set("x-dataset-etag-prev", prev);
+        }
+      }
+      c.res.headers.set("Server-Timing", timing({ db: t2 - t1, etag: stampMs }));
+    } finally {
+      release?.();
+    }
+  });
+
   api.get("/auth/me", (c) => c.json({ ok: true }));
+
+  /**
+   * "Forget this device": signs this browser out (only this one — other devices stay signed in)
+   * and drops its known-device mark, so the login limiter treats it like any unknown client.
+   */
+  api.post("/auth/forget-device", (c) => {
+    deleteCookie(c, deviceCookieName(opts.secureCookies), { path: "/", secure: opts.secureCookies });
+    clearSessionCookie(c, session);
+    c.header("Clear-Site-Data", '"cache"');
+    return c.json({ ok: true });
+  });
 
   // ---- bootstrap ----------------------------------------------------------
   // Never stored by the browser (`no-store`: health data stays out of the HTTP cache). The
@@ -320,24 +517,39 @@ export function createApp(opts: AppOptions) {
     return row!.stamp;
   };
 
-  api.get("/bootstrap", async (c) => {
-    const stamp = await versionStamp();
-    const tag = `W/"${createHash("sha256")
-      .update(`${opts.buildId ?? "dev"}\0${stamp}`)
+  /** The dataset's ETag right now (what /bootstrap answers with). */
+  const datasetTag = async () =>
+    `W/"${createHash("sha256")
+      .update(`${opts.buildId ?? "dev"}\0${await versionStamp()}`)
       .digest("base64url")
       .slice(0, 27)}"`;
+
+  api.get("/bootstrap", async (c) => {
+    const t0 = performance.now();
+    const tag = await datasetTag();
     c.header("ETag", tag);
     c.header("Cache-Control", "no-store");
-    if (etagMatches(c.req.header("If-None-Match"), tag)) return c.body(null, 304);
+    if (etagMatches(c.req.header("If-None-Match"), tag)) {
+      c.header("Server-Timing", timing({ db: performance.now() - t0 }));
+      return c.body(null, 304);
+    }
     const [settingsRow, days, ex, maxes, sess, seen] = await Promise.all([
-      db.select().from(settings).where(eq(settings.id, 1)),
+      db
+        .select({ data: settings.data, rev: xmin(settings) })
+        .from(settings)
+        .where(eq(settings.id, 1)),
       db.select().from(dayLogs).orderBy(asc(dayLogs.date)),
       db.select().from(exercises).orderBy(asc(exercises.id)),
       db.select().from(maxEntries).orderBy(asc(maxEntries.date), asc(maxEntries.id)),
-      db.select().from(sessions).orderBy(asc(sessions.date)),
+      db
+        .select({ date: sessions.date, data: sessions.data, rev: xmin(sessions) })
+        .from(sessions)
+        .orderBy(asc(sessions.date)),
       db.select().from(seenAchievements).orderBy(asc(seenAchievements.key)),
     ]);
+    const t1 = performance.now();
     if (!settingsRow[0]) return c.json({ error: "not seeded" }, 500);
+    const revs: Revs = { settings: settingsRow[0].rev, sessions: Object.fromEntries(sess.map((s) => [s.date, s.rev])) };
     const body: Bootstrap = {
       settings: settingsRow[0].data,
       days: days.map(toDay),
@@ -345,8 +557,11 @@ export function createApp(opts: AppOptions) {
       maxEntries: maxes.map(toMax),
       sessions: sess.map((s) => s.data),
       seenAchievements: seen.map((s) => s.key),
+      revs,
     };
-    return c.json(body);
+    const json = JSON.stringify(body);
+    c.header("Server-Timing", timing({ db: t1 - t0, build: performance.now() - t1 }));
+    return c.body(json, 200, { "Content-Type": "application/json; charset=UTF-8" });
   });
 
   // ---- days ---------------------------------------------------------------
@@ -365,10 +580,27 @@ export function createApp(opts: AppOptions) {
   });
 
   // ---- settings -------------------------------------------------------------
+  // Version-checked (see `precondition`): a stale revision is a 409 with the current document.
   api.put("/settings", async (c) => {
     const parsed = settingsSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
-    await db.update(settings).set({ data: parsed.data, updatedAt: new Date() }).where(eq(settings.id, 1));
+    const pre = precondition(c);
+    const out = await db.transaction(async (tx) => {
+      const [cur] = await tx
+        .select({ data: settings.data, rev: xmin(settings) })
+        .from(settings)
+        .where(eq(settings.id, 1))
+        .for("update");
+      if (cur && conflicts(pre, cur.rev)) return { conflict: cur };
+      const [row] = await tx
+        .update(settings)
+        .set({ data: parsed.data, updatedAt: new Date() })
+        .where(eq(settings.id, 1))
+        .returning({ rev: xmin(settings) });
+      return { rev: row?.rev ?? null };
+    });
+    if (out.conflict) return c.json({ error: "conflict", current: out.conflict.data, rev: out.conflict.rev }, 409);
+    if (out.rev) c.header("ETag", `"${out.rev}"`);
     return c.json(parsed.data);
   });
 
@@ -427,15 +659,32 @@ export function createApp(opts: AppOptions) {
   });
 
   // ---- sessions ---------------------------------------------------------------
+  // Version-checked like settings. The new revision comes back as the response's ETag.
   api.put("/sessions/:date", async (c) => {
     const parsed = sessionSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
     if (parsed.data.date !== c.req.param("date")) return c.json({ error: "date mismatch" }, 400);
-    await db
-      .insert(sessions)
-      .values({ date: parsed.data.date, data: parsed.data })
-      .onConflictDoUpdate({ target: sessions.date, set: { data: parsed.data, updatedAt: new Date() } });
-    return c.json(parsed.data);
+    const pre = precondition(c);
+    const doc = parsed.data;
+    const out = await db.transaction(async (tx: Tx) => {
+      if (pre) {
+        const [cur] = await tx
+          .select({ data: sessions.data, rev: xmin(sessions) })
+          .from(sessions)
+          .where(eq(sessions.date, doc.date))
+          .for("update");
+        if (cur && conflicts(pre, cur.rev)) return { conflict: cur };
+      }
+      const [row] = await tx
+        .insert(sessions)
+        .values({ date: doc.date, data: doc })
+        .onConflictDoUpdate({ target: sessions.date, set: { data: doc, updatedAt: new Date() } })
+        .returning({ rev: xmin(sessions) });
+      return { rev: row?.rev ?? null };
+    });
+    if (out.conflict) return c.json({ error: "conflict", current: out.conflict.data, rev: out.conflict.rev }, 409);
+    if (out.rev) c.header("ETag", `"${out.rev}"`);
+    return c.json(doc);
   });
 
   api.delete("/sessions/:date", async (c) => {

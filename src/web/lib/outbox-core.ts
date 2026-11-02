@@ -12,6 +12,7 @@
  */
 import { formatShortDate } from "../../shared/dates";
 import { emptyDayLog } from "../../shared/empty";
+import { deepEqual, mergeSession, mergeSettings } from "./merge";
 import type {
   Bootstrap,
   DayLog,
@@ -21,17 +22,30 @@ import type {
   Measure,
   MaxEntry,
   MaxSource,
+  Revs,
   Session,
   Settings,
 } from "../../shared/schemas";
 
+export { deepEqual };
+
 export type ExercisePatch = Partial<Omit<Exercise, "id">>;
+
+/**
+ * What a whole-document edit was based on, for version-checked saves: the server revision
+ * (`baseRev`; null = the server had no such document; absent = unknown, so the save isn't
+ * checked) and the server's document at that revision (`base`, the merge ancestor on a 409).
+ */
+export interface DocBase<T> {
+  baseRev?: string | null;
+  base?: T | null;
+}
 
 export type Op =
   | { kind: "day"; date: string; patch: DayLogPatch }
   /** `doc: null` deletes the session. */
-  | { kind: "session"; date: string; doc: Session | null }
-  | { kind: "settings"; settings: Settings }
+  | ({ kind: "session"; date: string; doc: Session | null } & DocBase<Session>)
+  | ({ kind: "settings"; settings: Settings } & DocBase<Settings>)
   | {
       kind: "addMax";
       tempId: number;
@@ -43,6 +57,11 @@ export type Op =
       createdAt: string;
       /** Sent as `Idempotency-Key`; assigned by `addOp` when missing (see `ensureIdempotencyKeys`). */
       idemKey?: string;
+      /**
+       * Mark the saved entry's achievement (`max-<id>`) seen in the same update that applies the
+       * server's row, so no celebration can see it unseen (the caller already showed the gain).
+       */
+      markSeenOnAck?: boolean;
     }
   | { kind: "deleteMax"; id: number }
   | {
@@ -75,6 +94,22 @@ export interface Entry {
   result?: unknown;
   /** Order in which entries were acked (results must be re-applied in that order). */
   ackNo?: number;
+  /** Of an acked whole-document save: the document's new server revision (null: deleted). */
+  srev?: string | null;
+  /** Of an acked write: the dataset version before and after it (`x-dataset-etag-prev` / `x-dataset-etag`). */
+  etags?: AckEtags;
+}
+
+export interface AckEtags {
+  /** Missing when the server couldn't tell (the write wasn't serialised). */
+  prev: string | null;
+  next: string;
+}
+
+/** What a server response says besides its body. */
+export interface AckMeta {
+  srev?: string | null;
+  etags?: AckEtags;
 }
 
 export interface OutboxState {
@@ -160,7 +195,15 @@ function merge(a: Op, b: Op): Op {
   if (a.kind === "day" && b.kind === "day") return { ...b, patch: { ...a.patch, ...b.patch } };
   if (a.kind === "updateExercise" && b.kind === "updateExercise") return { ...b, patch: { ...a.patch, ...b.patch } };
   if (a.kind === "seen" && b.kind === "seen") return { kind: "seen", keys: [...new Set([...a.keys, ...b.keys])] };
-  return b; // whole-document ops: latest wins
+  // Whole-document ops: the latest document wins, based on what the first unsent edit was based on.
+  if ((a.kind === "session" && b.kind === "session") || (a.kind === "settings" && b.kind === "settings")) return withDocBase(b, a);
+  return b;
+}
+
+/** `op` with `from`'s document base (or none, when `from` had none). */
+function withDocBase<T extends Op & DocBase<unknown>>(op: T, from: DocBase<unknown>): T {
+  const { baseRev: _r, base: _b, ...rest } = op;
+  return ("baseRev" in from && from.baseRev !== undefined ? { ...rest, baseRev: from.baseRev, base: from.base ?? null } : rest) as T;
 }
 
 const isCreator = (op: Op): op is Extract<Op, { tempId: number }> => op.kind === "addMax" || op.kind === "createExercise";
@@ -322,8 +365,12 @@ export function nextSendable(entries: readonly Entry[]): Entry | undefined {
   return entries.find((e) => e.state === "pending" && !tempRefs(e.op).some((t) => unresolved.has(t)));
 }
 
-/** Marks an entry acked with the server's response, remapping temp ids in everything still queued. */
-export function ackEntry(s: OutboxState, seq: number, result: unknown): OutboxState {
+/**
+ * Marks an entry acked with the server's response, remapping temp ids in everything still queued.
+ * A saved whole document also re-bases later unsent edits of it on the new revision (they were
+ * made on top of this one; when the server's copy differs — a merge — they're merged onto it).
+ */
+export function ackEntry(s: OutboxState, seq: number, result: unknown, meta: AckMeta = {}): OutboxState {
   const e = s.entries.find((x) => x.seq === seq);
   if (!e) return s;
   let tempMap = s.tempMap;
@@ -331,13 +378,41 @@ export function ackEntry(s: OutboxState, seq: number, result: unknown): OutboxSt
     const pairs: [string, number][] = Object.entries({ ...tempMap, [e.op.tempId]: (result as { id: number }).id });
     tempMap = Object.fromEntries(pairs.slice(-200));
   }
-  const entries = s.entries.map((x) => {
-    if (x.seq === seq) return { ...x, state: "acked" as const, result, ackNo: s.nextAck, error: undefined, rev: bump(x) };
-    if (x.state === "acked" || tempMap === s.tempMap) return x;
-    const op = remapOp(x.op, tempMap);
+  const key = opKey(e.op);
+  const at = s.entries.indexOf(e);
+  const entries = s.entries.map((x, i) => {
+    if (x.seq === seq)
+      return {
+        ...x,
+        state: "acked" as const,
+        result,
+        ackNo: s.nextAck,
+        error: undefined,
+        rev: bump(x),
+        ...(meta.srev !== undefined ? { srev: meta.srev } : {}),
+        ...(meta.etags ? { etags: meta.etags } : {}),
+      };
+    if (x.state === "acked") return x;
+    let op = tempMap === s.tempMap ? x.op : remapOp(x.op, tempMap);
+    if (i > at && meta.srev !== undefined && key && opKey(op) === key) op = rebase(op, e.op, result, meta.srev);
     return op === x.op ? x : { ...x, op, rev: bump(x) };
   });
   return { ...s, entries, tempMap, nextAck: s.nextAck + 1 };
+}
+
+/** A later edit of the same document, re-based on what the server saved for `saved` (at revision `srev`). */
+function rebase(later: Op, saved: Op, result: unknown, srev: string | null): Op {
+  if (later.kind === "session" && saved.kind === "session") {
+    const server = saved.doc ? ((result as Session | null) ?? saved.doc) : null;
+    const doc = later.doc && saved.doc && server && !deepEqual(server, saved.doc) ? mergeSession(saved.doc, later.doc, server) : later.doc;
+    return { ...later, doc, baseRev: srev, base: server };
+  }
+  if (later.kind === "settings" && saved.kind === "settings") {
+    const server = (result as Settings | null) ?? saved.settings;
+    const settings = deepEqual(server, saved.settings) ? later.settings : mergeSettings(saved.settings, later.settings, server);
+    return { ...later, settings, baseRev: srev, base: server };
+  }
+  return later;
 }
 
 export function failEntry(s: OutboxState, seq: number, error: string): OutboxState {
@@ -459,31 +534,6 @@ export function pendingDates(entries: readonly Entry[]): Set<string> {
 const byDate = (a: { date: string }, b: { date: string }) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
 
 /**
- * Deep equality for JSON-shaped data (keys whose value is `undefined` count as absent). Fast
- * when most of the structure is shared: identical references short-circuit.
- */
-export function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
-  if (Array.isArray(a)) {
-    if (!Array.isArray(b) || a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i])) return false;
-    return true;
-  }
-  if (Array.isArray(b)) return false;
-  const ao = a as Record<string, unknown>;
-  const bo = b as Record<string, unknown>;
-  let n = 0;
-  for (const k in ao) {
-    if (ao[k] === undefined) continue;
-    n++;
-    if (!deepEqual(ao[k], bo[k])) return false;
-  }
-  for (const k in bo) if (bo[k] !== undefined) n--;
-  return n === 0;
-}
-
-/**
  * `next`, but reusing `prev` (and, for arrays, `prev`'s elements) wherever the contents are
  * equal — so memoized consumers don't recompute years of history for an unchanged value.
  */
@@ -525,6 +575,22 @@ function upsertById<T extends { id: number }>(xs: T[], x: T): T[] {
   return out;
 }
 
+/** The server revisions after an acked save (`srev`), or `revs` itself when nothing changes. */
+function withRev(revs: Revs | undefined, op: Op, srev: string | null | undefined): Revs | undefined {
+  if (srev === undefined || !revs) return revs;
+  if (op.kind === "settings") return srev === null || revs.settings === srev ? revs : { ...revs, settings: srev };
+  if (op.kind !== "session") return revs;
+  if (srev === null) {
+    if (!(op.date in revs.sessions)) return revs;
+    const { [op.date]: _gone, ...sessions } = revs.sessions;
+    return { ...revs, sessions };
+  }
+  return revs.sessions[op.date] === srev ? revs : { ...revs, sessions: { ...revs.sessions, [op.date]: srev } };
+}
+
+/** The achievement key a saved max entry is celebrated under (see gamify `achievements`). */
+export const maxSeenKey = (id: number) => `max-${id}`;
+
 function addKeys(seen: string[], keys: string[]): string[] {
   const have = new Set(seen);
   const fresh = keys.filter((k) => !have.has(k));
@@ -550,7 +616,7 @@ export function applyOp(b: Bootstrap, op: Op): Bootstrap {
       return { ...b, settings: op.settings };
     case "addMax": {
       if (b.maxEntries.some((e) => e.id === op.tempId)) return b;
-      const { tempId, kind: _k, idemKey: _i, ...rest } = op;
+      const { tempId, kind: _k, idemKey: _i, markSeenOnAck: _m, ...rest } = op;
       return { ...b, maxEntries: [...b.maxEntries, { id: tempId, ...rest }] };
     }
     case "deleteMax":
@@ -569,8 +635,17 @@ export function applyOp(b: Bootstrap, op: Op): Bootstrap {
   }
 }
 
-/** The server-confirmed effect of an acked op, given its response body. */
-export function applyResult(b: Bootstrap, op: Op, result: unknown): Bootstrap {
+/**
+ * The server-confirmed effect of an acked op, given its response body (and, for a whole-document
+ * save, the document's new revision).
+ */
+export function applyResult(b: Bootstrap, op: Op, result: unknown, srev?: string | null): Bootstrap {
+  const revs = withRev(b.revs, op, srev);
+  const next = applyResultBody(b, op, result);
+  return revs === next.revs ? next : { ...next, revs };
+}
+
+function applyResultBody(b: Bootstrap, op: Op, result: unknown): Bootstrap {
   switch (op.kind) {
     case "day": {
       if (!result) return applyOp(b, op);
@@ -590,7 +665,12 @@ export function applyResult(b: Bootstrap, op: Op, result: unknown): Bootstrap {
       if (!result) return b;
       const without = b.maxEntries.some((e) => e.id === op.tempId) ? b.maxEntries.filter((e) => e.id !== op.tempId) : b.maxEntries;
       const maxEntries = upsertById(without, result as MaxEntry);
-      return maxEntries === b.maxEntries ? b : { ...b, maxEntries };
+      const id = (result as MaxEntry).id;
+      // In the same update as the row itself, so nothing ever sees the entry unseen.
+      const seenAchievements =
+        op.markSeenOnAck && typeof id === "number" ? addKeys(b.seenAchievements, [maxSeenKey(id)]) : b.seenAchievements;
+      if (maxEntries === b.maxEntries && seenAchievements === b.seenAchievements) return b;
+      return { ...b, maxEntries, seenAchievements };
     }
     case "createExercise": {
       if (!result) return b;
@@ -614,7 +694,7 @@ export function applyAcked(b: Bootstrap, entries: readonly Entry[]): Bootstrap {
   return entries
     .filter((e) => e.state === "acked")
     .sort((x, y) => (x.ackNo ?? 0) - (y.ackNo ?? 0))
-    .reduce((acc, e) => applyResult(acc, e.op, e.result), b);
+    .reduce((acc, e) => applyResult(acc, e.op, e.result, e.srev), b);
 }
 
 // ---------------------------------------------------------------------------
@@ -736,14 +816,22 @@ export interface OpRequest {
 
 const idemHeaders = (op: { idemKey?: string }) => (op.idemKey ? { "Idempotency-Key": op.idemKey } : undefined);
 
+/** The precondition of a version-checked save: `If-Match` the revision it was based on, or `If-None-Match: *`. */
+function preconditionHeaders(op: DocBase<unknown>): Record<string, string> | undefined {
+  if (op.baseRev === undefined) return undefined; // based on a copy without revisions: unchecked
+  return op.baseRev === null ? { "If-None-Match": "*" } : { "If-Match": `"${op.baseRev}"` };
+}
+
 export function request(op: Op): OpRequest {
   switch (op.kind) {
     case "day":
       return { method: "PUT", path: `/days/${op.date}`, body: op.patch };
     case "session":
-      return op.doc ? { method: "PUT", path: `/sessions/${op.date}`, body: op.doc } : { method: "DELETE", path: `/sessions/${op.date}` };
+      return op.doc
+        ? { method: "PUT", path: `/sessions/${op.date}`, body: op.doc, headers: preconditionHeaders(op) }
+        : { method: "DELETE", path: `/sessions/${op.date}` };
     case "settings":
-      return { method: "PUT", path: "/settings", body: op.settings };
+      return { method: "PUT", path: "/settings", body: op.settings, headers: preconditionHeaders(op) };
     case "addMax":
       return {
         method: "POST",
