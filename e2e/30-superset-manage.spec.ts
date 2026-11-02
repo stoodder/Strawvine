@@ -155,15 +155,161 @@ test("a new exercise added from the superset sheet; the sheet comes back with it
     .getByRole("dialog", { name: "Rows" })
     .getByRole("button", { name: /^Superset with another exercise/ })
     .click();
-  await page.getByRole("dialog", { name: "New superset" }).getByRole("button", { name: "Add new exercise" }).click();
+  await page.getByRole("dialog", { name: "New superset" }).getByRole("button", { name: "Add another exercise" }).click();
   const add = page.getByRole("dialog", { name: "Add to superset" });
   await add.getByRole("textbox", { name: "Search or create exercise" }).fill("Face pull");
   await add.getByRole("button", { name: /Create & add/ }).click();
   const sheet = page.getByRole("dialog", { name: "Superset A" });
   await expect(sheet.getByRole("status")).toHaveText("Face pull added to Superset A as A2");
   await expect(members(sheet)).toHaveText([/^A1: Rows/, /^A2: Face pull/]);
+  // Focus is on the new member (not the panel), like an exercise added from this workout.
+  await expect(sheet.getByRole("button", { name: "Move Face pull up in Superset A" })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(sheet).toHaveCount(0);
   await expectSynced(page);
   expect(await serverBlocks(page, MONDAY_ISO)).toEqual([["Rows", "Face pull"]]);
+});
+
+/** Rows + the others in Superset A (from Rows' options), the sheet left open. */
+async function supersetOf(page: Page, ...others: string[]) {
+  await page.getByRole("button", { name: "Rows options" }).click();
+  await page
+    .getByRole("dialog", { name: "Rows" })
+    .getByRole("button", { name: /^Superset with another exercise/ })
+    .click();
+  await page.getByRole("dialog", { name: "New superset" }).getByRole("button", { name: `Superset Rows with ${others[0]}` }).click();
+  const sheet = page.getByRole("dialog", { name: "Superset A" });
+  for (const o of others.slice(1)) await sheet.getByRole("button", { name: `Add ${o} to Superset A` }).click();
+  await expect(members(sheet)).toHaveText(["Rows", ...others].map((n, i) => new RegExp(`^A${i + 1}: ${n}`)));
+  return sheet;
+}
+
+test("Add from this workout takes the one picked (not the first offered)", async ({ page }) => {
+  for (const name of ["Rows", "Curls", "Dips"]) await create(page, name);
+  await page.getByRole("button", { name: "Rows options" }).click();
+  await page
+    .getByRole("dialog", { name: "Rows" })
+    .getByRole("button", { name: /^Superset with another exercise/ })
+    .click();
+  const start = page.getByRole("dialog", { name: "New superset" });
+  await expect(start.locator("[data-candidate]")).toHaveText([/^Curls/, /^Dips/]);
+  await start.getByRole("button", { name: "Superset Rows with Dips" }).click();
+  const sheet = page.getByRole("dialog", { name: "Superset A" });
+  await expect(members(sheet)).toHaveText([/^A1: Rows/, /^A2: Dips/]);
+  await expect(sheet.getByRole("button", { name: "Move Dips up in Superset A" })).toBeFocused();
+  await expect(sheet.locator("[data-candidate]")).toHaveText([/^Curls/]);
+  await page.keyboard.press("Escape");
+  expect(await pageOrder(page)).toEqual(["Rows", "Dips", "Curls"]);
+  await expectSynced(page);
+  expect(await serverBlocks(page, MONDAY_ISO)).toEqual([["Rows", "Dips"], ["Curls"]]);
+});
+
+test("Add another exercise doesn't add what's already there: members and the main lift are disabled, one from this workout moves in", async ({
+  page,
+}) => {
+  for (const name of ["Rows", "Curls", "Dips"]) await create(page, name);
+  // Curls has a logged set: it keeps it when it moves.
+  await page.getByRole("button", { name: /^Curls set 1:/ }).click();
+  await expect(page.getByRole("button", { name: /^Curls set 1:/ })).toHaveAttribute("aria-pressed", "true");
+  const sheet = await supersetOf(page, "Dips");
+  await sheet.getByRole("button", { name: "Add another exercise" }).click();
+  const add = page.getByRole("dialog", { name: "Add to Superset A" });
+  const pick = (name: string) => add.getByRole("button", { name: new RegExp(`^${name}\\b`) });
+  for (const name of ["Rows", "Dips"]) {
+    await expect(pick(name)).toHaveAttribute("aria-disabled", "true");
+    await expect(pick(name)).toContainText("Already in Superset A");
+  }
+  await expect(pick("Bench press")).toHaveAttribute("aria-disabled", "true");
+  await expect(pick("Bench press")).toContainText("Main lift");
+  await expect(pick("Curls")).toContainText("In this workout · moves here");
+  await expect(pick("Curls")).not.toHaveAttribute("aria-disabled");
+  // A disabled one does nothing.
+  await pick("Rows").click({ force: true });
+  await pick("Bench press").click({ force: true });
+  await expect(add).toBeVisible();
+  await pick("Curls").click();
+  await expect(add).toHaveCount(0);
+  await expect(sheet.getByRole("status")).toHaveText("Curls added to Superset A as A3");
+  await expect(members(sheet)).toHaveText([/^A1: Rows/, /^A2: Dips/, /^A3: Curls.*1 logged/]);
+  await expect(sheet.getByRole("button", { name: "Move Curls up in Superset A" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  expect(await pageOrder(page)).toEqual(["Rows", "Dips", "Curls"]);
+  await expectSynced(page);
+  expect(await serverBlocks(page, MONDAY_ISO)).toEqual([["Rows", "Dips", "Curls*"]]);
+});
+
+test("a full superset says so; nothing more can be added", async ({ page }) => {
+  const names = ["Rows", "Curls", "Dips", "Flyes", "Shrugs", "Raises"];
+  for (const name of names) await create(page, name);
+  const sheet = await supersetOf(page, ...names.slice(1));
+  await expect(sheet.getByText("A superset holds up to 6 exercises")).toBeVisible();
+  await expect(sheet.getByText("No other accessories in this workout yet.")).toHaveCount(0);
+  const add = sheet.getByRole("button", { name: "Add another exercise" });
+  await expect(add).toHaveAttribute("aria-disabled", "true");
+  await add.click({ force: true }); // aria-disabled: Playwright would wait for it to be enabled
+  await expect(page.getByRole("dialog", { name: /^Add to/ })).toHaveCount(0);
+  await expect(sheet).toBeVisible();
+});
+
+test("Remove from superset, undone from the sheet and from the toast: A1 is A1 again", async ({ page }) => {
+  for (const name of ["Rows", "Curls", "Dips"]) await create(page, name);
+  const sheet = await supersetOf(page, "Curls", "Dips");
+
+  // In the sheet: a visible Remove, and the sheet's own Undo.
+  const remove = sheet.getByRole("button", { name: "Remove Rows from Superset A" });
+  await expect(remove).toHaveText("Remove");
+  await remove.click();
+  await expect(sheet.getByRole("status")).toHaveText("Rows removed from Superset A · now right after it");
+  await expect(members(sheet)).toHaveText([/^A1: Curls/, /^A2: Dips/]);
+  await sheet.getByRole("button", { name: "Undo removing Rows" }).click();
+  await expect(members(sheet)).toHaveText([/^A1: Rows/, /^A2: Curls/, /^A3: Dips/]);
+  await expect(sheet.getByRole("status")).toHaveText("Rows back in Superset A as A1");
+  await expect(sheet.getByRole("button", { name: "Remove Rows from Superset A" })).toBeFocused();
+  await expectSynced(page);
+  expect(await serverBlocks(page, MONDAY_ISO)).toEqual([["Rows", "Curls", "Dips"]]);
+
+  // Removed in the sheet, then the sheet closed: the Undo is the toast's now.
+  await sheet.getByRole("button", { name: "Remove Rows from Superset A" }).click();
+  await expect(members(sheet)).toHaveText([/^A1: Curls/, /^A2: Dips/]);
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Manage Superset A" })).toBeFocused();
+  expect(await pageOrder(page)).toEqual(["Curls", "Dips", "Rows"]);
+  await expect(toastMessage(page, "Rows removed from Superset A")).toBeVisible();
+  await notifications(page).getByRole("button", { name: "Undo" }).click();
+  await expect.poll(() => pageOrder(page)).toEqual(["Rows", "Curls", "Dips"]);
+  await expect(page.getByRole("button", { name: "Rows options" })).toBeFocused();
+
+  // From the exercise's options: the toast's Undo puts A1 back as A1.
+  await page.getByRole("button", { name: "Rows options" }).click();
+  await page
+    .getByRole("dialog", { name: "Rows" })
+    .getByRole("button", { name: /^Remove from superset/ })
+    .click();
+  await expect(toastMessage(page, "Rows removed from Superset A")).toBeVisible();
+  expect(await pageOrder(page)).toEqual(["Curls", "Dips", "Rows"]);
+  await notifications(page).getByRole("button", { name: "Undo" }).click();
+  await expect.poll(() => pageOrder(page)).toEqual(["Rows", "Curls", "Dips"]);
+  await page.getByRole("button", { name: "Manage Superset A", exact: true }).click();
+  await expect(members(page.getByRole("dialog", { name: "Superset A" }))).toHaveText([/^A1: Rows/, /^A2: Curls/, /^A3: Dips/]);
+  await page.keyboard.press("Escape");
+  await expectSynced(page);
+  expect(await serverBlocks(page, MONDAY_ISO)).toEqual([["Rows", "Curls", "Dips"]]);
+});
+
+test("Add another exercise cancelled: back in the superset sheet, and Escape gives focus back to its header", async ({ page }) => {
+  for (const name of ["Rows", "Curls"]) await create(page, name);
+  await supersetOf(page, "Curls");
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Manage Superset A" }).click();
+  const sheet = page.getByRole("dialog", { name: "Superset A" });
+  await sheet.getByRole("button", { name: "Add another exercise" }).click();
+  const add = page.getByRole("dialog", { name: "Add to Superset A" });
+  await expect(add.getByRole("textbox", { name: "Search or create exercise" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(add).toHaveCount(0);
+  await expect(sheet.getByRole("button", { name: "Add another exercise" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Manage Superset A" })).toBeFocused();
 });

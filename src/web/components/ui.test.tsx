@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DotScale, Sheet, Stepper } from "./ui";
 
 const root = () => document.getElementById("root")!;
@@ -165,18 +165,153 @@ describe("Sheet initialFocus", () => {
   });
 });
 
+describe("Sheet initialFocus, synchronously", () => {
+  it("has the field focused by the end of the opening tap, and enters in place (24 px), not from below", () => {
+    render(<SearchSheetHarness />, { container: root() });
+    const trigger = screen.getByRole("button", { name: "Add" });
+    trigger.focus();
+    act(() => {
+      fireEvent.click(trigger);
+    });
+    // No await: iOS raises the keyboard only for a focus within the tap.
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Search" }));
+    const transform = screen.getByRole("dialog").style.transform;
+    expect(transform).toContain("24px");
+    expect(transform).not.toContain("100%");
+    act(() => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+  });
+
+  it("a sheet without one slides up from below", () => {
+    render(<SheetHarness />, { container: root() });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    });
+    expect(screen.getByRole("dialog").style.transform).toContain("100%");
+    act(() => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+  });
+});
+
+describe("Sheet: swipe down to close, content scrolls by touch", () => {
+  // A slow, steady finger: 50 ms between events (a flick is a separate case).
+  let now = 0;
+  beforeEach(() => {
+    vi.spyOn(performance, "now").mockImplementation(() => (now += 50));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function open(onClose = vi.fn()) {
+    render(
+      <Sheet open onClose={onClose} title="Options">
+        <p>Long content</p>
+        <input type="range" aria-label="Pace" />
+      </Sheet>,
+      { container: root() },
+    );
+    const panel = screen.getByRole("dialog");
+    return { panel, onClose, grab: panel.querySelector<HTMLElement>("[data-sheet-grab]")! };
+  }
+  /** A one-finger swipe on `el` from y to y + dy; whether its moves were prevented (taken from the browser). */
+  function swipe(el: Element, dy: number, from = 300) {
+    fireEvent.touchStart(el, { touches: [{ clientX: 100, clientY: from }] });
+    const prevented: boolean[] = [];
+    for (let i = 1; i <= 5; i++) prevented.push(!fireEvent.touchMove(el, { touches: [{ clientX: 100, clientY: from + (dy * i) / 5 }] }));
+    fireEvent.touchEnd(el, { touches: [] });
+    return prevented;
+  }
+
+  it("leaves the panel's touch scrolling to the browser (no touch-action on it); only the grab area is touch-action none", () => {
+    const { panel, grab } = open();
+    expect(panel.style.touchAction).toBe("");
+    expect(panel.style.userSelect).toBe("");
+    expect(grab.className).toContain("touch-none");
+    expect(grab.contains(screen.getByRole("heading", { name: "Options" }))).toBe(true);
+  });
+
+  it("content at its top: a swipe down is the sheet's and closes it; a swipe up is a scroll", () => {
+    const { panel, onClose } = open();
+    const content = screen.getByText("Long content");
+    expect(swipe(content, -200).some(Boolean)).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(swipe(content, 200).every(Boolean)).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // A short, slow one springs back; a short flick closes.
+    expect(swipe(content, 40).every(Boolean)).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    vi.spyOn(performance, "now").mockImplementation(() => (now += 8));
+    swipe(content, 60);
+    expect(onClose).toHaveBeenCalledTimes(2);
+    expect(panel).toBeTruthy();
+  });
+
+  it("content scrolled down: a swipe down scrolls (not prevented) and never closes", () => {
+    const { panel, onClose } = open();
+    panel.scrollTop = 120;
+    Object.defineProperty(panel, "scrollTop", { configurable: true, value: 120 });
+    expect(swipe(screen.getByText("Long content"), 300).some(Boolean)).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("a slider and two fingers are left alone", () => {
+    const { onClose } = open();
+    expect(swipe(screen.getByRole("slider", { name: "Pace" }), 300).some(Boolean)).toBe(false);
+    const content = screen.getByText("Long content");
+    fireEvent.touchStart(content, {
+      touches: [
+        { clientX: 100, clientY: 300 },
+        { clientX: 200, clientY: 300 },
+      ],
+    });
+    expect(fireEvent.touchMove(content, { touches: [{ clientX: 100, clientY: 600 }] })).toBe(true);
+    fireEvent.touchEnd(content, { touches: [] });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("the grab area drags by pointer (mouse too); its Close button stays a press", () => {
+    const { grab, onClose } = open();
+    fireEvent.pointerDown(grab, { button: 0, pointerId: 1, clientY: 20 });
+    for (const clientY of [30, 40, 50, 60]) fireEvent.pointerMove(grab, { pointerId: 1, clientY });
+    fireEvent.pointerUp(grab, { pointerId: 1, clientY: 60 });
+    expect(onClose).not.toHaveBeenCalled(); // 40 px: springs back
+    fireEvent.pointerDown(grab, { button: 0, pointerId: 2, clientY: 20 });
+    fireEvent.pointerMove(grab, { pointerId: 2, clientY: 100 });
+    fireEvent.pointerMove(grab, { pointerId: 2, clientY: 200 });
+    fireEvent.pointerUp(grab, { pointerId: 2, clientY: 200 });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    const close = screen.getByRole("button", { name: "Close" });
+    fireEvent.pointerDown(close, { button: 0, pointerId: 3, clientY: 20 });
+    fireEvent.pointerMove(close, { pointerId: 3, clientY: 300 });
+    fireEvent.pointerUp(close, { pointerId: 3, clientY: 300 });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("Sheet and the on-screen keyboard", () => {
   /** A stand-in visualViewport (jsdom has none): `height` tall, panned down by `offsetTop`. */
-  function fakeViewport() {
-    const vv = Object.assign(new EventTarget(), { height: 844, offsetTop: 0, scale: 1 });
+  function fakeViewport(height = 844, offsetTop = 0) {
+    const vv = Object.assign(new EventTarget(), { height, offsetTop, scale: 1 });
     Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
     return vv;
   }
+  const resize = (vv: ReturnType<typeof fakeViewport>, o: Partial<{ height: number; offsetTop: number; scale: number }>) =>
+    act(() => {
+      Object.assign(vv, o);
+      vv.dispatchEvent(new Event("resize"));
+    });
+  const vars = (overlay: HTMLElement) => ["--sheet-bottom", "--sheet-room", "--sheet-safe"].map((v) => overlay.style.getPropertyValue(v));
+  /** The overlay is the window: 844 tall at the top (every element measures so, unless overridden). */
+  const windowRect = () => vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 390, 844));
+  const cleanup = (rect: { mockRestore: () => void }) => {
+    rect.mockRestore();
+    Object.defineProperty(window, "visualViewport", { value: undefined, configurable: true });
+  };
 
-  it("lifts the panel above the keyboard and caps it to the visible room, then lets go", () => {
+  it("lifts the panel above the keyboard for a field in the sheet and caps it to the visible room, then lets go", () => {
     const vv = fakeViewport();
-    // The overlay is the window: 844 tall at the top.
-    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 390, 844));
+    const rect = windowRect();
     try {
       const { rerender } = render(
         <Sheet open onClose={() => {}} ariaLabel="A">
@@ -185,17 +320,13 @@ describe("Sheet and the on-screen keyboard", () => {
         { container: root() },
       );
       const overlay = screen.getByRole("dialog").parentElement!;
+      act(() => screen.getByRole("textbox", { name: "Name" }).focus());
       // No keyboard: nothing set, the panel sits on the bottom.
-      expect(overlay.style.getPropertyValue("--sheet-bottom")).toBe("");
+      expect(vars(overlay)).toEqual(["", "", ""]);
 
       // A keyboard: 508 px visible above it.
-      act(() => {
-        vv.height = 508;
-        vv.dispatchEvent(new Event("resize"));
-      });
-      expect(overlay.style.getPropertyValue("--sheet-bottom")).toBe("336px");
-      expect(overlay.style.getPropertyValue("--sheet-room")).toBe("492px");
-      expect(overlay.style.getPropertyValue("--sheet-safe")).toBe("0px");
+      resize(vv, { height: 508 });
+      expect(vars(overlay)).toEqual(["336px", "492px", "0px"]);
 
       // The view panned down by 200 to show a field: the panel follows the visible area.
       act(() => {
@@ -204,25 +335,21 @@ describe("Sheet and the on-screen keyboard", () => {
       });
       expect(overlay.style.getPropertyValue("--sheet-bottom")).toBe("136px");
 
+      // Panned all the way (iOS shows the bottom of the window): nothing to lift, but the room
+      // is still the visible height and the home-indicator inset is under the keyboard.
+      resize(vv, { offsetTop: 336 });
+      expect(vars(overlay)).toEqual(["0px", "492px", "0px"]);
+
       // Pinch zoom is left alone.
-      act(() => {
-        vv.scale = 2;
-        vv.dispatchEvent(new Event("resize"));
-      });
+      resize(vv, { scale: 2 });
       expect(overlay.style.getPropertyValue("--sheet-bottom")).toBe("");
 
       // Keyboard down.
-      act(() => {
-        Object.assign(vv, { scale: 1, height: 844, offsetTop: 0 });
-        vv.dispatchEvent(new Event("resize"));
-      });
-      expect(overlay.style.getPropertyValue("--sheet-room")).toBe("");
+      resize(vv, { scale: 1, height: 844, offsetTop: 0 });
+      expect(vars(overlay)).toEqual(["", "", ""]);
 
       // Closed: it stops listening.
-      act(() => {
-        vv.height = 508;
-        vv.dispatchEvent(new Event("resize"));
-      });
+      resize(vv, { height: 508 });
       expect(overlay.style.getPropertyValue("--sheet-bottom")).toBe("336px");
       rerender(
         <Sheet open={false} onClose={() => {}} ariaLabel="A">
@@ -230,14 +357,117 @@ describe("Sheet and the on-screen keyboard", () => {
         </Sheet>,
       );
       const removed = vi.spyOn(overlay.style, "setProperty");
-      act(() => {
-        vv.height = 400;
-        vv.dispatchEvent(new Event("resize"));
-      });
+      resize(vv, { height: 400 });
       expect(removed).not.toHaveBeenCalled();
     } finally {
-      rect.mockRestore();
-      Object.defineProperty(window, "visualViewport", { value: undefined, configurable: true });
+      cleanup(rect);
+    }
+  });
+
+  it("a pan left over after the keyboard went down (the full height visible) sets nothing", () => {
+    const vv = fakeViewport();
+    const rect = windowRect();
+    try {
+      render(
+        <Sheet open onClose={() => {}} ariaLabel="A">
+          <input aria-label="Name" />
+        </Sheet>,
+        { container: root() },
+      );
+      const overlay = screen.getByRole("dialog").parentElement!;
+      act(() => screen.getByRole("textbox", { name: "Name" }).focus());
+      resize(vv, { height: 844, offsetTop: 200 });
+      expect(vars(overlay)).toEqual(["", "", ""]);
+      resize(vv, { height: 844, offsetTop: 0.5 });
+      expect(vars(overlay)).toEqual(["", "", ""]);
+    } finally {
+      cleanup(rect);
+    }
+  });
+
+  it("opened while a keyboard is up: lifts at once for its initialFocus field, not at all without a field in focus", () => {
+    const vv = fakeViewport(508);
+    const rect = windowRect();
+    try {
+      render(<SearchSheetHarness />, { container: root() });
+      act(() => {
+        fireEvent.click(screen.getByRole("button", { name: "Add" }));
+      });
+      const overlay = screen.getByRole("dialog").parentElement!;
+      expect(vars(overlay)).toEqual(["336px", "492px", "0px"]);
+      act(() => {
+        fireEvent.keyDown(window, { key: "Escape" });
+      });
+
+      // A sheet with no field in focus (another sheet's keyboard still going down) stays on the bottom…
+      const { unmount } = render(<SheetHarness />, { container: root() });
+      act(() => {
+        fireEvent.click(screen.getByRole("button", { name: "Open" }));
+      });
+      const other = screen.getByRole("dialog", { name: "Edit set" }).parentElement!;
+      expect(vars(other)).toEqual(["", "", ""]);
+      resize(vv, { height: 600 });
+      expect(vars(other)).toEqual(["", "", ""]);
+      // …until one of its fields takes focus. Focus moving to a button keeps it (a press must not move
+      // the panel under the finger); the keyboard going down lets go.
+      act(() => screen.getByRole("textbox", { name: "Reps" }).focus());
+      expect(vars(other)).toEqual(["244px", "584px", "0px"]);
+      act(() => screen.getByRole("button", { name: "Save" }).focus());
+      expect(vars(other)).toEqual(["244px", "584px", "0px"]);
+      resize(vv, { height: 844 });
+      expect(vars(other)).toEqual(["", "", ""]);
+      // A keyboard up while no field has focus (a resize, not a focus): nothing.
+      resize(vv, { height: 508 });
+      expect(vars(other)).toEqual(["", "", ""]);
+      unmount();
+    } finally {
+      cleanup(rect);
+    }
+  });
+
+  it("keeps a field that was in view inside the panel as it gets shorter, and leaves the person's own scrolling alone", () => {
+    const vv = fakeViewport();
+    let fieldTop = 700;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("aria-label") === "Name") return new DOMRect(0, fieldTop, 390, 50);
+      if (this.getAttribute("role") === "dialog") {
+        // The panel: from 100 to the window's bottom, or to the keyboard's top once lifted.
+        const lifted = this.parentElement!.style.getPropertyValue("--sheet-bottom");
+        return lifted ? new DOMRect(0, 16, 390, 508 - 16) : new DOMRect(0, 100, 390, 744);
+      }
+      return new DOMRect(0, 0, 390, 844);
+    });
+    try {
+      render(
+        <Sheet open onClose={() => {}} ariaLabel="A">
+          <input aria-label="Name" />
+        </Sheet>,
+        { container: root() },
+      );
+      const panel = screen.getByRole("dialog");
+      let scrollTop = 0;
+      Object.defineProperty(panel, "scrollTop", { configurable: true, get: () => scrollTop, set: (v: number) => (scrollTop = v) });
+      act(() => screen.getByRole("textbox", { name: "Name" }).focus());
+
+      // In view (700–750 of 100–844) before the keyboard; under it after: scrolled up into the panel.
+      resize(vv, { height: 508 });
+      expect(scrollTop).toBe(750 - 508 + 16);
+
+      // The person scrolls; a pan (same height) doesn't pull the field back.
+      scrollTop = 0;
+      act(() => {
+        vv.offsetTop = 10;
+        vv.dispatchEvent(new Event("scroll"));
+      });
+      expect(scrollTop).toBe(0);
+
+      // Keyboard down, the field scrolled out of view (below the panel): the next keyboard leaves it.
+      resize(vv, { height: 844, offsetTop: 0 });
+      fieldTop = 900;
+      resize(vv, { height: 508 });
+      expect(scrollTop).toBe(0);
+    } finally {
+      cleanup(rect);
     }
   });
 });

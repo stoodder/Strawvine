@@ -3,14 +3,14 @@
  * superset, what can join, and the order of the workout's blocks. Driven here by the shared
  * structure edits (as Train drives them), so the rows follow what an edit did.
  */
-import { render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { Block, BlockExercise, Session } from "../../../shared/schemas";
 import { blankSet } from "../../../shared/session";
 import { accessoryBlocks, movableInto, moveBlock, reorderInBlock, supersetLetters } from "../../../shared/sessionStructure";
-import { SupersetSheet, WorkoutOrderSheet } from "./SupersetSheets";
+import { STATUS_DELAY_MS, SupersetSheet, WorkoutOrderSheet } from "./SupersetSheets";
 
 const names: Record<number, string> = { 10: "Rows", 11: "Curls", 12: "Dips", 13: "Chest-supported incline dumbbell row" };
 const ex = (exerciseId: number, sets = 3): BlockExercise => ({
@@ -101,43 +101,131 @@ describe("SupersetSheet", () => {
     expect(memberNames(sheet)[2]).toMatch(/^A3: Rows/);
   });
 
-  it("offers this workout's other accessories and a new exercise; remove is per member", async () => {
+  it("offers this workout's other accessories and another exercise; Remove is a visible button per member", async () => {
     const user = userEvent.setup();
     const onAddExisting = vi.fn();
     render(<SupersetHarness onAddExisting={onAddExisting} />, { container: document.getElementById("root")! });
     const sheet = screen.getByRole("dialog", { name: "Superset A" });
     await user.click(within(sheet).getByRole("button", { name: "Add Dips to Superset A" }));
     expect(onAddExisting).toHaveBeenCalledWith("12-0");
-    expect(within(sheet).getByRole("button", { name: "Add new exercise" })).toBeTruthy();
-    for (const n of ["Rows", "Curls"]) expect(within(sheet).getByRole("button", { name: `Remove ${n} from Superset A` })).toBeTruthy();
+    expect(within(sheet).getByRole("button", { name: "Add another exercise" })).toBeTruthy();
+    for (const n of ["Rows", "Curls"]) expect(within(sheet).getByRole("button", { name: `Remove ${n} from Superset A` }).textContent).toBe("Remove");
+    expect(within(sheet).getByText(/^Remove keeps it in the workout/)).toBeTruthy();
   });
 
-  it("a single exercise: how a superset starts (no moves or remove), and the limits when full", () => {
+  /** A superset sheet with every handler spied on. */
+  function renderSheet(props: Partial<Parameters<typeof SupersetSheet>[0]> = {}) {
+    const on = { onMove: vi.fn(), onRemove: vi.fn(), onAddExisting: vi.fn(), onAddNew: vi.fn() };
     render(
       <SupersetSheet
         open
         onClose={() => {}}
-        letter={null}
-        members={[{ key: "a", name: "Dips", detail: "1 set" }]}
-        candidates={[{ key: "b", name: "Rows", from: "Superset A" }]}
-        full
+        letter="A"
+        members={[
+          { key: "a", name: "Rows", detail: "3 sets" },
+          { key: "b", name: "Curls", detail: "3 sets" },
+        ]}
+        candidates={[{ key: "c", name: "Dips", from: null }]}
+        full={false}
         blocksFull={false}
         status=""
         limitNote={limitNote}
-        onMove={() => {}}
-        onRemove={() => {}}
-        onAddExisting={() => {}}
-        onAddNew={() => {}}
+        {...on}
+        {...props}
       />,
       { container: document.getElementById("root")! },
     );
-    const sheet = screen.getByRole("dialog", { name: "New superset" });
+    return { sheet: screen.getByRole("dialog"), on };
+  }
+
+  it("aria-disabled controls do nothing: the ends' moves, Remove at the block limit, Add another when full", async () => {
+    const user = userEvent.setup();
+    const { sheet, on } = renderSheet({ full: true, blocksFull: true });
+    const disabled = [
+      within(sheet).getByRole("button", { name: "Move Rows up in Superset A" }),
+      within(sheet).getByRole("button", { name: "Move Curls down in Superset A" }),
+      within(sheet).getByRole("button", { name: "Remove Rows from Superset A" }),
+      within(sheet).getByRole("button", { name: "Remove Curls from Superset A" }),
+      within(sheet).getByRole("button", { name: "Add another exercise" }),
+    ];
+    for (const b of disabled) {
+      expect(b.getAttribute("aria-disabled")).toBe("true");
+      await user.click(b);
+      expect(document.activeElement).toBe(b); // still focusable
+    }
+    expect(on.onMove).not.toHaveBeenCalled();
+    expect(on.onRemove).not.toHaveBeenCalled();
+    expect(on.onAddNew).not.toHaveBeenCalled();
+    // The moves that can go somewhere still do.
+    await user.click(within(sheet).getByRole("button", { name: "Move Rows down in Superset A" }));
+    expect(on.onMove).toHaveBeenCalledWith(0, 1);
+  });
+
+  it("a full superset says so in place of what could join (nothing to pick), and Add another points to it", () => {
+    const { sheet, on } = renderSheet({ full: true });
+    const note = within(sheet).getByText("A superset holds up to 6 exercises");
+    expect(within(sheet).queryByText("No other accessories in this workout yet.")).toBeNull();
+    expect(within(sheet).queryByRole("button", { name: "Add Dips to Superset A" })).toBeNull();
+    const add = within(sheet).getByRole("button", { name: "Add another exercise" });
+    expect(add.getAttribute("aria-describedby")).toBe(note.id);
+    expect(on.onAddExisting).not.toHaveBeenCalled();
+    // Not full, with nothing else in the workout: says that instead.
+    cleanup();
+    const empty = renderSheet({ candidates: [] });
+    expect(within(empty.sheet).getByText("No other accessories in this workout yet.")).toBeTruthy();
+    expect(within(empty.sheet).queryByText("A superset holds up to 6 exercises")).toBeNull();
+    expect(within(empty.sheet).getByRole("button", { name: "Add another exercise" }).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("the session's block limit: Remove is aria-disabled and described by the note", () => {
+    const { sheet } = renderSheet({ blocksFull: true });
+    const remove = within(sheet).getByRole("button", { name: "Remove Rows from Superset A" });
+    expect(document.getElementById(remove.getAttribute("aria-describedby")!)?.textContent).toBe("A session holds up to 30 blocks");
+  });
+
+  it("an undoable Remove: a visible Undo in the sheet", async () => {
+    const user = userEvent.setup();
+    const onUndo = vi.fn();
+    const { sheet } = renderSheet({ undo: { label: "Dips is on its own now, right after the superset.", name: "Dips", onUndo } });
+    expect(within(sheet).getByText("Dips is on its own now, right after the superset.")).toBeTruthy();
+    const undo = within(sheet).getByRole("button", { name: "Undo removing Dips" });
+    expect(undo.textContent).toBe("Undo");
+    await user.click(undo);
+    expect(onUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("opened with news (back from Add another exercise): the live region gets it a moment after it mounts", async () => {
+    vi.useFakeTimers();
+    try {
+      const { sheet } = renderSheet({ status: "Dips added to Superset A as A3" });
+      const status = within(sheet).getByRole("status");
+      // Text already in a region as it mounts isn't announced.
+      expect(status.textContent).toBe("");
+      act(() => vi.advanceTimersByTime(STATUS_DELAY_MS));
+      expect(status.textContent).toBe("Dips added to Superset A as A3");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a single exercise: how a superset starts (no moves or remove)", () => {
+    const { sheet } = renderSheet({
+      letter: null,
+      members: [{ key: "a", name: "Dips", detail: "1 set" }],
+      candidates: [{ key: "b", name: "Rows", from: "Superset A" }],
+    });
+    expect(screen.getByRole("dialog", { name: "New superset" })).toBe(sheet);
     expect(within(sheet).queryByRole("button", { name: /^Move/ })).toBeNull();
     expect(within(sheet).queryByRole("button", { name: /^Remove/ })).toBeNull();
     const pair = within(sheet).getByRole("button", { name: "Superset Dips with Rows" });
     expect(pair.textContent).toContain("Leaves Superset A");
-    expect(pair.getAttribute("aria-disabled")).toBe("true");
-    expect(within(sheet).getByText("A superset holds up to 6 exercises")).toBeTruthy();
+  });
+});
+
+describe("supersetLetters", () => {
+  it("letters only blocks of two or more, in page order", () => {
+    const s: Session = { ...start, blocks: [start.blocks[0]!, block("X", ex(10), ex(11)), block("Y", ex(12)), block("Z", ex(13), ex(14))] };
+    expect(Object.fromEntries(supersetLetters(s))).toEqual({ X: "A", Z: "B" });
   });
 });
 
