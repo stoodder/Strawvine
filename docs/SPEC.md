@@ -202,12 +202,20 @@ optional note.
     unweighted one shows no load and no load control — except on a set that already has a load (e.g. logged before the
     exercise was made unweighted), which keeps showing it and stays editable.
   - Whether an exercise is weighted is read from the exercise, not stored in sessions, so changing it applies at once,
-    including to the session in progress. An unweighted exercise's pre-filled and added sets carry no load.
-  - Volume counts weight × reps of rep-measured sets only; time and distance never count (a set without a load adds 0).
+    including to the session in progress. For an unweighted exercise, target loads on sets not yet logged are ignored
+    (not shown, not counted; logging such a set records no load) but kept, so making it weighted again brings them
+    back; loads already logged stay as data. An unweighted exercise's pre-filled and added sets carry no load.
+  - One tap logs a set at its targets — except a set of a weighted accessory with no load yet (none entered or
+    targeted), which opens the set editor instead, so a weighted set is never logged without a load by accident.
+  - Volume counts weight × reps of rep-measured sets only; time and distance never count. A set's load is the one it
+    was logged with (never a target it still holds), so a set logged without a load adds 0.
 - Sessions pre-fill from the last session of the same day type (exercises, sets, target reps, last weights). Reps
   carry over as **targets** — a missed rep never becomes next week's target (sets added without a target carry what was
   done). On deload weeks accessory loads pre-fill at 80% — for weighted holds and carries too; deload loads never carry
   into a normal week (a normal week pre-fills from the last normal performance, or scales a deload-only one back up).
+  An exercise added to a session by hand pre-fills the same way from the last time it was done as an accessory (never
+  skipped, a normal week before a deload one, targets not missed reps, loads scaled to the session's week); one never
+  done starts at three sets of 10 reps, 30 seconds or 40 meters.
 - **Skip today:** an accessory can be marked skipped for one session. It stays in the session (and in next week's
   pre-fill, un-skipped, with the numbers from the last time it was actually done), but its sets don't count toward
   volume, PRs or hints.
@@ -228,11 +236,12 @@ optional note.
   stored with the session as its plan signature), with a one-tap recalculation. The athlete's own edits to targets never
   read as a plan change. (Sessions saved before signatures existed compare their sets with a fresh plan instead; added
   back-off sets are ignored.)
-- **Progression hint:** when every logged set of a weighted accessory's last (non-skipped, non-deload) performance met
-  that session's target — reps, seconds or meters — with a load, the next session suggests that load + **5 lb**
-  (editable; 0 turns hints off): "All reps / Full time / Full distance at 50 lb on Nov 2 → +5 lb". When a set fell short
-  of its target, the hint says **hold** at the same load ("Missed reps at 50 lb on Nov 2 — hold", "Short on time …",
-  "Short on distance …"). Unweighted exercises get no hint.
+- **Progression hint:** when every logged set of a weighted accessory's last (non-skipped, non-deload) performance with a
+  load met that session's target — reps, seconds or meters — with a load, the next session suggests that load + **5 lb**
+  (editable; 0 turns hints off): "All reps / Full duration / Full distance at 50 lb on Nov 2 → +5 lb". When a set fell
+  short of its target, the hint says **hold** at the same load ("Missed reps at 50 lb on Nov 2 — hold", "Short on
+  duration …", "Short on distance …"). A performance logged without any load (while the exercise was unweighted) is
+  passed over for the one before it; one where only some sets had a load gives no hint. Unweighted exercises get no hint.
 - Rest timer (targets editable: **180 s** after main-lift sets, **90 s** after accessories); plate calculator.
 
 ## 7. Gamification & feedback

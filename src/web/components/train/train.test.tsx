@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Block, BlockExercise, Session, SetEntry } from "../../../shared/schemas";
 import { recapLines } from "./FinishPanel";
 import { plateChips } from "./RestTimer";
-import { nextOpenSet, replaceSetAndPropagate, resolveExRef, resolveSetRef } from "./sessionEdit";
+import { describeSet, nextOpenSet, replaceSetAndPropagate, resolveExRef, resolveSetRef } from "./sessionEdit";
 
 let n = 0;
 const set = (o: Partial<SetEntry> = {}): SetEntry => ({
@@ -140,5 +140,17 @@ describe("replaceSetAndPropagate", () => {
     const prev = e.sets[0]!;
     const out = replaceSetAndPropagate(e, prev, { ...prev, targetReps: 4 });
     expect(out.sets.map((x) => x.targetReps)).toEqual([4, 6, 5]);
+  });
+});
+
+describe("describeSet (spoken load)", () => {
+  it("names no pending target load for an unweighted exercise, but keeps a load already logged", () => {
+    const pending = set({ targetReps: 10, targetWeight: 25 });
+    expect(describeSet(pending, "reps", false)).toBe("10 reps");
+    expect(describeSet(pending, "reps", true)).toBe("10 reps at 25 lb");
+    expect(describeSet({ ...pending, done: true, reps: 10, weight: 30 }, "reps", false)).toBe("10 reps at 30 lb");
+    expect(describeSet({ ...pending, done: true, reps: 10, weight: null }, "reps", true)).toBe("10 reps (no load)");
+    // Without the flag (the main lift): any load, as before.
+    expect(describeSet(pending, "reps")).toBe("10 reps at 25 lb");
   });
 });
