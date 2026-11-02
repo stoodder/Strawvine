@@ -41,7 +41,7 @@ test("an open sheet holds the page still; closing it gives the page back where i
   const topBefore = await top();
 
   await trigger.click();
-  const sheet = page.getByRole("dialog", { name: "Edit exercise" });
+  const sheet = page.getByRole("dialog", { name: /^Edit / });
   await expect(sheet.getByRole("textbox", { name: "Name" })).toBeVisible();
   await expect(page.locator("html[data-scroll-locked]")).toHaveCount(1);
   const box = (await sheet.boundingBox())!;
@@ -113,9 +113,9 @@ test("sideways: a too-wide stray can't be scrolled or swiped to, with or without
 
   // The same with a sheet open (body pinned).
   await page.getByRole("button", { name: "Edit Bench press", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "Edit exercise" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: /^Edit / })).toBeVisible();
   expect(await tryToPan()).toBe(0);
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog", { name: "Edit exercise" })).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: /^Edit / })).toHaveCount(0);
   expect(await tryToPan()).toBe(0);
 });
