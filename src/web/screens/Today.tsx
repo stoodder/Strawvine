@@ -1,15 +1,15 @@
 import clsx from "clsx";
-import { useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ChevronLeft, ChevronRight, Flame, Settings2, Sparkles, TriangleAlert, Info } from "lucide-react";
 import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { CALIBRATION_DAYS } from "../../shared/energy";
-import { checklist, isClosed } from "../../shared/gamify";
+import { dayChecklist, isClosed } from "../../shared/gamify";
 import { targetsFor } from "../../shared/insights";
 import { cyclePosition, programDayFor } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
-import { buildSession, nextSession, sessionCounts } from "../../shared/session";
+import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
 import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { JournalText } from "../components/TextArea";
@@ -34,11 +34,17 @@ export function TodayScreen() {
   const save = useSaveDay();
   const saved = useSavedFlash(date);
   const pending = usePendingDates().has(date);
+  const headerRef = useRef<HTMLElement>(null);
+  // When the sync chip goes away while focused, focus lands on the date control beside it.
+  const dateControl = useCallback(() => headerRef.current?.querySelector<HTMLElement>('input[type="date"]'), []);
 
   const day: DayLog = data.days.find((d) => d.date === date) ?? emptyDayLog(date);
   const session = data.sessions.find((s) => s.date === date);
-  const items = checklist(date, day, session, data.settings);
+  // With moved sessions: a day whose plan was done early is credited, and a day a session was
+  // moved to gets a Lift item even when it isn't a program day.
+  const items = dayChecklist(date, data);
   const doneCount = items.filter((i) => i.done).length;
+  const liftItem = items.find((i) => i.key === "lift");
   const closed = isClosed(items);
   const targets = isToday ? model.targets : targetsFor(date, model.series, data);
   const energy = model.series.find((d) => d.date === date) ?? null;
@@ -48,7 +54,7 @@ export function TodayScreen() {
   const patch = (p: DayLogPatch) => {
     const before = isClosed(items);
     save(date, p);
-    const after = isClosed(checklist(date, { ...day, ...p }, session, data.settings));
+    const after = isClosed(dayChecklist(date, { ...data, days: [...data.days.filter((d) => d.date !== date), { ...day, ...p }] }));
     if (!before && after) success();
   };
 
@@ -56,9 +62,12 @@ export function TodayScreen() {
 
   const programDay = programDayFor(data.settings.program, date);
   const pos = cyclePosition(data.settings.program, date);
-  const draft = programDay && !session ? buildSession(date, data) : null;
-  const sess = session ?? draft;
-  const primaryEx = sess?.blocks.find((b) => b.kind === "primary")?.exercises[0];
+  // This day's plan, moved to (and maybe done on) another day ("Do this session today").
+  const doneEarly = session ? null : sessionDoneEarly(date, data.sessions);
+  const draft = programDay && !session && !doneEarly ? buildSession(date, data) : null;
+  const sess = session ?? doneEarly ?? draft;
+  const primaryBlock = sess?.blocks.find((b) => b.kind === "primary");
+  const primaryEx = primaryBlock?.exercises[0];
   const primaryName = primaryEx ? data.exercises.find((e) => e.id === primaryEx.exerciseId)?.name : null;
   // Same count as Train's header: skipped exercises don't count.
   const { done: setsDone, total: setsTotal } = sess ? sessionCounts(sess) : { done: 0, total: 0 };
@@ -77,7 +86,7 @@ export function TodayScreen() {
   return (
     <div>
       {/* Header */}
-      <header className="flex flex-wrap items-center justify-between pt-2">
+      <header ref={headerRef} className="flex flex-wrap items-center justify-between pt-2">
         <div className="flex items-center">
           <button
             type="button"
@@ -100,7 +109,7 @@ export function TodayScreen() {
         </div>
         {/* Wraps under the date when there's no room (very narrow / zoomed in), right-aligned. */}
         <div className="ml-auto flex items-center gap-1">
-          <PendingSyncChip pending={pending} />
+          <PendingSyncChip pending={pending} focusFallback={dateControl} />
           <Link to="/settings" aria-label="Settings" className="tap -mr-3 grid h-11 w-11 place-items-center text-mute">
             <Settings2 size={18} />
           </Link>
@@ -230,7 +239,11 @@ export function TodayScreen() {
             primaryName,
             setsDone,
             setsTotal,
-            plannedFor: sess?.plannedFor,
+            // The checklist's own reading: the plan this day holds (movedFrom), or where this day's plan went.
+            plannedFor: liftItem?.movedFrom ?? null,
+            completed: !!sess?.completedAt,
+            mainSkipped: !!(primaryBlock?.skipped || primaryEx?.skipped),
+            elsewhere: liftItem?.doneOn ?? doneEarly?.date ?? null,
             date,
             today,
           }}

@@ -26,6 +26,15 @@ export function benchmarkRows(days: ReadonlyArray<DayLog>, name: string): Row[] 
   return [...list].reverse().map((entry) => ({ entry, beat: prs.get(entry.date) ?? null, best: !!best && best.date === entry.date }));
 }
 
+/** The spelling used most often ("Fran" over a one-off "fran"); ties go to the newest. Rows are newest first. */
+export function commonName(rows: ReadonlyArray<Row>): string | undefined {
+  const count = new Map<string, number>();
+  for (const r of rows) count.set(r.entry.name, (count.get(r.entry.name) ?? 0) + 1);
+  let best: string | undefined;
+  for (const r of rows) if (best === undefined || count.get(r.entry.name)! > count.get(best)!) best = r.entry.name;
+  return best;
+}
+
 /**
  * A benchmark's history (opened from the metcon editor's "Best …" line): date, score, PRs in
  * gold with the score they beat, the current best marked. `date` is the day being edited.
@@ -46,8 +55,9 @@ export function BenchmarkHistorySheet({
   const rows = useMemo(() => (open ? benchmarkRows(days, name) : []), [open, days, name]);
   const year = date.slice(0, 4);
   const prCount = rows.filter((r) => r.beat).length;
+  const title = commonName(rows) ?? name;
   return (
-    <Sheet open={open} onClose={onClose} title={rows[0]?.entry.name ?? name}>
+    <Sheet open={open} onClose={onClose} title={title}>
       <p className="-mt-3 mb-4 text-xs text-mute">
         <span className="num text-fg-2">{rows.length}</span> {rows.length === 1 ? "result" : "results"}
         {prCount > 0 && (
@@ -58,7 +68,7 @@ export function BenchmarkHistorySheet({
         )}{" "}
         · newest first
       </p>
-      <ul className="divide-y divide-white/[0.04]" aria-label={`${name} results, newest first`}>
+      <ul className="divide-y divide-white/[0.04]" aria-label={`${title} results, newest first`}>
         {rows.map((r) => {
           const otherYear = r.entry.date.slice(0, 4) !== year;
           return (

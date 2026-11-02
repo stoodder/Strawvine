@@ -131,7 +131,14 @@ export function DockProvider({ children }: { children: ReactNode }) {
     const measure = () => {
       const r = stack.getBoundingClientRect();
       // No layout (jsdom, display: none): fall back to the viewport's bottom edge.
-      setTop(r.top <= 0 && r.height === 0 ? window.innerHeight : Math.round(Math.min(window.innerHeight, r.top)));
+      const t = r.top <= 0 && r.height === 0 ? window.innerHeight : Math.round(Math.min(window.innerHeight, r.top));
+      setTop(t);
+      // What covers the bottom of the viewport (nav + the current stack + safe area, plus a gap):
+      // styles.css turns it into html's scroll-padding-bottom, so a control that takes focus by
+      // keyboard is scrolled clear of the nav and dock (WCAG 2.4.11), on every screen.
+      const clearance = window.innerHeight - t + GAP_PX;
+      if (clearance > GAP_PX) document.documentElement.style.setProperty("--dock-clearance", `${clearance}px`);
+      else document.documentElement.style.removeProperty("--dock-clearance");
     };
     measure();
     window.addEventListener("resize", measure);
@@ -141,6 +148,12 @@ export function DockProvider({ children }: { children: ReactNode }) {
       window.visualViewport?.removeEventListener("resize", measure);
     };
   }, [base, height]);
+  useEffect(
+    () => () => {
+      document.documentElement.style.removeProperty("--dock-clearance");
+    },
+    [],
+  );
 
   return (
     <DockContext.Provider value={api}>
@@ -157,6 +170,13 @@ export function DockProvider({ children }: { children: ReactNode }) {
               className="pointer-events-none fixed inset-x-0 z-[55] mx-auto flex max-w-lg flex-col items-center px-5"
               style={{
                 gap: GAP_PX,
+                // Never more than 40% of the screen: past that the top of the stack (the least
+                // urgent: sync pill, then the rest pill, then the older toast) is clipped, and the
+                // newest toast stays next to the nav. The clip margin keeps shadows and focus rings.
+                maxHeight: "40vh",
+                justifyContent: "flex-end",
+                overflow: "clip",
+                overflowClipMargin: "1.5rem",
                 bottom: base !== null ? `${base + GAP_PX}px` : `calc(env(safe-area-inset-bottom) + 1rem)`,
               }}
             />,

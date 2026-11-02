@@ -2,6 +2,7 @@ import { act, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
+  retrying: false,
   info: { online: true, pending: 2, failed: 0, unsynced: 2, lastSyncedAt: null, items: [] as unknown[] },
   resolve: null as null | (() => void),
   syncNow: vi.fn(),
@@ -10,11 +11,14 @@ vi.mock("../../lib/store", () => ({
   useSyncInfo: () => ({ ...state.info, syncNow: state.syncNow, retryFailed: () => {}, discardFailed: () => {} }),
 }));
 
+vi.mock("../SyncStatus", () => ({ useSyncState: () => ({ retrying: state.retrying }) }));
+
 import { PendingSyncChip } from "./PendingSyncChip";
 
 describe("PendingSyncChip", () => {
   beforeEach(() => {
     state.info = { online: true, pending: 2, failed: 0, unsynced: 2, lastSyncedAt: null, items: [] };
+    state.retrying = false;
     state.syncNow.mockReset();
     state.syncNow.mockImplementation(() => new Promise<void>((r) => (state.resolve = r)));
   });
@@ -53,5 +57,25 @@ describe("PendingSyncChip", () => {
     render(<PendingSyncChip pending />);
     const chip = screen.getByRole("button", { name: /^2 offline/ });
     expect((chip as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("takes the warn tone while the server can't be reached", () => {
+    state.retrying = true;
+    render(<PendingSyncChip pending />);
+    const chip = screen.getByRole("button", { name: /^2 unsynced\. Can't reach the server/ });
+    expect(chip.className).toContain("text-warn");
+  });
+
+  it("hands focus to the fallback when it goes away while focused", () => {
+    const target = document.createElement("input");
+    document.body.append(target);
+    const { rerender } = render(<PendingSyncChip pending focusFallback={() => target} />);
+    const chip = screen.getByRole("button", { name: /^2 unsynced/ });
+    chip.focus();
+    expect(document.activeElement).toBe(chip);
+    state.info = { ...state.info, pending: 0, unsynced: 0 };
+    rerender(<PendingSyncChip pending={false} focusFallback={() => target} />);
+    expect(document.activeElement).toBe(target);
+    target.remove();
   });
 });

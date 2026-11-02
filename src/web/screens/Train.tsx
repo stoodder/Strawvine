@@ -925,9 +925,9 @@ export function TrainScreen() {
             >
               {primarySkipped ? (
                 // Skipped today: one dimmed row; its sets count toward nothing until it's unskipped.
-                <div className="flex min-h-11 items-center justify-between gap-3">
+                <div className="flex min-h-11 flex-wrap items-center justify-between gap-x-3">
                   <div className="min-w-0 truncate text-[0.9375rem] text-mute">{primaryName}</div>
-                  <div className="flex shrink-0 items-center">
+                  <div className="ml-auto flex shrink-0 items-center">
                     <span className="label">Skipped today</span>
                     {!isPreview && (
                       <>
@@ -1132,12 +1132,15 @@ export function TrainScreen() {
                         const tagLabel = superset && <span className="label mr-2 text-glow">{`${letter}${exIdx + 1}`}</span>;
                         if (e.skipped)
                           return (
-                            <div key={exIdx} className={clsx("flex min-h-11 items-center justify-between gap-3", exIdx > 0 && "mt-3")}>
+                            <div
+                              key={exIdx}
+                              className={clsx("flex min-h-11 flex-wrap items-center justify-between gap-x-3", exIdx > 0 && "mt-3")}
+                            >
                               <div className="min-w-0 truncate text-[0.9375rem] text-mute">
                                 {tagLabel}
                                 {name}
                               </div>
-                              <div className="flex shrink-0 items-center">
+                              <div className="ml-auto flex shrink-0 items-center">
                                 <span className="label">Skipped today</span>
                                 {!isPreview && (
                                   <>

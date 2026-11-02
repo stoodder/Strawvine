@@ -1,6 +1,13 @@
 import clsx from "clsx";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+/** Whether the latest interaction was the keyboard (Tab), not a pointer — tracked once for the page. */
+let keyboardLast = false;
+if (typeof document !== "undefined") {
+  document.addEventListener("keydown", () => (keyboardLast = true), true);
+  document.addEventListener("pointerdown", () => (keyboardLast = false), true);
+}
+
 /**
  * Auto-growing, auto-saving text area that reads like writing, not a form field.
  * Saves after a pause in typing, on blur, when the app is hidden and on unmount.
@@ -80,7 +87,14 @@ export function JournalText({
         value={text}
         rows={minRows}
         placeholder={placeholder}
-        onFocus={() => (focused.current = true)}
+        onFocus={(e) => {
+          focused.current = true;
+          // A focused text area only scrolls its caret into view: tabbed to at the bottom of the
+          // page, the rest of it (and its focus line) can sit under the nav. Show all of it,
+          // clear of the nav and dock (html's scroll-padding), when it fits.
+          const box = e.currentTarget.parentElement;
+          if (keyboardLast && box && box.getBoundingClientRect().height < window.innerHeight / 2) box.scrollIntoView({ block: "nearest" });
+        }}
         onBlur={() => {
           focused.current = false;
           flush();

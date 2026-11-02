@@ -323,9 +323,11 @@ export function MetconEditor({ day, patch }: EditorProps) {
               type="button"
               aria-haspopup="dialog"
               onClick={() => setHistoryOpen(true)}
-              className="hit -my-1 rounded-sm py-1 text-left text-mute underline decoration-white/20 decoration-dotted underline-offset-4"
+              // hit-lg: the tap target reaches 48px tall around the one-line text.
+              className="hit-lg -my-1 rounded-sm py-1 text-left text-mute underline decoration-white/20 decoration-dotted underline-offset-4"
             >
-              Best <span className="num text-fg-2">{best.score}</span> ·{" "}
+              {/* Once this day beats it, it's the previous best. */}
+              {verdict?.tone === "gold" ? "Prev. best" : "Best"} <span className="num text-fg-2">{best.score}</span> ·{" "}
               {formatShortDate(best.date, best.date.slice(0, 4) !== day.date.slice(0, 4))}
               <span className="sr-only">. Show all results</span>
             </button>

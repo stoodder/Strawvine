@@ -130,7 +130,7 @@ function NumSetting({
   );
 }
 
-/** A rest time, shown and typed as m:ss ("3:00"); plain seconds ("180") work too. */
+/** A rest time, shown and typed as m:ss ("3:00"); "330", "3.30", minutes ("3") and seconds ("180") work too (see restTime.ts). */
 function RestSetting({
   label,
   hint,
@@ -156,7 +156,7 @@ function RestSetting({
           const v = parseRest(text);
           const e =
             v === null
-              ? "Enter a time like 3:00, or seconds."
+              ? "Enter a time like 3:00 (or 330), or seconds."
               : v < min || v > max
                 ? `Between ${formatRest(min)} and ${formatRest(max)}.`
                 : null;
@@ -173,28 +173,40 @@ function RestSetting({
 function RestInput({ label, value, onCommit }: { label: string; value: number; onCommit: (text: string) => boolean }) {
   const field = useFieldIds();
   const [text, setText] = useState(formatRest(value));
-  const focused = useRef(false);
+  const [focused, setFocused] = useState(false);
   useEffect(() => {
-    if (!focused.current) setText(formatRest(value));
+    if (!focused) setText(formatRest(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the saved value changes
   }, [value]);
+  // While typing, how the entry reads ("330" → 3:30), so a keypad without ":" is no guesswork.
+  const parsed = focused ? parseRest(text) : null;
+  const reading = parsed !== null && formatRest(parsed) !== text.trim() ? formatRest(parsed) : null;
   return (
-    <span className="box-field inline-flex rounded-xl bg-white/[0.05] px-3 py-2">
+    // A <label>, so a tap on the padding focuses the input.
+    <label className="box-field inline-flex cursor-text items-baseline gap-1.5 rounded-xl bg-white/[0.05] px-3 py-2">
+      {reading && (
+        <span aria-hidden className="num text-xs text-mute">
+          {reading}?
+        </span>
+      )}
       <input
         aria-label={label}
         aria-labelledby={field?.labelId}
         aria-describedby={field?.describedBy}
         aria-invalid={field?.invalid || undefined}
         value={text}
-        placeholder="m:ss"
+        placeholder="3:00"
+        // The decimal pad: digits and "." ("3.30"); ":" still works from a full keyboard.
+        inputMode="decimal"
         autoComplete="off"
         enterKeyHint="done"
         onFocus={(e) => {
-          focused.current = true;
+          setFocused(true);
           e.currentTarget.select();
         }}
         onBlur={() => {
-          focused.current = false;
-          // Valid: show it tidied ("180" → "3:00"); invalid: keep what was typed next to the message.
+          setFocused(false);
+          // Valid: show it tidied ("330" → "3:30"); invalid: keep what was typed next to the message.
           if (onCommit(text)) setText(formatRest(parseRest(text)!));
         }}
         onKeyDown={(e) => {
@@ -203,13 +215,14 @@ function RestInput({ label, value, onCommit }: { label: string; value: number; o
         onChange={(e) => setText(e.target.value)}
         className="field num w-[5.5ch] min-w-0 text-right text-base"
       />
-    </span>
+    </label>
   );
 }
 
 /** The long page's sections, as a jump list under the title. */
 const JUMPS = [
   ["targets", "Targets"],
+  ["nutrition", "Nutrition"],
   ["training", "Training"],
   ["display", "Display"],
   ["program", "Program"],
@@ -225,7 +238,8 @@ function JumpList() {
           <li key={id}>
             <a
               href={`#${id}`}
-              className="label inline-flex min-h-11 items-center px-1.5 text-fg-2"
+              // Underlined (a hairline under the word), so the items read as links, not labels.
+              className="label inline-flex min-h-11 items-center px-1.5 text-fg-2 underline decoration-white/25 decoration-1 underline-offset-[5px] hover:decoration-accent"
               onClick={(e) => {
                 const section = document.getElementById(id);
                 if (!section) return;
@@ -315,7 +329,7 @@ export function SettingsScreen() {
         <DayPicker label="Zone 2" value={s.schedule.zone2} onChange={(zone2) => save({ ...s, schedule: { ...s.schedule, zone2 } })} />
       </Section>
 
-      <Section label="Nutrition">
+      <Section label="Nutrition" id="nutrition">
         <div className="divide-y divide-white/[0.04]">
           <NumSetting
             label="Protein"
@@ -443,8 +457,10 @@ export function SettingsScreen() {
         </div>
         <ForgetDevice />
       </Section>
-      {/* decor: a sign-off, not information */}
-      <p className="mt-12 text-center text-[0.6875rem] text-faint">Strawvine · built for pushing boundaries</p>
+      {/* decor: a sign-off, not information (aria-hidden; mute so it still clears 4.5:1 for anyone reading it) */}
+      <p aria-hidden className="mt-12 text-center text-[0.6875rem] text-mute">
+        Strawvine · built for pushing boundaries
+      </p>
     </div>
   );
 }
@@ -857,7 +873,7 @@ function LiftsEditor() {
                     action: { label: "Undo", onAction: () => void updateExercise(e.id, { archived: false }) },
                   });
               }}
-              className="chip bg-white/[0.04] text-mute"
+              className="chip bg-white/[0.04] text-fg-2"
             >
               {e.archived ? "restore" : "archive"}
             </button>
@@ -1051,7 +1067,7 @@ function SyncSection() {
             }
           }}
         >
-          <RefreshCw size={16} className={clsx(busy && "animate-spin")} aria-hidden /> {busy ? "Syncing…" : "Sync now"}
+          <RefreshCw size={16} className={clsx(busy && "motion-safe:animate-spin")} aria-hidden /> {busy ? "Syncing…" : "Sync now"}
         </button>
         {info.failed > 0 && (
           <>
@@ -1135,15 +1151,19 @@ function ForgetDevice() {
   const navigate = useNavigate();
   const [asking, setAsking] = useState(false);
   const [state, setState] = useState<"idle" | "busy" | "failed">("idle");
+  /** While forgetting: changes still being sent first (null until the first count). */
+  const [sending, setSending] = useState<number | null>(null);
+  const toast = useToast();
   const focusAfter = useFocusAfter();
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const confirmRef = useRef<HTMLButtonElement>(null);
+  const groupRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const questionId = useId();
   const unsynced = info.unsynced ?? info.pending;
 
   if (asking)
     return (
-      <div role="group" aria-labelledby={questionId} className="mt-4 w-full rounded-2xl bg-white/[0.03] p-4">
+      <div ref={groupRef} role="group" aria-labelledby={questionId} className="mt-4 w-full rounded-2xl bg-white/[0.03] p-4">
         <p id={questionId} className="text-sm text-fg-2">
           Forget this device?
         </p>
@@ -1159,18 +1179,28 @@ function ForgetDevice() {
         )}
         <div className="mt-4 flex flex-wrap gap-3">
           <button
-            ref={confirmRef}
             type="button"
             className="btn-ghost text-warn"
             disabled={state === "busy"}
             onClick={async () => {
               setState("busy");
+              setSending(null);
+              let dropped = 0;
               try {
-                await forgetDevice();
+                // Sends what it can first (as long as changes get through), counting down here.
+                ({ pendingDropped: dropped } = await forgetDevice({ onProgress: setSending }));
               } catch {
                 setState("failed");
+                setSending(null);
                 return;
               }
+              // The toast outlives this screen (it shows over the sign-in screen).
+              if (dropped > 0)
+                toast.show({
+                  message: `${dropped} unsynced ${dropped === 1 ? "change was" : "changes were"} discarded`,
+                  tone: "warn",
+                  duration: 10_000,
+                });
               // Signed out: land on Today after the next sign-in, not here.
               navigate("/", { replace: true });
             }}
@@ -1178,6 +1208,7 @@ function ForgetDevice() {
             {state === "busy" ? "Forgetting…" : "Forget"}
           </button>
           <button
+            ref={cancelRef}
             type="button"
             className="btn text-mute"
             disabled={state === "busy"}
@@ -1190,6 +1221,9 @@ function ForgetDevice() {
             Cancel
           </button>
         </div>
+        <p role="status" className="mt-3 text-xs text-mute empty:hidden">
+          {state === "busy" && sending ? `Sending ${sending} ${sending === 1 ? "change" : "changes"} first…` : ""}
+        </p>
         {state === "failed" && (
           <p role="alert" className="mt-3 text-xs text-warn">
             Couldn't reach Strawvine — try again when online. Nothing changed.
@@ -1207,7 +1241,12 @@ function ForgetDevice() {
         onClick={() => {
           setAsking(true);
           setState("idle");
-          focusAfter(() => confirmRef.current);
+          // The question opens at the very bottom of the page, under the nav and dock: bring it to
+          // the middle of the screen, then focus Cancel (the safe answer), never Forget.
+          focusAfter(() => {
+            groupRef.current?.scrollIntoView({ block: "center" });
+            return cancelRef.current;
+          });
         }}
       >
         <UserX size={16} aria-hidden /> Forget this device

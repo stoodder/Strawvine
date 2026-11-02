@@ -1,10 +1,10 @@
 import clsx from "clsx";
 import { motion } from "motion/react";
-import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type Ref } from "react";
 import { useNavigate } from "react-router";
 import { Award, Flame, Plus, Trash2, Trophy } from "lucide-react";
 import { addDays, formatShortDate, startOfWeek, weekdayName } from "../../shared/dates";
-import { checklist, type Achievement } from "../../shared/gamify";
+import { dayChecklist, type Achievement } from "../../shared/gamify";
 import { goalDirection } from "../../shared/nutrition";
 import { currentMax } from "../../shared/program";
 import { newId } from "../../shared/session";
@@ -251,11 +251,7 @@ export function GoalsScreen() {
         {earned.length === 0 ? (
           <Empty>Your first one unlocks the moment you log a morning weight and a day of calories.</Empty>
         ) : (
-          <ul className="space-y-4">
-            {earned.map((a) => (
-              <AchievementRow key={a.key} a={a} />
-            ))}
-          </ul>
+          <AchievementList earned={earned} />
         )}
         <NextUp current={streak.current} />
       </Section>
@@ -265,11 +261,43 @@ export function GoalsScreen() {
   );
 }
 
-function AchievementRow({ a }: { a: Achievement }) {
+/** Achievements shown before "Show all": years of training earn hundreds, and the newest matter most. */
+const ACHIEVEMENTS_SHOWN = 12;
+
+/** Newest first; the latest dozen, then "Show all (N)" (focus moves to the first newly shown row). */
+function AchievementList({ earned }: { earned: Achievement[] }) {
+  const [all, setAll] = useState(false);
+  const firstHidden = useRef<HTMLLIElement>(null);
+  const shown = all ? earned : earned.slice(0, ACHIEVEMENTS_SHOWN);
+  const more = earned.length - shown.length;
+  return (
+    <>
+      <ul className="space-y-4">
+        {shown.map((a, i) => (
+          <AchievementRow key={a.key} a={a} ref={i === ACHIEVEMENTS_SHOWN ? firstHidden : undefined} />
+        ))}
+      </ul>
+      {more > 0 && (
+        <button
+          type="button"
+          className="label mt-2 -mb-2 inline-flex min-h-11 items-center text-fg-2"
+          onClick={() => {
+            setAll(true);
+            requestAnimationFrame(() => firstHidden.current?.focus());
+          }}
+        >
+          Show all ({earned.length})
+        </button>
+      )}
+    </>
+  );
+}
+
+function AchievementRow({ a, ref }: { a: Achievement; ref?: Ref<HTMLLIElement> }) {
   const gold = a.tier === "pr" || a.tier === "goal";
   const Icon = a.tier === "pr" ? Trophy : a.tier === "streak" ? Flame : Award;
   return (
-    <li className="flex items-center gap-4">
+    <li ref={ref} tabIndex={ref ? -1 : undefined} className="flex items-center gap-4 rounded-lg">
       <div
         className={clsx(
           "grid h-9 w-9 shrink-0 place-items-center rounded-full",
@@ -323,19 +351,17 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 function Heatmap() {
   const { data, today } = useData();
   const navigate = useNavigate();
-  // Fit the number of weeks to the width, measured before paint so it never flashes.
+  // Fit the number of weeks to the width. The ResizeObserver's first callback comes after layout
+  // and before paint (so it never flashes) without forcing a synchronous layout on navigation.
   const gridRef = useRef<HTMLDivElement>(null);
   const [weeks, setWeeks] = useState(12);
-  useLayoutEffect(() => {
+  useEffect(() => {
     const el = gridRef.current;
-    if (!el) return;
-    const fit = () => {
-      const w = el.getBoundingClientRect().width;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([entry]) => {
+      const w = entry?.contentRect.width ?? 0;
       if (w > 0) setWeeks(Math.max(4, Math.min(16, Math.floor((w + HEAT_GAP) / (HEAT_MIN_CELL + HEAT_GAP)))));
-    };
-    fit();
-    if (typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(fit);
+    });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -347,8 +373,9 @@ function Heatmap() {
       const date = addDays(start, w * 7 + d);
       if (date > today) return { date, v: -1, done: 0, total: 0 };
       const day = byDate.get(date);
-      const items = checklist(date, day, sessions.get(date), data.settings);
-      const done = !day && !sessions.get(date) ? 0 : items.filter((i) => i.done).length;
+      // The same rule as streaks and Today (a plan done early credits its own day).
+      const items = dayChecklist(date, data);
+      const done = !day && !sessions.get(date) && !items.some((i) => i.done) ? 0 : items.filter((i) => i.done).length;
       return { date, v: items.length ? done / items.length : 0, done, total: items.length };
     }),
   );
@@ -384,10 +411,13 @@ function Heatmap() {
     (c.v >= 1 ? `closed, all ${c.total} done` : c.done ? `${c.done} of ${c.total} done` : "nothing logged") +
     (c.date === today ? " (today)" : "");
 
-  // Month names over the columns where a new month starts (by the week's Monday), not the first one.
+  // Month names over the first column and where a new month starts (by the week's Monday). The
+  // first column's name is dropped when the next month starts one column later (they'd collide).
   const months = cols.map((col, i) => {
     const m = col[0]!.date.slice(5, 7);
-    return i > 0 && m !== cols[i - 1]![0]!.date.slice(5, 7) ? MONTHS[Number(m) - 1]! : null;
+    const starts = i === 0 || m !== cols[i - 1]![0]!.date.slice(5, 7);
+    const crowded = i === 0 && cols.length > 1 && cols[1]![0]!.date.slice(5, 7) !== m;
+    return starts && !crowded ? MONTHS[Number(m) - 1]! : null;
   });
 
   return (
@@ -427,8 +457,9 @@ function Heatmap() {
                     : c.v >= 1
                       ? "var(--color-accent)"
                       : c.v > 0
-                        ? `rgb(183 243 106 / ${0.08 + c.v * 0.3})`
-                        : "rgba(255,255,255,0.04)",
+                        ? // Partial days start a clear step above empty ones (1.4.11) and fade in by progress.
+                          `rgb(183 243 106 / ${0.16 + c.v * 0.26})`
+                        : "rgba(255,255,255,0.06)",
                 boxShadow: c.v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
               };
               const motionProps = { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { delay: i * 0.02 } };

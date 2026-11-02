@@ -16,9 +16,18 @@ export interface LiftSummary {
   primaryName: string | null | undefined;
   setsDone: number;
   setsTotal: number;
-  /** The session was planned for another day and done on this one ("Do this session today"). */
+  /** The session was planned for another day and moved to this one ("Do this session today"). */
   plannedFor?: string | null;
-  /** The day the checklist is for (`plannedFor` reads "done today" when it's today). */
+  /** The session is finished. */
+  completed?: boolean;
+  /** The main lift was skipped. */
+  mainSkipped?: boolean;
+  /**
+   * This day's plan was moved to that date (done there when `completed`); the sets shown are
+   * that session's.
+   */
+  elsewhere?: string | null;
+  /** The day the checklist is for (a moved session reads "done today" when it's today). */
   date?: string;
   today?: string;
 }
@@ -149,16 +158,37 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
     case "lift":
       return {
         value: lift.setsTotal ? <Value n={`${lift.setsDone}/${lift.setsTotal}`} unit="sets" /> : null,
-        sub: [movedLabel(lift) ?? lift.label, lift.primaryName].filter(Boolean).join(" · ") || "Session",
+        sub: liftSub(lift),
       };
   }
 }
 
-/** "Wed's Pull, done today" for a session moved here from another day; null otherwise. */
+/**
+ * The lift row's second line. The main lift's state leads when the session moved, so a narrow
+ * screen truncates the "moved" part, not the lift:
+ *   "Legs · Back squat"                         (as planned)
+ *   "Back squat · Wed's Legs, moved here"       (moved to this day, not finished yet)
+ *   "Back squat · Wed's Legs, done today"       (moved here and finished)
+ *   "Back squat skipped · Legs"                 (main lift skipped)
+ *   "Done Sun · Push · Back squat"              (this day's plan, done early on Sunday)
+ *   "Moved to Sun · Push · Back squat"          (…moved there, not finished yet)
+ */
+export function liftSub(lift: LiftSummary): string {
+  const main = lift.primaryName ? (lift.mainSkipped ? `${lift.primaryName} skipped` : lift.primaryName) : null;
+  if (lift.elsewhere && lift.date && lift.elsewhere !== lift.date)
+    return [`${lift.completed ? "Done" : "Moved to"} ${weekdayName(lift.elsewhere, true)}`, lift.label, main].filter(Boolean).join(" · ");
+  const moved = movedLabel(lift);
+  if (moved) return [main, moved].filter(Boolean).join(" · ");
+  if (lift.mainSkipped && main) return [main, lift.label].filter(Boolean).join(" · ");
+  return [lift.label, main].filter(Boolean).join(" · ") || "Session";
+}
+
+/** "Wed's Legs, moved here" (then "…, done today" once finished) for a session moved from another day; null otherwise. */
 function movedLabel(lift: LiftSummary): string | null {
   const from = lift.plannedFor;
   if (!from || !lift.date || from === lift.date) return null;
   const name = lift.label ? `${weekdayName(from, true)}'s ${lift.label}` : `${weekdayName(from, true)}'s session`;
+  if (!lift.completed) return `${name}, moved here`;
   return `${name}, done ${lift.date === lift.today ? "today" : weekdayName(lift.date, true)}`;
 }
 

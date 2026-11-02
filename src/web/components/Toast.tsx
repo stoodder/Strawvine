@@ -40,29 +40,57 @@ export function showToast(t: ToastInput): number {
   return external?.show(t) ?? -1;
 }
 
+/** A toast's auto-dismiss: the time left, and the running timeout (null while paused). */
+interface Timer {
+  left: number;
+  startedAt: number;
+  handle: number | null;
+}
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
-  const timers = useRef(new Map<number, number>());
+  const timers = useRef(new Map<number, Timer>());
 
   const dismiss = useCallback((id: number) => {
-    window.clearTimeout(timers.current.get(id));
+    const t = timers.current.get(id);
+    if (t?.handle != null) window.clearTimeout(t.handle);
     timers.current.delete(id);
     setItems((xs) => xs.filter((x) => x.id !== id));
+  }, []);
+
+  const start = useCallback(
+    (id: number) => {
+      const t = timers.current.get(id);
+      if (!t || t.handle !== null) return;
+      t.startedAt = Date.now();
+      t.handle = window.setTimeout(() => dismiss(id), t.left);
+    },
+    [dismiss],
+  );
+  // While a toast is hovered or has focus it stays (WCAG 2.2.1): reading it, or reaching Undo by
+  // keyboard, never races the timer. Leaving it resumes the time that was left (at least 2 s).
+  const pause = useCallback((id: number) => {
+    const t = timers.current.get(id);
+    if (!t || t.handle === null) return;
+    window.clearTimeout(t.handle);
+    t.handle = null;
+    t.left = Math.max(2000, t.left - (Date.now() - t.startedAt));
   }, []);
 
   const show = useCallback(
     (t: ToastInput) => {
       const id = nextId++;
       // Keep at most 2 on screen; newest wins.
-      setItems((xs) => [...xs.slice(-1), { ...t, id }]);
-      const ms = t.duration ?? (t.action ? 7000 : 5000);
-      timers.current.set(
-        id,
-        window.setTimeout(() => dismiss(id), ms),
-      );
+      setItems((xs) => {
+        const kept = xs.slice(-1);
+        for (const x of xs) if (!kept.includes(x)) dismissTimer(timers.current, x.id);
+        return [...kept, { ...t, id }];
+      });
+      timers.current.set(id, { left: t.duration ?? (t.action ? 7000 : 5000), startedAt: Date.now(), handle: null });
+      start(id);
       return id;
     },
-    [dismiss],
+    [start],
   );
 
   const api = useMemo(() => ({ show, dismiss }), [show, dismiss]);
@@ -83,9 +111,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           {items.length > 0 && <span key={items.at(-1)!.id}>{items.at(-1)!.message}</span>}
         </div>
         <AnimatePresence initial={false}>
-          {items.map((t) => (
+          {items.map((t, i) => (
             <motion.div
               key={t.id}
+              data-toast=""
+              onPointerEnter={() => pause(t.id)}
+              onPointerLeave={(e) => {
+                if (!e.currentTarget.contains(document.activeElement)) start(t.id);
+              }}
+              onFocus={() => pause(t.id)}
+              onBlur={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null) && !e.currentTarget.matches(":hover")) start(t.id);
+              }}
               layout
               initial={{ y: 16, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
@@ -96,7 +133,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 t.tone === "warn" ? "text-warn" : t.tone === "good" ? "text-accent" : "text-fg",
               )}
             >
-              <span className="min-w-0 flex-1">{t.message}</span>
+              {/* The older of two toasts gives way to one line when the viewport is short (landscape, zoomed in). */}
+              <span className={clsx("min-w-0 flex-1", i < items.length - 1 && "[@media(max-height:30rem)]:line-clamp-1")}>{t.message}</span>
               {t.action && (
                 <button
                   type="button"
@@ -115,6 +153,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       </DockItem>
     </ToastContext.Provider>
   );
+}
+
+function dismissTimer(timers: Map<number, Timer>, id: number) {
+  const t = timers.get(id);
+  if (t?.handle != null) window.clearTimeout(t.handle);
+  timers.delete(id);
 }
 
 export function useToast(): ToastApi {

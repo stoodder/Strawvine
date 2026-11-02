@@ -121,7 +121,8 @@ export function CheckDot({
         tick();
         onClick?.();
       }}
-      className="tap relative grid shrink-0 place-items-center rounded-full"
+      // hc-edge: in high contrast the open dot gets a visible edge (its own ring is only 0.35 white).
+      className="tap hc-edge relative grid shrink-0 place-items-center rounded-full"
       style={{ width: size, height: size }}
     >
       <HitArea size={size} />
@@ -164,7 +165,7 @@ export function Bar({
   const v = Math.max(0, Math.min(1, value || 0));
   const color = tone === "gold" ? "bg-gold" : tone === "mute" ? "bg-fg-2/50" : tone === "warn" ? "bg-warn" : "bg-accent";
   return (
-    <div className={clsx("h-[3px] overflow-hidden rounded-full bg-white/[0.06]", className)}>
+    <div className={clsx("h-[3px] overflow-hidden rounded-full bg-[var(--track)]", className)}>
       <motion.div
         className={clsx("h-full rounded-full", color)}
         initial={false}
@@ -196,7 +197,7 @@ export function Ring({
   return (
     <div className="relative grid place-items-center" style={{ width: size, height: size }}>
       <svg width={size} height={size} className="-rotate-90 overflow-visible">
-        <circle cx={size / 2} cy={size / 2} r={r} stroke="rgba(255,255,255,0.07)" strokeWidth={stroke} fill="none" />
+        <circle cx={size / 2} cy={size / 2} r={r} stroke="var(--track-ring)" strokeWidth={stroke} fill="none" />
         <motion.circle
           cx={size / 2}
           cy={size / 2}

@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { emptyDayLog } from "../../../shared/empty";
 import type { DayLog } from "../../../shared/schemas";
-import { BenchmarkHistorySheet, benchmarkRows } from "./BenchmarkHistory";
+import { BenchmarkHistorySheet, benchmarkRows, commonName } from "./BenchmarkHistory";
 
 const day = (date: string, name: string, score: string): DayLog => ({
   ...emptyDayLog(date),
@@ -26,6 +26,13 @@ describe("benchmarkRows", () => {
     expect(rows.map((r) => r.entry.date)).toEqual(["2026-11-02", "2026-10-20", "2026-10-10", "2026-09-15", "2026-09-01"]);
     expect(rows.map((r) => r.beat)).toEqual([null, "4:40", null, "5:10", null]);
     expect(rows.map((r) => r.best)).toEqual([false, true, false, false, false]);
+  });
+
+  it("names the benchmark by its most common spelling, not the newest one", () => {
+    const shouty = [...days, day("2026-11-03", "FRAN", "4:30")];
+    expect(commonName(benchmarkRows(shouty, "fran"))).toBe("Fran");
+    // A tie goes to the newest spelling.
+    expect(commonName(benchmarkRows([day("2026-01-01", "grace", "3:00"), day("2026-02-01", "Grace", "2:50")], "Grace"))).toBe("Grace");
   });
 
   it("is empty for a benchmark never logged", () => {

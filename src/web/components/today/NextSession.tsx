@@ -31,8 +31,9 @@ export function NextSession({ next, today }: { next: NextSessionInfo; today: str
           Next<span className="sr-only"> session:</span>
         </span>{" "}
         {/* The spaces keep the accessible name's words apart (flex drops them visually). */}
-        <span className="min-w-0 truncate text-sm text-fg-2">{what}</span>{" "}
-        {next.weekLabel && <span className="label shrink-0">{next.weekLabel}</span>}
+        {/* Keeps ~8 characters before truncating; the week label gives way first (hidden below ~22rem, still read out). */}
+        <span className="min-w-[8ch] truncate text-sm text-fg-2">{what}</span>{" "}
+        {next.weekLabel && <span className="label shrink-0 max-[22rem]:sr-only">{next.weekLabel}</span>}
         <span className="sr-only">, preview</span>
       </span>
       <ChevronRight aria-hidden size={15} className="shrink-0 text-mute" />

@@ -187,7 +187,9 @@ export function LineChart({
       }
       return d;
     });
-    return { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly };
+    // Dots closer together than ~2/3 of a haloed dot (5.6px) overlap into a band, not dots (see the drawing order).
+    const dotsBand = paths.some((d, si) => series[si]!.kind === "dots" && (d.match(/M/g)?.length ?? 0) * 5.6 > plotW * 1.5);
+    return { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly, dotsBand };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- pad / plotW are constants
   }, [series, height, refLine?.y]);
 
@@ -203,7 +205,7 @@ export function LineChart({
   }, [table, geo]);
 
   if (!geo) return <div className="grid h-28 place-items-center text-sm text-mute">{emptyText}</div>;
-  const { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly } = geo;
+  const { dates, byDate, dataMin, dataMax, pinned, xOf, yOf, paths, weekly, dotsBand } = geo;
 
   const onMove = (clientX: number) => {
     const el = ref.current;
@@ -236,8 +238,10 @@ export function LineChart({
     return undefined;
   };
   const firstOf = (s: Series) => s.points.find((q) => q.y !== null);
+  // Spell the years out when the range crosses one ("Nov 2, 2025 to Mar 1, 2026").
+  const crossesYear = dates[0]!.slice(0, 4) !== dates[dates.length - 1]!.slice(0, 4);
   const summary = [
-    `${title}, ${formatShortDate(dates[0]!)} to ${formatShortDate(dates[dates.length - 1]!)}.`,
+    `${title}, ${formatShortDate(dates[0]!, crossesYear)} to ${formatShortDate(dates[dates.length - 1]!, crossesYear)}.`,
     ...series.map((s) => {
       const a = firstOf(s);
       const b = lastOf(s);
@@ -304,27 +308,45 @@ export function LineChart({
               opacity={0.6}
             />
           )}
-          {series.map((s, si) => {
-            const d = paths[si]!;
-            if (s.kind === "dots")
+          {/*
+            Dots on top of the lines, each with a 1px ink halo, so a dot (a weekly mean especially)
+            is never hidden under a line. When the dots are so many they merge into a band (a
+            year of daily weigh-ins, a decade of weekly means), the line goes back on top instead:
+            the band would bury it.
+          */}
+          {(dotsBand ? ["dots", "line"] : ["line", "dots"]).map((layer) =>
+            series.map((s, si) => {
+              if (s.kind !== layer) return null;
+              if (s.kind === "line")
+                return (
+                  <g key={s.key}>
+                    <path d={paths[si]} fill="none" stroke={s.color} strokeWidth={6} opacity={0.08} strokeLinejoin="round" />
+                    <path
+                      d={paths[si]}
+                      fill="none"
+                      stroke={s.color}
+                      strokeWidth={strong ? 2.75 : 1.75}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  </g>
+                );
+              const w = strong ? 4.8 : 3.6;
               return (
-                <path
-                  key={s.key}
-                  d={d}
-                  fill="none"
-                  stroke={s.color}
-                  strokeWidth={strong ? 4.8 : 3.6}
-                  strokeLinecap="round"
-                  opacity={strong ? 0.9 : 0.55}
-                />
+                <g key={s.key}>
+                  {!dotsBand && <path d={paths[si]} fill="none" stroke="var(--color-ink-950)" strokeWidth={w + 2} strokeLinecap="round" />}
+                  <path
+                    d={paths[si]}
+                    fill="none"
+                    stroke={s.color}
+                    strokeWidth={w}
+                    strokeLinecap="round"
+                    opacity={strong || weekly[si] ? 0.9 : 0.55}
+                  />
+                </g>
               );
-            return (
-              <g key={s.key}>
-                <path d={d} fill="none" stroke={s.color} strokeWidth={6} opacity={0.08} strokeLinejoin="round" />
-                <path d={d} fill="none" stroke={s.color} strokeWidth={strong ? 2.75 : 1.75} strokeLinejoin="round" strokeLinecap="round" />
-              </g>
-            );
-          })}
+            }),
+          )}
           {hover !== null && (
             <g>
               <line

@@ -5,6 +5,9 @@ import { formatShortDate, isISODate, weekdayName } from "../../../shared/dates";
  * invisible native <input type="date"> laid over the label — to jump to any day up to `max`
  * (default: `today`). With `pending`, a quiet dot after the date says this day still has edits
  * waiting to sync (Today shows a tappable `PendingSyncChip` instead).
+ *
+ * Never wraps: at the narrowest widths (under ~17.5rem, e.g. 195px or 400% zoom) the weekday
+ * is dropped and only "NOV 1" shows (the accessible name keeps the full date).
  */
 export function DateJump({
   date,
@@ -23,14 +26,16 @@ export function DateJump({
   onPick: (date: string) => void;
 }) {
   const upper = max ?? today;
-  const visible = `${weekdayName(date, true)} · ${formatShortDate(date)}`;
+  const weekday = weekdayName(date, true);
+  const visible = `${weekday} · ${formatShortDate(date)}`;
   const otherYear = date.slice(0, 4) !== today.slice(0, 4);
   // The name starts with the visible text (so "tap Mon · Nov 2" works for voice control).
   const name = `${visible}${otherYear ? `, ${date.slice(0, 4)}` : ""} — choose a day`;
   return (
     <label className="focus-ring-within relative inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-md px-1">
-      <span aria-hidden className="label text-fg-2">
-        {visible}
+      <span aria-hidden className="label whitespace-nowrap text-fg-2">
+        <span className="max-[17.5rem]:hidden">{weekday} · </span>
+        {formatShortDate(date)}
       </span>
       {pending && (
         // Out of flow, so the header doesn't shift as it comes and goes.
