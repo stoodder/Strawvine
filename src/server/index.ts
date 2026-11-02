@@ -3,7 +3,7 @@ import path from "node:path";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app";
 import { loadConfig, type ServerConfig } from "./config";
-import { createDb } from "./db/client";
+import { createDb, createWebDb } from "./db/client";
 import { prepareDatabase } from "./seed";
 
 let config: ServerConfig;
@@ -14,17 +14,23 @@ try {
   process.exit(1);
 }
 
-const { db, sql } = createDb(config.databaseUrl);
 // Normally done by the Heroku release phase already; cheap and idempotent (and locked) here.
 // Heroku kills a web dyno that hasn't bound its port within 60 s, so don't wait long for the lock
 // (the release phase may be holding it for a long migration): fail fast and let the dyno restart.
-try {
-  await prepareDatabase(db, sql, { lockTimeoutMs: 30_000 });
-} catch (err) {
-  console.error("Database preparation failed:", err instanceof Error ? err.name : "error", err instanceof Error ? err.message : "");
-  await sql.end({ timeout: 5 }).catch(() => {});
-  process.exit(1);
+// Its own short-lived pool, without the web pool's statement timeout.
+{
+  const prep = createDb(config.databaseUrl);
+  try {
+    await prepareDatabase(prep.db, prep.sql, { lockTimeoutMs: 30_000 });
+  } catch (err) {
+    console.error("Database preparation failed:", err instanceof Error ? err.name : "error", err instanceof Error ? err.message : "");
+    await prep.sql.end({ timeout: 5 }).catch(() => {});
+    process.exit(1);
+  }
+  await prep.sql.end({ timeout: 5 }).catch(() => {});
 }
+
+const { db, sql } = createWebDb(config.databaseUrl);
 
 const staticDir = path.resolve(process.cwd(), "dist/web");
 const app = createApp({

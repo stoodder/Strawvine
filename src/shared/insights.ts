@@ -8,6 +8,7 @@ import { type AppData } from "./gamify";
 import { project, recommend, type Projection, type Recommendation } from "./nutrition";
 import { scheduledProgramDay } from "./program";
 import type { DayLog } from "./schemas";
+import { planDateOf, sessionDoneEarly } from "./session";
 
 export interface DayTargets {
   /** The engine state the targets were built from (the previous day — today is still in progress). */
@@ -125,9 +126,14 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
       (d) => !!settings.schedule.metcon[weekdayOf(d)],
       (d) => !!byDate.get(d)?.metconDone,
     ),
+    // By plan: each program day counts once, done when its plan was completed — on the day or
+    // moved to another ("do this session today", credited by `plannedFor`), as its checklist says.
     lifts: count(
       (d) => !!scheduledProgramDay(settings.program, d),
-      (d) => !!sessions.get(d)?.completedAt,
+      (d) => {
+        const own = sessions.get(d);
+        return (!!own?.completedAt && planDateOf(own) === d) || !!sessionDoneEarly(d, data.sessions)?.completedAt;
+      },
     ),
     avgSleepMinutes: mean(days.filter((d) => d.sleepMinutes !== null).map((d) => d.sleepMinutes!)),
     avgHrv: mean(days.filter((d) => d.hrvMs !== null).map((d) => d.hrvMs!)),

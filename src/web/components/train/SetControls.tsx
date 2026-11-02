@@ -67,7 +67,7 @@ export function SetChip({
       aria-pressed={set.done}
       aria-describedby={describedBy}
       className={clsx(
-        "relative flex h-[52px] min-w-[64px] flex-col items-center justify-center overflow-hidden rounded-2xl px-3 select-none",
+        "hc-edge relative flex h-[52px] min-w-[64px] flex-col items-center justify-center overflow-hidden rounded-2xl px-3 select-none",
         set.done ? "bg-accent/[0.24] text-fg ring-1 ring-accent/50 ring-inset" : "bg-white/[0.035] text-fg-2",
       )}
       style={noCallout}
@@ -153,7 +153,7 @@ export function MainSetButton({
 export function PlannedChip({ index, set, measure }: { index: number; set: SetEntry; measure: Measure }) {
   const unit = measureUnit(measure);
   return (
-    <li className="flex h-[52px] min-w-[64px] flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.12] px-3 text-fg-2">
+    <li className="hc-edge flex h-[52px] min-w-[64px] flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.12] px-3 text-fg-2">
       <span className="sr-only">{`Set ${index + 1}: ${describeSet(set, measure)}`}</span>
       <span aria-hidden className="num text-[0.9375rem] leading-none">
         {set.targetReps ?? "—"}

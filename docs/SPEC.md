@@ -207,7 +207,10 @@ optional note.
   today: its main lift for that program day and week plus the accessories carried into it, under its own label, saved
   under today's date with `plannedFor` = the source day. Pre-fill, the plan-changed check and recalculation follow the
   source day (a Monday plan done on a Sunday is a Monday session for next Monday's pre-fill), and that day no longer
-  shows as the next session.
+  shows as the next session. Once the moved session is completed the source day's plan counts as done: its checklist
+  lift is ticked ("done Sun"), its streak day can close, the weekly check-in counts it, and the cycle it belongs to is
+  credited (by `plannedFor`). The day holding the moved session expects that lift too, even on a rest day. The source
+  day can still hold a session of its own.
 - **Next session:** the next program day after today (looking 14 days ahead), with its label, main lift and week.
 - **Plan changed:** a saved session nothing has been logged in yet is flagged when the program now prescribes something
   different for its main lift than when the session was built (lift, week, deload, reps, AMRAP flags, target weights —
@@ -222,7 +225,7 @@ optional note.
 ## 7. Gamification & feedback
 
 - **Close the day**: today's checklist (weigh-in, nutrition, steps target, zone 2, metcon, lift as
-  scheduled) — closing every item extends the streak.
+  scheduled or moved — see "Do this session today") — closing every item extends the streak.
 - Streaks, PR moments, cycle completions, calibration milestones, strength-target hits, goal weight.
 - Each achievement is celebrated once. A max gain the screen already showed (applying an AMRAP bump) is filed as seen
   in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or
@@ -245,8 +248,9 @@ optional note.
   an `Idempotency-Key`, so a retry after a lost response never duplicates a row (keys are kept 7 days). Settings shows
   when the device last synced, what is still unsynced, and "Sync now"; Today marks rows with unsynced edits and ticks
   "saved" when the server confirms one. The data set is never kept in the browser's HTTP cache; the app revalidates its
-  own copy with an ETag (304 when nothing changed). Every write answers with the data set's version before and after it,
-  so a device whose copy was current stays current after its own edits (the next revalidation is a 304). After
+  own copy with an ETag (304 when nothing changed). Every write answers with the data set's version just before and after
+  it — exactly, whatever else is writing at the same time — so a device whose copy was current stays current after its
+  own edits (the next revalidation is a 304), and one that missed another write never mistakes it for current. After
   onboarding the app asks the browser for persistent storage so the offline copy isn't evicted.
 - Edits the server would reject (limits a person can hit: too many sets, an overlong note…) are refused before they are
   queued; Settings → Sync lists the last 20 with why, until cleared.
@@ -259,7 +263,10 @@ optional note.
     workout's own fields (notes, finish, skip) merge like settings;
   - settings merge field by field: the fields this device changed, the server's for everything else;
   - a second conflict in a row marks the edit "not saved" (Retry merges again); saves without a revision (older app
-    versions) are accepted as before.
-- **Forget this device** signs only this device out, drops its known-device mark (it's treated like any unknown device
-  at sign-in) and wipes everything the app stored on it, after sending what it can.
+    versions) are accepted as before;
+  - deleting a workout carries the revision too: when another device changed it since, the delete is refused and that
+    device's copy is kept; a workout "new" on two devices at once is saved by the first, and the second merges onto it.
+- **Forget this device** signs only this device out — its session is revoked on the server too, so a copy of the cookie
+  stops working — drops its known-device mark (it's treated like any unknown device at sign-in) and wipes everything the
+  app stored on it, after sending what it can.
 - Pure, unit-tested domain modules for all calculations.

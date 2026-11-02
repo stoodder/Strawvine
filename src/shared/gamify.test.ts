@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import { addDays } from "./dates";
 import { defaultSettings } from "./defaults";
 import { computeEnergySeries } from "./energy";
-import { achievements, checklist, isClosed, type AppData } from "./gamify";
+import { dateRange } from "./dates";
+import { achievements, checklist, closedDates, dayChecklist, isClosed, streaks, type AppData } from "./gamify";
 import { buildModel } from "./insights";
-import { currentMax } from "./program";
+import { currentMax, cyclePosition, programDayFor, scheduledProgramDay } from "./program";
 import { emptyDayLog, type DayLog, type Exercise, type MaxEntry, type Session, type Settings } from "./schemas";
+import { buildSessionFrom, sessionDoneEarly } from "./session";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 // The program's first cycle starts Monday 2026-11-02.
@@ -326,5 +328,106 @@ describe("benchmark PR achievements", () => {
   it("ignores results after today", () => {
     const days = [metcon("2026-11-02", "Cindy", "18+3"), metcon("2027-01-04", "Cindy", "20+1")];
     expect(achievements(appData({ days }), today).filter((a) => a.key.startsWith("bench-"))).toEqual([]);
+  });
+});
+
+describe("moved sessions (do this session today)", () => {
+  // Sun Nov 8 does Mon Nov 9's plan (bench, cycle 1 week 2); Monday itself holds nothing.
+  const ctx = { settings, exercises, maxEntries: [] as MaxEntry[], sessions: [] as Session[] };
+  const moved = (done: boolean, date = "2026-11-08", plan = "2026-11-09"): Session => ({
+    ...buildSessionFrom(plan, date, ctx),
+    completedAt: done ? `${date}T18:00:00.000Z` : null,
+  });
+  const lift = (date: string, data: Pick<AppData, "days" | "sessions" | "settings">) =>
+    dayChecklist(date, data).find((i) => i.key === "lift");
+
+  it("finds the session that did a day's plan elsewhere, completed before only saved", () => {
+    const saved = moved(false, "2026-11-07");
+    const done = moved(true);
+    expect(sessionDoneEarly("2026-11-09", [saved])).toBe(saved);
+    expect(sessionDoneEarly("2026-11-09", [saved, done])).toBe(done);
+    expect(sessionDoneEarly("2026-11-09", [done, saved])).toBe(done);
+    expect(sessionDoneEarly("2026-11-08", [done])).toBeNull();
+    // A session for its own date isn't "moved".
+    expect(sessionDoneEarly("2026-11-09", [{ ...done, date: "2026-11-09", plannedFor: "2026-11-09" }])).toBeNull();
+  });
+
+  it("closes the source day's lift and gives the receiving rest day a lift of its own", () => {
+    const data = appData({ days: [fullDay("2026-11-08"), fullDay("2026-11-09")], sessions: [moved(true)] });
+    expect(lift("2026-11-09", data)).toMatchObject({ done: true, doneOn: "2026-11-08" });
+    expect(lift("2026-11-08", data)).toMatchObject({ done: true, movedFrom: "2026-11-09" });
+    expect(isClosed(dayChecklist("2026-11-09", data))).toBe(true);
+    expect(isClosed(dayChecklist("2026-11-08", data))).toBe(true);
+    // Before it's completed: the rest day expects it, and Monday's plan isn't done yet.
+    const open = { ...data, sessions: [moved(false)] };
+    expect(lift("2026-11-08", open)).toMatchObject({ done: false, movedFrom: "2026-11-09" });
+    expect(lift("2026-11-09", open)).toMatchObject({ done: false });
+    expect(lift("2026-11-09", open)!.doneOn).toBeUndefined();
+    // Without a moved session a Sunday has no lift (and the old `checklist` is unchanged).
+    expect(lift("2026-11-08", appData({ days: [fullDay("2026-11-08")] }))).toBeUndefined();
+    expect(checklist("2026-11-09", fullDay("2026-11-09"), undefined, settings).find((i) => i.key === "lift")!.done).toBe(false);
+  });
+
+  it("keeps the streak going across the moved session", () => {
+    const days = dateRange("2026-11-02", "2026-11-09").map(fullDay);
+    const sessions: Session[] = [
+      ...dateRange("2026-11-02", "2026-11-06").map((d) => ({ ...buildSessionFrom(d, d, ctx), completedAt: `${d}T18:00:00.000Z` })),
+      moved(true),
+    ];
+    const data = appData({ days, sessions });
+    expect(closedDates(data, "2026-11-09").has("2026-11-09")).toBe(true);
+    expect(streaks(data, "2026-11-10")).toMatchObject({ current: 8, best: 8 });
+    // Undo the move: Monday's lift is open again and the streak stops at Sunday.
+    expect(streaks(appData({ days, sessions: sessions.slice(0, -1) }), "2026-11-10").current).toBe(0);
+  });
+
+  it("credits the week's check-in by plan", () => {
+    const sessions: Session[] = [
+      ...dateRange("2026-11-03", "2026-11-06").map((d) => ({ ...buildSessionFrom(d, d, ctx), completedAt: `${d}T18:00:00.000Z` })),
+      moved(true),
+    ];
+    // Tue Nov 3 – Mon Nov 9: five program days, all done (Monday's on Sunday).
+    expect(buildModel(appData({ sessions }), "2026-11-10").checkin.lifts).toEqual({ planned: 5, done: 5 });
+    expect(buildModel(appData({ sessions: sessions.slice(0, -1) }), "2026-11-10").checkin.lifts).toEqual({ planned: 5, done: 4 });
+    // A program day that did another day's plan hasn't done its own (Tue did Wed's, Wed rested).
+    const tueDidWed = [{ ...moved(true, "2026-11-03", "2026-11-04") }];
+    expect(buildModel(appData({ sessions: tueDidWed }), "2026-11-10").checkin.lifts).toEqual({ planned: 5, done: 1 });
+  });
+
+  it("credits a cycle by the day the session was planned for", () => {
+    // Sun Dec 6 is cycle 1's last day; doing Mon Dec 7's plan on it is cycle 2's work.
+    const s = moved(true, "2026-12-06", "2026-12-07");
+    expect(cyclePosition(settings.program, "2026-12-06")!.cycle).toBe(1);
+    const keys = (today: string) => achievements(appData({ sessions: [s] }), today).map((a) => a.key);
+    expect(keys("2026-12-31")).not.toContain("cycle-1");
+    expect(keys("2027-01-10")).toContain("cycle-2");
+  });
+
+  it("memoizes each day's checklist on the day log, the sessions and the settings", () => {
+    const day = fullDay("2026-11-09");
+    const data = appData({ days: [day], sessions: [moved(false)] });
+    const first = dayChecklist("2026-11-09", data);
+    // A new days array (another day edited) keeps this day's checklist.
+    expect(dayChecklist("2026-11-09", { ...data, days: [day, fullDay("2026-11-10")] })).toBe(first);
+    // Completing the moved session (a new session object) recomputes it.
+    const after = dayChecklist("2026-11-09", { ...data, sessions: [moved(true)] });
+    expect(after).not.toBe(first);
+    expect(after.find((i) => i.key === "lift")!.done).toBe(true);
+    // So does editing the day itself.
+    expect(dayChecklist("2026-11-09", { ...data, days: [{ ...day, steps: 0 }] }).find((i) => i.key === "steps")!.done).toBe(false);
+  });
+});
+
+describe("scheduledProgramDay", () => {
+  it("matches the cycle position rule exactly", () => {
+    const programs = [
+      settings.program,
+      { ...settings.program, weeks: [] },
+      { ...settings.program, cycleStartDate: "2026-11-04" },
+      { ...settings.program, days: { "0": settings.program.days["1"]! } },
+    ];
+    for (const program of programs)
+      for (const date of dateRange("2026-10-20", "2027-02-01"))
+        expect(scheduledProgramDay(program, date)).toBe(cyclePosition(program, date) ? programDayFor(program, date) : null);
   });
 });

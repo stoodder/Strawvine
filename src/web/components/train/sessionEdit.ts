@@ -39,19 +39,22 @@ const shownWeight = (s: SetEntry) => (s.done ? (s.weight ?? s.targetWeight) : s.
 const shownReps = (s: SetEntry) => (s.done ? (s.reps ?? s.targetReps) : s.targetReps);
 
 /**
- * Replace one set and carry a changed load / rep count forward: later, still-unlogged sets of
- * the same exercise whose target is empty or still equals the edited set's old value take the
- * new value. Sets that were deliberately different (a pyramid, an AMRAP) are left alone.
+ * Replace one set and carry a changed load / target forward: later, still-unlogged sets of the
+ * same exercise whose target is empty or still equals the edited set's old value take the new
+ * value. Sets that were deliberately different (a pyramid, an AMRAP) are left alone.
+ *
+ * Loads carry on any edit (logging a set heavier means the next ones go up too). Rep counts carry
+ * only when the set's *target* changed ("Save target"): logging 10 where 12 were planned is a
+ * result, not a new plan, so the later sets keep their targets (and next week's pre-fill with them).
  */
 export function replaceSetAndPropagate(ex: BlockExercise, prev: SetEntry, next: SetEntry): BlockExercise {
   const idx = ex.sets.findIndex((s) => s.id === prev.id);
   if (idx === -1) return ex;
   const oldW = shownWeight(prev);
   const newW = shownWeight(next);
-  const oldR = shownReps(prev);
-  const newR = shownReps(next);
   const oldWs = new Set([oldW, prev.targetWeight]);
-  const oldRs = new Set([oldR, prev.targetReps]);
+  const repsRetargeted = next.targetReps !== prev.targetReps;
+  const oldRs = new Set([shownReps(prev), prev.targetReps]);
   return {
     ...ex,
     sets: ex.sets.map((s, i) => {
@@ -59,7 +62,7 @@ export function replaceSetAndPropagate(ex: BlockExercise, prev: SetEntry, next: 
       if (i < idx || s.done) return s;
       let out = s;
       if (newW !== oldW && (s.targetWeight === null || oldWs.has(s.targetWeight))) out = { ...out, targetWeight: newW };
-      if (!s.amrap && newR !== oldR && (s.targetReps === null || oldRs.has(s.targetReps))) out = { ...out, targetReps: newR };
+      if (repsRetargeted && !s.amrap && (s.targetReps === null || oldRs.has(s.targetReps))) out = { ...out, targetReps: next.targetReps };
       return out;
     }),
   };

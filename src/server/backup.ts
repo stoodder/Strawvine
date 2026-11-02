@@ -22,7 +22,17 @@ import {
 import { SEED_ACCESSORIES, SEED_EXERCISES } from "../shared/defaults";
 import { newKeySalt } from "./auth";
 import type { Db } from "./db/client";
-import { authState, dayLogs, exercises, idempotencyKeys, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
+import {
+  authState,
+  dayLogs,
+  exercises,
+  idempotencyKeys,
+  maxEntries,
+  revokedSessions,
+  seenAchievements,
+  sessions,
+  settings,
+} from "./db/schema";
 
 export const EXPORT_FORMAT = "strawvine-export";
 /** v1: unversioned exports without seen achievements or exercise timestamps. v2: complete. */
@@ -164,6 +174,9 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
 
   let sessionEpoch = 0;
   await db.transaction(async (tx) => {
+    // The data set's version (`dataset_version`) is bumped by the first row written below
+    // (triggers, migration 0004) — after the tables, the order every write takes them in — and the
+    // new salt below changes every device's ETag as well.
     await tx.execute(
       sql`lock table day_logs, sessions, max_entries, exercises, settings, seen_achievements, idempotency_keys in access exclusive mode`,
     );
@@ -254,6 +267,8 @@ export async function restoreExport(db: Db, input: unknown, { force = false } = 
       .onConflictDoUpdate({ target: authState.id, set: { sessionEpoch: sql`${authState.sessionEpoch} + 1`, keySalt, updatedAt: now } })
       .returning({ epoch: authState.sessionEpoch });
     sessionEpoch = epoch!.epoch;
+    // Single revoked cookies were signed with the old salt: none of them verifies any more.
+    await tx.delete(revokedSessions);
   });
 
   return {

@@ -409,8 +409,9 @@ describe("request hardening", () => {
     // Same origin (the scheme may differ behind a TLS-terminating proxy) is fine.
     const ok = await put({ origin: "https://strawvine.herokuapp.com", host: "strawvine.herokuapp.com", "sec-fetch-site": "same-origin" });
     expect(ok.status).toBe(200);
-    // Reads aren't affected.
-    expect((await req("/api/bootstrap", { headers: { "sec-fetch-site": "cross-site" } })).status).toBe(200);
+    // Cross-site reads are refused too (a link or navigation from another site can't fetch the
+    // data set or download the export); same-origin and direct navigation (none) are fine.
+    expect((await req("/api/bootstrap", { headers: { "sec-fetch-site": "cross-site" } })).status).toBe(403);
     // A cross-site logout can't sign everyone out.
     expect((await req("/api/auth/logout", { method: "POST", headers: { "sec-fetch-site": "cross-site" } })).status).toBe(403);
     expect((await req("/api/bootstrap")).status).toBe(200);

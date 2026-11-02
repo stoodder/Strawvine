@@ -8,15 +8,17 @@
  *   out bumps the epoch, revoking every cookie issued before ("sign out everywhere").
  * - Cookies slide: an authenticated request re-issues the cookie once less than
  *   RENEW_BELOW_S of its lifetime is left, so a device in daily use never gets signed out.
+ * - One cookie can be revoked on its own ("Forget this device"): a hash of the token is kept in
+ *   `revoked_sessions` until the token would have expired.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { eq, sql } from "drizzle-orm";
+import { eq, lt, sql } from "drizzle-orm";
 import type { Context, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Db } from "./db/client";
-import { authState } from "./db/schema";
+import { authState, revokedSessions } from "./db/schema";
 
 export const COOKIE = "sv_session";
 /** Over HTTPS the cookie uses the `__Host-` prefix: Secure, Path=/, no Domain — it can't be set by a sibling subdomain. */
@@ -83,35 +85,47 @@ export interface AuthState {
   epoch: number;
   /** Mixed into the signing key ("" for databases from before salts existed). */
   salt: string;
+  /** `tokenHash`es of single session tokens revoked before they expire. */
+  revoked?: ReadonlySet<string>;
 }
 
 export interface EpochStore {
   current(): Promise<AuthState>;
   /** Revoke every session issued so far; returns the new state. */
   bump(): Promise<AuthState>;
+  /** Revoke one session token (by `tokenHash`) until it expires. */
+  revoke?(tokenHash: string, expiresAt: Date): Promise<void>;
 }
 
+/** What `revoked_sessions` stores for a token: never the token itself. */
+export const tokenHash = (token: string) => createHash("sha256").update(token).digest("hex");
+
 /**
- * The epoch and salt live in Postgres and are cached briefly in memory: the cache is updated
- * immediately on bump, the TTL only matters with several processes (two dynos, or a restore run
- * from another process). The row is created on first use, with a random salt.
+ * The epoch, salt and revoked tokens live in Postgres and are cached briefly in memory: the cache
+ * is updated immediately on bump/revoke, the TTL only matters with several processes (two dynos,
+ * or a restore run from another process). The row is created on first use, with a random salt.
  */
 export function dbEpochStore(db: Db, ttlMs = 5_000): EpochStore {
-  let cached: (AuthState & { at: number }) | null = null;
-  const remember = (row: { epoch: number; salt: string | null }): AuthState => {
-    cached = { epoch: row.epoch, salt: row.salt ?? "", at: Date.now() };
-    return { epoch: cached.epoch, salt: cached.salt };
+  let cached: { epoch: number; salt: string; revoked: Set<string>; at: number } | null = null;
+  const snapshot = (c: NonNullable<typeof cached>): AuthState => ({ epoch: c.epoch, salt: c.salt, revoked: c.revoked });
+  const read = async () => {
+    const [row] = await db.execute<{ epoch: number; salt: string | null; revoked: string[] | null }>(sql`
+      select a.session_epoch as epoch, a.key_salt as salt,
+             (select array_agg(r.token_hash) from revoked_sessions r where r.expires_at > now()) as revoked
+      from auth_state a where a.id = 1`);
+    return row;
   };
   const cols = { epoch: authState.sessionEpoch, salt: authState.keySalt };
   return {
     async current() {
-      if (cached && Date.now() - cached.at < ttlMs) return { epoch: cached.epoch, salt: cached.salt };
-      let [row] = await db.select(cols).from(authState).where(eq(authState.id, 1));
+      if (cached && Date.now() - cached.at < ttlMs) return snapshot(cached);
+      let row = await read();
       if (!row) {
         await db.insert(authState).values({ id: 1, sessionEpoch: 0, keySalt: newKeySalt() }).onConflictDoNothing();
-        [row] = await db.select(cols).from(authState).where(eq(authState.id, 1));
+        row = await read();
       }
-      return remember(row!);
+      cached = { epoch: row!.epoch, salt: row!.salt ?? "", revoked: new Set(row!.revoked ?? []), at: Date.now() };
+      return snapshot(cached);
     },
     async bump() {
       const [row] = await db
@@ -119,7 +133,16 @@ export function dbEpochStore(db: Db, ttlMs = 5_000): EpochStore {
         .values({ id: 1, sessionEpoch: 1, keySalt: newKeySalt() })
         .onConflictDoUpdate({ target: authState.id, set: { sessionEpoch: sql`${authState.sessionEpoch} + 1`, updatedAt: new Date() } })
         .returning(cols);
-      return remember(row!);
+      // Every revoked token is from an older epoch now; the next read prunes nothing it needs.
+      cached = { epoch: row!.epoch, salt: row!.salt ?? "", revoked: cached?.revoked ?? new Set(), at: Date.now() };
+      return snapshot(cached);
+    },
+    async revoke(hash, expiresAt) {
+      await db.transaction(async (tx) => {
+        await tx.delete(revokedSessions).where(lt(revokedSessions.expiresAt, new Date()));
+        await tx.insert(revokedSessions).values({ tokenHash: hash, expiresAt }).onConflictDoNothing();
+      });
+      if (cached) cached = { ...cached, revoked: new Set([...cached.revoked, hash]) };
     },
   };
 }
@@ -161,19 +184,24 @@ export function clearSessionCookie(c: Context, cfg: Pick<SessionConfig, "secure"
   if (cfg.secure && getCookie(c, COOKIE) !== undefined) deleteCookie(c, COOKIE, { path: "/" });
 }
 
-/** The valid session on this request (signature, expiry and epoch all check out), or null. */
-export async function currentSession(c: Context, cfg: SessionConfig): Promise<(TokenInfo & { salt: string }) | null> {
+/** The valid session on this request (signature, expiry and epoch check out, not revoked), or null. */
+export async function currentSession(
+  c: Context,
+  cfg: SessionConfig,
+): Promise<(TokenInfo & { salt: string; epochs: AuthState; token: string }) | null> {
   const state = await cfg.epochs.current();
-  const info = readToken(getCookie(c, cookieName(cfg.secure)), cfg.keyFor(state.salt));
-  if (!info) return null;
-  return info.epoch === state.epoch ? { ...info, salt: state.salt } : null;
+  const token = getCookie(c, cookieName(cfg.secure));
+  const info = readToken(token, cfg.keyFor(state.salt));
+  if (!info || info.epoch !== state.epoch) return null;
+  if (state.revoked?.size && state.revoked.has(tokenHash(token!))) return null;
+  return { ...info, salt: state.salt, epochs: state, token: token! };
 }
 
 export function requireAuth(cfg: SessionConfig): MiddlewareHandler {
   return async (c, next) => {
     const session = await currentSession(c, cfg);
     if (!session) return c.json({ error: "unauthorized" }, 401);
-    if (session.expiresAt - Date.now() < RENEW_BELOW_S * 1000) await setSessionCookie(c, cfg, session);
+    if (session.expiresAt - Date.now() < RENEW_BELOW_S * 1000) await setSessionCookie(c, cfg, session.epochs);
     await next();
   };
 }

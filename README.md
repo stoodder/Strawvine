@@ -143,26 +143,49 @@ the browser as a **known device** (`sv_device`, a signed, httpOnly 400-day cooki
 forgets every device): known devices skip the tarpit and are limited per device rather than per network, so the owner
 isn't locked out by someone else's guessing. Settings → **Forget this device** (`POST /api/auth/forget-device`) signs
 only that browser out, drops its known-device cookie and wipes everything the app stored there; other devices stay
-signed in.
+signed in. The session token is revoked on the server as well (a sha256 of it is kept in `revoked_sessions` until the
+token would have expired), so a copy of the cookie — or a browser that never applied the response — is signed out too.
+Each process caches the revoked list with the epoch for at most 5 s.
+
+Any `/api/*` request that the browser marks as sent by another site (`Sec-Fetch-Site` present and neither `same-origin`
+nor `none`) is refused with 403 — reads too, so a link or navigation from another site can't make the browser fetch the
+data set or download the export with your cookie. Writes additionally need a same-host `Origin` (when sent) and a JSON
+body.
+
+The web server's database pool sets `statement_timeout` to 10 s (`createWebDb`), so a stuck query or lock wait fails
+its request instead of holding a connection; migrations, the release phase and restores run without one.
 
 `GET /api/bootstrap` is sent with `Cache-Control: no-store` (health data never lands in the browser's HTTP cache) and an
-`ETag` computed from a cheap version stamp of every table; a request with a matching `If-None-Match` gets a `304` without
-the data set being read. JSON responses are compressed with Brotli (or gzip). Every successful write answers with the
-data set's new ETag (`x-dataset-etag`) and the one just before it (`x-dataset-etag-prev`); a client whose copy was at the
-"before" version adopts the new one, so coming back to the app after your own edits is a `304` instead of a full download
-(3-year data set: 165 KB Brotli / ~70 ms → 0 B / ~5 ms). Writes are serialised per process so the two versions bracket
-one write; with several web dynos a write on another dyno can slip in between, which costs at most an unneeded download
-— never a missed change, because a client only adopts the new version when `prev` matches its own.
+`ETag` built from the data set's version; a request with a matching `If-None-Match` gets a `304` without the data set
+being read. JSON responses are compressed with Brotli (or gzip).
 
-`Server-Timing` is sent on `/api/bootstrap` (`db` = version stamp + queries, `build` = JSON, `compress` = Brotli/gzip) and
-on writes (`db` = the handler, `etag` = reading the data-set version twice). Browser dev tools show it under Network →
-Timing; from a shell: `curl -s -D - -o /dev/null -b cookies.txt -H 'accept-encoding: br' https://<app>/api/bootstrap`.
+The version is a counter (`dataset_version`, one row) that a trigger on every data table (`day_logs`, `sessions`,
+`exercises`, `max_entries`, `settings`, `seen_achievements`) bumps **once per writing transaction, inside that
+transaction** — whichever process, release or `psql` session made the write. The ETag hashes the counter with the build
+id and the session epoch + key salt (a restore, or the epoch bump below after a database-level rollback, moves those on,
+so a counter that starts over never repeats a tag a device holds). Every successful write answers with the data set's
+version after it (`x-dataset-etag`) and just before it (`x-dataset-etag-prev`), read at the end of its own transaction.
+Both are exact: the bump holds the counter row until the write commits, so no other write — in this process, on another
+dyno or from an older release — can land in between. A client whose copy was at the "before" version adopts the new
+one, so coming back to the app after your own edits is a `304` instead of a full download (3-year data set: 165 KB Brotli
+/ ~70 ms → 0 B / ~5 ms); a client that missed a write never matches `prev` and downloads it. A write that changes nothing
+(an idempotent replay, deleting a session that isn't there) answers with the current version as both. The tag is read
+before the data, so a write committing during a bootstrap can only make the body newer than its tag (one extra download
+later), never older. Cost at ten years of data: a `304` takes one primary-key lookup (~0.8 ms end to end, was ~2.7 ms
+with the old per-table stamp), and a write's version headers ~0.4 ms (was ~5 ms).
+
+`Server-Timing` is sent on `/api/bootstrap` (`db` = version lookup + queries, `build` = JSON, `compress` = Brotli/gzip) and
+on writes (`db` = the handler, `etag` = reading the data-set version in its transaction). Browser dev tools show it under
+Network → Timing; from a shell: `curl -s -D - -o /dev/null -b cookies.txt -H 'accept-encoding: br' https://<app>/api/bootstrap`.
 
 Workouts and settings are saved as whole documents and **version-checked**: `GET /api/bootstrap` includes `revs`
 (the settings' revision and each session's — Postgres' `xmin` for the row, no column of its own), the client sends the
 revision an edit was based on as `If-Match` (or `If-None-Match: *` for a workout it believes is new), and a stale one is
 answered `409 { error: "conflict", current, rev }`. The client merges its edit onto `current` and retries once (see
-docs/SPEC.md §8). Saves without either header are accepted as before (older clients). A restore or `pg_restore` changes
+docs/SPEC.md §8). `If-None-Match: *` is atomic: when another save (in any process) creates the workout first, this one
+is a 409 with that save's copy. `DELETE /api/sessions/:date` honours `If-Match` the same way: a workout changed since the
+revision the delete was based on is a 409 with the current copy, which the client keeps. Requests without either header
+are accepted as before (older clients). A restore or `pg_restore` changes
 every revision, so each device's next save of a workout or the settings goes through one merge.
 
 ### Content-Security-Policy trial
@@ -171,8 +194,10 @@ The enforced policy still allows inline styles (`style-src 'self' 'unsafe-inline
 `Content-Security-Policy-Report-Only` with the same policy **without** `'unsafe-inline'`, reporting to
 `POST /api/csp-report` (`report-uri`, which every engine delivers right away; `report-to` is left out because Chromium
 then ignores `report-uri` and batches reports through the Reporting API). Nothing is blocked by it. The endpoint needs no sign-in, takes at most 8 KB, is rate limited (30 reports a minute per
-network, 300 overall; 429 beyond) and logs one line per violation with only the directive and the blocked resource's
-host or keyword — never the page, the source file or a sample:
+network, 300 overall; 429 beyond) and logs a line per violation with only the directive and the blocked resource's host
+or keyword (at most 100 characters) — never the page, the source file or a sample. Each distinct (directive, host) pair
+is logged at most once a minute, at most 2 lines per report and 20 a minute in all, so the log shows _which_ violations
+happen, not how often:
 
 ```
 CSP violation (report-only) {"directive":"style-src-attr","blocked":"inline"}
@@ -181,7 +206,7 @@ CSP violation (report-only) {"directive":"style-src-attr","blocked":"inline"}
 To read the results, use the app normally for a few days (every screen, sheets, charts, celebrations), then:
 
 ```sh
-heroku logs -n 1500 --source app | grep 'CSP violation' | sed 's/.*{/{/' | sort | uniq -c | sort -rn
+heroku logs -n 1500 --source app | grep 'CSP violation' | sed 's/.*{/{/' | sort | uniq -c | sort -rn   # count = minutes seen
 ```
 
 `style-src-attr … inline` means a `style="…"` attribute in markup (index.html, an HTML/SVG string, `setAttribute("style",
@@ -239,7 +264,8 @@ seed, including exercises you created, renamed or archived — unless you add `-
 accepted too. On failure it prints what went wrong (error name, code, database detail), never the data.
 
 A database-level rollback (`heroku pg:backups:restore`) also rolls `auth_state` back, which can revive cookies that were
-signed out after the backup. Move the epoch past anything issued since:
+signed out after the backup, and rolls the data set's version counter back. Move the epoch past anything issued since
+(this also changes every device's data-set ETag, so none mistakes the rolled-back data for the copy it holds):
 
 ```sh
 heroku pg:psql -c "update auth_state set session_epoch = session_epoch + 1000, updated_at = now() where id = 1"

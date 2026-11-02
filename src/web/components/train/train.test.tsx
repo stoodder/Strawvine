@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Block, BlockExercise, Session, SetEntry } from "../../../shared/schemas";
 import { recapLines } from "./FinishPanel";
 import { plateChips } from "./RestTimer";
-import { nextOpenSet, resolveExRef, resolveSetRef } from "./sessionEdit";
+import { nextOpenSet, replaceSetAndPropagate, resolveExRef, resolveSetRef } from "./sessionEdit";
 
 let n = 0;
 const set = (o: Partial<SetEntry> = {}): SetEntry => ({
@@ -98,5 +98,47 @@ describe("recapLines", () => {
       { id: "main", kind: "primary", skipped: true, exercises: [ex(1, [set({ amrap: true, done: true, reps: 9, targetReps: 6 })])] },
     ]);
     expect(recapLines(s, () => "Bench press")).toEqual([{ text: "Bench press skipped today", gold: false }]);
+  });
+});
+
+describe("replaceSetAndPropagate", () => {
+  const three = () =>
+    ex(6, [
+      set({ targetReps: 10, targetWeight: 50 }),
+      set({ targetReps: 10, targetWeight: 50 }),
+      set({ targetReps: 10, targetWeight: 50 }),
+    ]);
+  const targets = (e: BlockExercise) => e.sets.map((x) => `${x.targetReps}@${x.targetWeight}`);
+
+  it("logging a set at fewer reps leaves the later targets alone (a result, not a new plan)", () => {
+    const e = three();
+    const prev = e.sets[0]!;
+    const out = replaceSetAndPropagate(e, prev, { ...prev, done: true, reps: 8, weight: 50 });
+    expect(targets(out)).toEqual(["10@50", "10@50", "10@50"]);
+  });
+  it("logging a set heavier carries the load to the open sets", () => {
+    const e = three();
+    const prev = e.sets[0]!;
+    const out = replaceSetAndPropagate(e, prev, { ...prev, done: true, reps: 8, weight: 55 });
+    expect(targets(out)).toEqual(["10@50", "10@55", "10@55"]);
+  });
+  it("updating a logged set's reps doesn't retarget the later sets", () => {
+    const e = three();
+    const logged = { ...e.sets[0]!, done: true, reps: 10, weight: 50 };
+    const withLogged = { ...e, sets: [logged, ...e.sets.slice(1)] };
+    const out = replaceSetAndPropagate(withLogged, logged, { ...logged, reps: 9 });
+    expect(targets(out)).toEqual(["10@50", "10@50", "10@50"]);
+  });
+  it("saving a new target carries the reps and load forward", () => {
+    const e = three();
+    const prev = e.sets[0]!;
+    const out = replaceSetAndPropagate(e, prev, { ...prev, targetReps: 8, targetWeight: 60 });
+    expect(targets(out)).toEqual(["8@60", "8@60", "8@60"]);
+  });
+  it("leaves an AMRAP's reps and a deliberately different target alone", () => {
+    const e = ex(1, [set({ targetReps: 5 }), set({ targetReps: 6 }), set({ targetReps: 5, amrap: true })]);
+    const prev = e.sets[0]!;
+    const out = replaceSetAndPropagate(e, prev, { ...prev, targetReps: 4 });
+    expect(out.sets.map((x) => x.targetReps)).toEqual([4, 6, 5]);
   });
 });

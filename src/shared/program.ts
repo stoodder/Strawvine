@@ -92,9 +92,14 @@ export function programDayFor(program: Program, date: ISODate): ProgramDay | nul
   return program.days[String(weekdayOf(date))] ?? null;
 }
 
-/** The program day a lift is expected on: a program weekday once the first cycle has started. */
+/**
+ * The program day a lift is expected on: a program weekday once the first cycle has started.
+ * (Equivalent to `cyclePosition(program, date) ? programDayFor(program, date) : null`, without
+ * building the position — it runs for every day on every derive.)
+ */
 export function scheduledProgramDay(program: Program, date: ISODate): ProgramDay | null {
-  return cyclePosition(program, date) ? programDayFor(program, date) : null;
+  if (program.weeks.length === 0 || daysBetween(program.cycleStartDate, date) < 0) return null;
+  return programDayFor(program, date);
 }
 
 /** Max increase earned on an AMRAP set (0 when the target wasn't beaten). */

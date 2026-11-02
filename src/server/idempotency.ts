@@ -78,6 +78,14 @@ export interface IdempotentRequest {
 
 const PRUNE_EVERY_MS = 60 * 60_000;
 
+export interface IdempotentOptions {
+  /**
+   * Runs last in the transaction that created the row — or that found the stored response of a
+   * replay (which writes no data) — e.g. to read the data set's version as of this write.
+   */
+  beforeCommit?: (tx: Tx) => Promise<void>;
+}
+
 /**
  * Returns a runner for idempotent creates bound to `db`. `create` runs in a transaction and
  * must use the transaction it is given; a non-2xx result is rolled back and not stored.
@@ -92,10 +100,19 @@ export function idempotency(db: Db, onError: (err: unknown) => void = () => {}) 
     void pruneIdempotencyKeys(db).catch(onError);
   };
 
-  return async function run(c: Context, request: IdempotentRequest, create: (tx: Tx) => Promise<CreateResult>): Promise<Response> {
+  return async function run(
+    c: Context,
+    request: IdempotentRequest,
+    create: (tx: Tx) => Promise<CreateResult>,
+    { beforeCommit }: IdempotentOptions = {},
+  ): Promise<Response> {
     const key = c.req.header(IDEMPOTENCY_HEADER);
     if (key === undefined) {
-      const r = await db.transaction(create);
+      const r = await db.transaction(async (tx) => {
+        const out = await create(tx);
+        if (out.status >= 200 && out.status < 300) await beforeCommit?.(tx);
+        return out;
+      });
       return c.json(r.body as object, r.status);
     }
     if (!KEY_PATTERN.test(key)) return c.json({ error: `Invalid ${IDEMPOTENCY_HEADER}` }, 400);
@@ -113,11 +130,13 @@ export function idempotency(db: Db, onError: (err: unknown) => void = () => {}) 
           .returning({ key: idempotencyKeys.key });
         if (!claimed.length) {
           const [row] = await tx.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, key));
+          await beforeCommit?.(tx);
           return { replay: row };
         }
         const r = await create(tx);
         if (r.status < 200 || r.status >= 300) throw new Rollback(r);
         await tx.update(idempotencyKeys).set({ status: r.status, body: r.body }).where(eq(idempotencyKeys.key, key));
+        await beforeCommit?.(tx);
         return { fresh: r };
       });
     } catch (err) {

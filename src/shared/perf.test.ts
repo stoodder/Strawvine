@@ -6,10 +6,10 @@
 import { describe, expect, it } from "vitest";
 import { addDays, dateRange } from "./dates";
 import { defaultSettings } from "./defaults";
-import { achievements, amrapPrs, streaks, type AppData } from "./gamify";
+import { achievements, amrapPrs, closedDates, streaks, type AppData } from "./gamify";
 import { buildModel } from "./insights";
 import { emptyDayLog, type DayLog, type Exercise, type MaxEntry, type Session } from "./schemas";
-import { blankSet, buildSession } from "./session";
+import { blankSet, buildSession, buildSessionFrom } from "./session";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 const start = "2016-11-07";
@@ -112,6 +112,26 @@ describe("ten years of data", () => {
     const next = { ...data, days: [...data.days, day] };
     expect(time(() => achievements(next, today))).toBeLessThan(25);
     expect(achievements(next, today)).toEqual(achievements(data, today));
+  });
+
+  it("re-derives closed days after a one-day edit from each day's memoized checklist", () => {
+    // Some plans done a day early (the Sunday before), so the moved-session rule is exercised.
+    const sessions = data.sessions.map((s, i) =>
+      i % 40 === 0 && s.label === "Push"
+        ? { ...s, ...buildSessionFrom(s.date, addDays(s.date, -1), { ...data, sessions: [] }), completedAt: s.completedAt }
+        : s,
+    );
+    const base: AppData = { ...data, sessions };
+    streaks(base, today);
+    const edited = [...base.days];
+    edited[edited.length - 3] = { ...edited[edited.length - 3]!, steps: 0 };
+    const next = { ...base, days: edited };
+    expect(time(() => streaks(next, today))).toBeLessThan(10);
+    // Same answer as a cold derive over fresh copies of every object.
+    const cold: AppData = { ...next, days: next.days.map((d) => ({ ...d })), sessions: next.sessions.map((s) => ({ ...s })) };
+    expect([...closedDates(next, today)].sort()).toEqual([...closedDates(cold, today)].sort());
+    expect(streaks(next, today)).toEqual(streaks(cold, today));
+    expect(closedDates(next, today).has(edited[edited.length - 3]!.date)).toBe(false);
   });
 
   it("finds AMRAP PRs in a single pass with the same results", () => {

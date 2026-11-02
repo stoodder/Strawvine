@@ -97,38 +97,49 @@ export function plateChips(plates: number[]): PlateGroup[] {
   return loose.length > 4 ? spread(2) : loose;
 }
 
-/** The next barbell set's load and plates per side, for the pill (null: nothing to show). */
-function nextLoad(weightLb: number | null) {
-  if (weightLb === null || weightLb <= 45) return null;
-  const { plates, remainder } = platesPerSide(weightLb);
-  if (!plates.length) return null;
-  const chips = plateChips(plates);
-  return { weightLb, plates, remainder, chips, crowded: chips.length + (remainder > 0 ? 1 : 0) > 4 };
+/**
+ * The next set's load for the pill (null: nothing to show): a barbell set's plates per side, or
+ * (`plates` false — dumbbells, cables, an accessory) just the load.
+ */
+function nextLoad(weightLb: number | null, plates: boolean) {
+  if (weightLb === null || weightLb <= 0) return null;
+  if (!plates) return { weightLb, plates: [], remainder: 0, chips: [], crowded: false };
+  if (weightLb <= 45) return null;
+  const perSide = platesPerSide(weightLb);
+  if (!perSide.plates.length) return null;
+  const chips = plateChips(perSide.plates);
+  return { weightLb, ...perSide, chips, crowded: chips.length + (perSide.remainder > 0 ? 1 : 0) > 4 };
 }
 
-/** "next 225 · 45 45": what to load for the coming barbell set. */
+/** "next 225 · 45 45": what to load for the coming set (a load without plates reads "next 50 lb"). */
 function NextPlates({ load }: { load: NonNullable<ReturnType<typeof nextLoad>> }) {
   const { weightLb, plates, remainder, chips } = load;
-  const spoken = `Next set ${weightLb} lb: ${plates.join(", ")} per side${remainder > 0 ? `, plus ${remainder} lb` : ""}.`;
+  const spoken = plates.length
+    ? `Next set ${weightLb} lb: ${plates.join(", ")} per side${remainder > 0 ? `, plus ${remainder} lb` : ""}.`
+    : `Next set ${weightLb} lb.`;
   return (
     <span className="flex items-center gap-1.5 pr-1 pl-1.5 whitespace-nowrap">
       <span className="sr-only">{spoken}</span>
-      {/* On narrow phones (or for a load with many plates) the pill drops the word and keeps the numbers. */}
+      {/* On narrow phones (or for a load with many plates) the pill drops the word and keeps the
+          numbers; on the very narrowest it keeps just the clock (the spoken text still has it all). */}
       <span aria-hidden className={clsx("label text-mute max-[359px]:hidden", load.crowded && "hidden")}>
         next
       </span>
-      <span aria-hidden className={clsx("num text-[0.8125rem] text-fg-2", load.crowded && "max-[399px]:hidden")}>
+      <span aria-hidden className={clsx("num text-[0.8125rem] text-fg-2 max-[259px]:hidden", load.crowded && "max-[399px]:hidden")}>
         {weightLb}
+        {!chips.length && <span className="ml-0.5 text-[0.625rem] text-mute">lb</span>}
       </span>
-      <span aria-hidden className="flex items-center gap-0.5">
-        {chips.map((g, i) => (
-          <span key={i} className="num rounded-[4px] bg-white/[0.07] px-[3px] text-[0.625rem] leading-4 text-fg-2">
-            {g.plate}
-            {g.count > 1 && <span className="text-mute">×{g.count}</span>}
-          </span>
-        ))}
-        {remainder > 0 && <span className="num text-[0.625rem] text-warn">+{remainder}</span>}
-      </span>
+      {chips.length > 0 && (
+        <span aria-hidden className="flex items-center gap-0.5 max-[259px]:hidden">
+          {chips.map((g, i) => (
+            <span key={i} className="num rounded-[4px] bg-white/[0.08] px-[3px] text-[0.625rem] leading-4 text-fg">
+              {g.plate}
+              {g.count > 1 && <span className="text-fg-2">×{g.count}</span>}
+            </span>
+          ))}
+          {remainder > 0 && <span className="num text-[0.625rem] text-warn">+{remainder}</span>}
+        </span>
+      )}
     </span>
   );
 }
@@ -144,6 +155,7 @@ export function RestTimer({
   onTarget,
   onDismiss,
   nextWeightLb = null,
+  nextPlates = true,
 }: {
   from: number | null;
   target: number;
@@ -151,8 +163,10 @@ export function RestTimer({
   base: number;
   onTarget: (s: number) => void;
   onDismiss: () => void;
-  /** Load of the next barbell set, shown as plates per side; null hides it. */
+  /** Load of the next set; null hides it. */
   nextWeightLb?: number | null;
+  /** The next set is barbell work: show its plates per side (else just the load). */
+  nextPlates?: boolean;
 }) {
   const [now, setNow] = useState(Date.now());
   const hintId = useId();
@@ -180,7 +194,7 @@ export function RestTimer({
   }, [ready, from, target, announced]);
 
   const cycle = () => onTarget(nextTarget(target, base));
-  const next = nextLoad(nextWeightLb);
+  const next = nextLoad(nextWeightLb, nextPlates);
   const showNext = !!next;
 
   return (
@@ -197,7 +211,7 @@ export function RestTimer({
           <motion.div
             role="group"
             aria-label="Rest timer"
-            className="hc-edge pointer-events-auto relative mx-auto flex w-fit items-center overflow-hidden rounded-full bg-ink-800/90 text-sm shadow-lg ring-1 ring-white/[0.06] backdrop-blur-xl"
+            className="hc-edge pointer-events-auto relative mx-auto flex w-fit max-w-[calc(100vw-2rem)] items-center overflow-hidden rounded-full bg-ink-800/90 text-sm shadow-lg ring-1 ring-white/[0.06] backdrop-blur-xl"
             initial={{ y: 20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             transition={{ type: "spring", stiffness: 420, damping: 34 }}
@@ -225,7 +239,11 @@ export function RestTimer({
                   next?.crowded && "max-[399px]:hidden",
                 )}
               >
-                <span className="sr-only">target </span>/{clock(target)}
+                <span className="sr-only">target {clock(target)}</span>
+                {/* Below ~260px only the clock fits: the target is still in the spoken name. */}
+                <span aria-hidden className="max-[259px]:hidden">
+                  /{clock(target)}
+                </span>
               </span>
             </button>
             <span id={hintId} className="sr-only">

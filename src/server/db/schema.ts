@@ -1,4 +1,4 @@
-import { boolean, date, doublePrecision, integer, jsonb, pgTable, serial, text, timestamp, varchar } from "drizzle-orm/pg-core";
+import { bigint, boolean, date, doublePrecision, integer, jsonb, pgTable, serial, text, timestamp, varchar } from "drizzle-orm/pg-core";
 import type { Session, Settings } from "../../shared/schemas";
 
 /** One row per calendar day — the raw source of truth for everything derived. */
@@ -99,4 +99,24 @@ export const idempotencyKeys = pgTable("idempotency_keys", {
   /** sha256 of the canonical parsed request body: the same key with a different body is a 422. Null on older rows. */
   requestHash: varchar("request_hash", { length: 64 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * The data set's version (single row, id = 1): a counter that a trigger on every data table
+ * (day_logs, sessions, exercises, max_entries, settings, seen_achievements — see migration
+ * 0004) bumps once per writing transaction, inside that transaction. The bootstrap ETag is built
+ * from it, and a write's `x-dataset-etag`/`-prev` are its value after/before that write.
+ */
+export const datasetVersion = pgTable("dataset_version", {
+  id: integer("id").primaryKey(),
+  v: bigint("v", { mode: "number" }).notNull().default(0),
+});
+
+/**
+ * Session cookies revoked before they expire ("Forget this device" signs that one browser out
+ * server-side too): sha256 of the token, kept until the token would have expired.
+ */
+export const revokedSessions = pgTable("revoked_sessions", {
+  tokenHash: varchar("token_hash", { length: 64 }).primaryKey(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });

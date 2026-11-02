@@ -2,11 +2,11 @@
  * Closing the day, streaks and achievements — all derived from raw data.
  */
 import { benchmarkPrs, type BenchmarkPr } from "./benchmarks";
-import { addDays, dateRange, formatShortDate, weekdayOf, type ISODate } from "./dates";
+import { addDays, dateRange, formatShortDate, toDayNumber, weekdayOf, type ISODate } from "./dates";
 import { CALIBRATION_DAYS, firstTdeeDate, isLogged } from "./energy";
 import { cyclePosition, scheduledProgramDay } from "./program";
 import type { DayLog, Exercise, MaxEntry, Session, Settings } from "./schemas";
-import { sessionVolume } from "./session";
+import { movedSessionsByPlan, planDateOf, sessionVolume } from "./session";
 
 export interface AppData {
   settings: Settings;
@@ -24,33 +24,103 @@ export interface ChecklistItem {
   done: boolean;
   /** 0…1 partial progress where meaningful (steps). */
   progress: number;
+  /**
+   * Lift only — this day's plan was done on another day ("do this session today"): the date it
+   * was done ("Done Sun"). Set when that's what makes the item done.
+   */
+  doneOn?: ISODate;
+  /** Lift only — the session on this day does another day's plan (its `plannedFor`): "Mon's plan". */
+  movedFrom?: ISODate;
 }
 
-export function checklist(date: ISODate, day: DayLog | undefined, session: Session | undefined, settings: Settings): ChecklistItem[] {
+export interface ChecklistOptions {
+  /** The session that did this day's plan on another day (`sessionDoneEarly`): a completed one closes the lift. */
+  doneEarly?: Session | null;
+}
+
+/**
+ * A day's checklist. The lift is expected on a scheduled program day, and on any day holding a
+ * moved session (one with `plannedFor`, even on a rest day); it's done when the session on the
+ * day is completed, or when the day's plan was completed on another day (`opts.doneEarly`).
+ * Prefer `dayChecklist`, which finds the session and the moved one itself.
+ */
+export function checklist(
+  date: ISODate,
+  day: DayLog | undefined,
+  session: Session | undefined,
+  settings: Settings,
+  opts: ChecklistOptions = {},
+): ChecklistItem[] {
   const wd = weekdayOf(date);
   const items: ChecklistItem[] = [];
-  const add = (key: ChecklistKey, label: string, done: boolean, progress = done ? 1 : 0) =>
-    items.push({ key, label, done, progress: Math.max(0, Math.min(1, progress)) });
+  const add = (key: ChecklistKey, label: string, done: boolean, progress = done ? 1 : 0) => {
+    const item: ChecklistItem = { key, label, done, progress: Math.max(0, Math.min(1, progress)) };
+    items.push(item);
+    return item;
+  };
 
   add("morning", "Weigh-in", day?.weightLb != null);
   add("fuel", "Nutrition", day?.calories != null);
   const steps = day?.steps ?? 0;
   const stepTarget = settings.targets.steps;
   add("steps", "Steps", stepTarget > 0 ? steps >= stepTarget : day?.steps != null, stepTarget > 0 ? steps / stepTarget : 0);
-  if (scheduledProgramDay(settings.program, date)) add("lift", "Lift", !!session?.completedAt);
+  const movedFrom = session?.plannedFor && session.plannedFor !== date ? session.plannedFor : null;
+  if (movedFrom || scheduledProgramDay(settings.program, date)) {
+    const early = opts.doneEarly?.completedAt && opts.doneEarly.date !== date ? opts.doneEarly : null;
+    const here = !!session?.completedAt;
+    const item = add("lift", "Lift", here || !!early);
+    if (!here && early) item.doneOn = early.date;
+    if (movedFrom) item.movedFrom = movedFrom;
+  }
   if (settings.schedule.metcon[wd]) add("metcon", "Metcon", !!day?.metconDone);
   if (settings.schedule.zone2[wd]) add("zone2", "Zone 2", !!day?.zone2Done);
   return items;
 }
 
-export function isClosed(items: ChecklistItem[]): boolean {
-  return items.length > 0 && items.every((i) => i.done);
+const dayIndexMemo = new WeakMap<object, Map<ISODate, DayLog>>();
+const sessionIndexMemo = new WeakMap<object, Map<ISODate, Session>>();
+/** Per day log: its checklist, valid while the session, the moved session and settings are the same objects. */
+const checklistMemo = new WeakMap<
+  DayLog,
+  { session: Session | undefined; early: Session | undefined; settings: Settings; items: ChecklistItem[] }
+>();
+
+function dayIndex(days: AppData["days"]): Map<ISODate, DayLog> {
+  let index = dayIndexMemo.get(days);
+  if (!index) dayIndexMemo.set(days, (index = new Map(days.map((d) => [d.date, d]))));
+  return index;
 }
 
-function indexData(data: AppData) {
-  const days = new Map(data.days.map((d) => [d.date, d]));
-  const sessions = new Map(data.sessions.map((s) => [s.date, s]));
-  return { days, sessions };
+function sessionIndex(sessions: AppData["sessions"]): Map<ISODate, Session> {
+  let index = sessionIndexMemo.get(sessions);
+  if (!index) sessionIndexMemo.set(sessions, (index = new Map(sessions.map((s) => [s.date, s]))));
+  return index;
+}
+
+/**
+ * `date`'s checklist from the whole data set, with moved-session credit (see `checklist`): a
+ * program day whose plan was completed on another day has its lift done (`doneOn`), and a day
+ * holding a moved session expects a lift even when it isn't a program day (`movedFrom`).
+ * Memoized per day log object, so re-deriving every day after one edit only rebuilds that day.
+ * The returned items are shared: don't mutate them.
+ */
+export function dayChecklist(date: ISODate, data: Pick<AppData, "days" | "sessions" | "settings">): ChecklistItem[] {
+  return checklistFor(date, dayIndex(data.days).get(date), data);
+}
+
+function checklistFor(date: ISODate, day: DayLog | undefined, data: Pick<AppData, "sessions" | "settings">): ChecklistItem[] {
+  const session = sessionIndex(data.sessions).get(date);
+  const early = movedSessionsByPlan(data.sessions).get(date);
+  if (!day) return checklist(date, day, session, data.settings, { doneEarly: early });
+  const m = checklistMemo.get(day);
+  if (m && m.session === session && m.early === early && m.settings === data.settings) return m.items;
+  const items = checklist(date, day, session, data.settings, { doneEarly: early });
+  checklistMemo.set(day, { session, early, settings: data.settings, items });
+  return items;
+}
+
+export function isClosed(items: ChecklistItem[]): boolean {
+  return items.length > 0 && items.every((i) => i.done);
 }
 
 /**
@@ -70,11 +140,12 @@ export function closedDates(data: AppData, upTo: ISODate): Set<ISODate> {
 }
 
 function computeClosedDates(data: AppData, upTo: ISODate): Set<ISODate> {
-  const { days, sessions } = indexData(data);
   const out = new Set<ISODate>();
-  for (const [date, day] of days) {
+  // Only a day with a log can close (the weigh-in is always on the list). Later duplicates of a
+  // date win, as in an index.
+  for (const [date, day] of dayIndex(data.days)) {
     if (date > upTo) continue;
-    if (isClosed(checklist(date, day, sessions.get(date), data.settings))) out.add(date);
+    if (isClosed(checklistFor(date, day, data))) out.add(date);
   }
   return out;
 }
@@ -89,17 +160,19 @@ export interface StreakInfo {
 export function streaks(data: AppData, today: ISODate): StreakInfo {
   const closed = closedDates(data, today);
   const todayClosed = closed.has(today);
+  // Day numbers: runs are consecutive integers (no date strings built per day).
+  const nums = new Set<number>();
+  for (const d of closed) nums.add(toDayNumber(d));
   let current = 0;
   // Today still in progress never breaks the streak.
-  for (let d = todayClosed ? today : addDays(today, -1); closed.has(d); d = addDays(d, -1)) current++;
+  for (let n = toDayNumber(today) - (todayClosed ? 0 : 1); nums.has(n); n--) current++;
   let best = 0;
   let run = 0;
-  const sorted = [...closed].sort();
-  let prev: ISODate | null = null;
-  for (const d of sorted) {
-    run = prev && addDays(prev, 1) === d ? run + 1 : 1;
+  let prev = NaN;
+  for (const n of [...nums].sort((a, b) => a - b)) {
+    run = n === prev + 1 ? run + 1 : 1;
     best = Math.max(best, run);
-    prev = d;
+    prev = n;
   }
   return { current, best, todayClosed };
 }
@@ -326,11 +399,12 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   if (closed[0])
     out.push({ key: "close-1", title: "Day closed", detail: "Every box checked for the first time.", date: closed[0], tier: "streak" });
   let run = 0;
-  let prev: ISODate | null = null;
+  let prev = NaN;
   const reached = new Set<number>();
   for (const d of closed) {
-    run = prev && addDays(prev, 1) === d ? run + 1 : 1;
-    prev = d;
+    const n = toDayNumber(d);
+    run = n === prev + 1 ? run + 1 : 1;
+    prev = n;
     for (const t of STREAK_TIERS)
       if (run === t && !reached.has(t)) {
         reached.add(t);
@@ -385,12 +459,13 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
       });
   }
 
-  // Completed cycles (at least one completed session in the cycle).
+  // Completed cycles (at least one completed session in the cycle). A moved session counts
+  // for the cycle of the day it was planned for.
   const program = data.settings.program;
   const cyclesWithWork = new Map<number, ISODate>();
   for (const s of data.sessions) {
     if (!s.completedAt) continue;
-    const pos = cyclePosition(program, s.date);
+    const pos = cyclePosition(program, planDateOf(s));
     if (pos) cyclesWithWork.set(pos.cycle, pos.cycleEnd);
   }
   for (const [cycle, end] of cyclesWithWork)

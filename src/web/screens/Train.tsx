@@ -30,9 +30,10 @@ import {
   newId,
   planChanged,
   sessionCounts,
+  sessionDoneEarly,
   sessionVolume,
 } from "../../shared/session";
-import { useDockHeight } from "../components/Dock";
+import { useDockHeight, useDockTop } from "../components/Dock";
 import { CheckDot, Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
 import { DateJump } from "../components/today/DateJump";
@@ -90,6 +91,15 @@ const loggable = (s: SetEntry) => !s.done && !s.amrap;
 const logAsPlanned = (s: SetEntry): SetEntry =>
   loggable(s) ? { ...s, done: true, reps: s.reps ?? s.targetReps, weight: s.weight ?? s.targetWeight } : s;
 const lb = (v: number) => fmt(v, v % 1 ? 1 : 0);
+/**
+ * A finished session stays consistent with its sets: once nothing is logged in it any more (an
+ * Undo or unlog after Finish), it's open again — unless the main lift was skipped, which may
+ * finish with nothing logged.
+ */
+const settled = (s: Session): Session =>
+  s.completedAt && sessionCounts(s).done === 0 && !s.blocks.some((b) => b.kind === "primary" && b.skipped)
+    ? { ...s, completedAt: null }
+    : s;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 type Hint = NonNullable<ReturnType<typeof accessoryHint>>;
@@ -143,7 +153,6 @@ export function TrainScreen() {
   const restFor = (kind: Block["kind"]) => (kind === "primary" ? prefs.restSecondsMain : prefs.restSecondsAccessory);
   const programDay = programDayFor(program, date);
   const weekday = weekdayName(date);
-  const pos = cyclePosition(program, date);
 
   /** Today's plan as the program + history would build it right now. */
   const fresh = useMemo(
@@ -166,6 +175,15 @@ export function TrainScreen() {
   }, [saved, fresh]);
   const session = saved ?? draft!;
   const isPlannedDay = !!programDay || !!saved;
+  /** The cycle week the header shows: a moved session's own program day's (it may be another week). */
+  const pos = cyclePosition(program, session.plannedFor ?? date);
+  /**
+   * This day's plan was already done on another day ("Do this session today"): the day shows that
+   * instead of the same plan again (and can still hold a session of its own).
+   */
+  const earlyDone = sessionDoneEarly(date, data.sessions);
+  const shownEarly = saved ? null : earlyDone;
+  const trainPath = (d: string) => (d === today ? "/train" : `/train/${d}`);
 
   // What the open sheets hold, re-located in the latest session on every render: a merge with
   // another device's edit (or a revalidation) can move or remove what a sheet points at. A ref
@@ -213,7 +231,7 @@ export function TrainScreen() {
    * A preview never saves.
    */
   const commit = (
-    next: Session,
+    edited: Session,
     undo?: {
       message: string;
       scope?: ExRef | { blockId: string };
@@ -227,6 +245,7 @@ export function TrainScreen() {
     if (isPreview) return;
     const before = session;
     const wasDraft = !saved;
+    const next = settled(edited);
     saveSession(next);
     if (!undo) return;
     offerUndo(
@@ -250,7 +269,7 @@ export function TrainScreen() {
             restored = mapBlock(cur, scope.blockId, (b) => ({ ...b, exercises: b.exercises.map((e, i) => same(i) ?? e) }));
         }
         if (wasDraft && JSON.stringify(restored) === JSON.stringify(before)) deleteSession(date);
-        else saveSession(restored);
+        else saveSession(settled(restored));
         undo.onUndone?.();
       },
       undo.duration,
@@ -343,7 +362,8 @@ export function TrainScreen() {
   // (`planChanged` follows a moved session's own program day.)
   const programMoved = !!saved && !session.completedAt && !isSessionStarted(session) && planChanged(session, data);
   const missingPrimary = !!saved && !primaryBlock && !!freshPrimary && !session.completedAt;
-  const offerRecalc = !isPreview && (programMoved || maxChanged || missingPrimary);
+  // A day whose plan was done early holds an extra session (if any), not the plan: nothing to recalculate.
+  const offerRecalc = !isPreview && !earlyDone && (programMoved || maxChanged || missingPrimary);
 
   const recalcPrimary = () => {
     // A skipped main lift stays skipped through a recalculation.
@@ -375,8 +395,9 @@ export function TrainScreen() {
     tick();
   };
 
-  /** The main lift's Skip / Unskip control (whichever the row shows now). */
-  const mainControl = (which: "skip" | "unskip") => () => document.querySelector<HTMLElement>(`[data-main-control="${which}"]`);
+  /** The main lift's Skip / Unskip / Skip rest / Restore control (whichever the row shows now). */
+  const mainControl = (which: "skip" | "unskip" | "skip-rest" | "restore") => () =>
+    document.querySelector<HTMLElement>(`[data-main-control="${which}"]`);
 
   /**
    * Skip the main lift for today (injury, fatigue): its sets leave the counts, no AMRAP or
@@ -406,6 +427,51 @@ export function TrainScreen() {
     focusWhenReady(mainControl(skip ? "unskip" : "skip"));
   };
 
+  /**
+   * Stop the main lift part-way (a tweak mid-session): its unlogged sets leave the session, the
+   * logged ones still count, and the session can finish without asking about them. Undo puts the
+   * same sets back; later, "Restore" rebuilds the prescribed ones from the plan.
+   */
+  const openMain = primaryEx?.sets.filter((s) => !s.done).length ?? 0;
+  const skipRestOfMain = () => {
+    if (!primaryBlock || !primaryEx || !openMain) return;
+    const ref = { blockId: primaryBlock.id, exIdx: 0 };
+    const removed = primaryEx.sets.map((s, i) => [i, s] as const).filter(([, s]) => !s.done);
+    tick();
+    commit(
+      mapExercise(session, ref, (e) => ({ ...e, sets: e.sets.filter((s) => s.done) })),
+      {
+        message: `Rest of ${primaryName} skipped`,
+        // Put the removed sets back where they were, around whatever was logged since.
+        revert: (cur) =>
+          mapExercise(cur, ref, (e) => {
+            const sets = e.sets.filter((s) => !removed.some(([, r]) => r.id === s.id));
+            for (const [i, r] of removed) sets.splice(Math.min(i, sets.length), 0, r);
+            return { ...e, sets: sets.slice(0, MAX_SETS) };
+          }),
+        onUndone: () => focusWhenReady(mainControl("skip-rest")),
+      },
+    );
+    if (primaryBlock.id === amrap?.blockId) setAmrap(null);
+    focusWhenReady(mainControl("restore"));
+  };
+  /** Prescribed sets the session no longer holds (the rest of the main lift was skipped). */
+  const missingMain =
+    primaryEx && freshPrimary && !session.completedAt && primaryEx.sets.length < plannedCount
+      ? (freshPrimary.exercises[0]?.sets.slice(primaryEx.sets.length, plannedCount) ?? [])
+      : [];
+  const restoreMain = () => {
+    if (!primaryBlock || !missingMain.length) return;
+    tick();
+    commit(
+      mapExercise(session, { blockId: primaryBlock.id, exIdx: 0 }, (e) => ({
+        ...e,
+        sets: [...e.sets, ...missingMain.map((s) => ({ ...s, id: newId() }))],
+      })),
+    );
+    focusWhenReady(mainControl("skip-rest"));
+  };
+
   // --- Do this session today ----------------------------------------------------------------
   const todaySaved = data.sessions.find((s) => s.date === today) ?? null;
   /** Today already holds logged work (or is finished): a previewed day can't replace it. */
@@ -417,15 +483,19 @@ export function TrainScreen() {
     setConfirmMove(false);
   }
 
-  /** Save the previewed day's plan under today (travel, a moved rest day) and go there. */
+  /**
+   * Save the previewed day's plan under today (travel, a moved rest day) and go there. Notes
+   * already written on today's session come along (nothing is logged in it: it isn't busy).
+   */
   const doThisToday = () => {
     if (!isPreview || todayBusy) return;
     const before = todaySaved;
-    saveSession(buildSessionFrom(date, today, data));
+    const moved = buildSessionFrom(date, today, data);
+    saveSession(before?.notes ? { ...moved, notes: before.notes } : moved);
     setConfirmMove(false);
     tick();
     navigate("/train");
-    offerUndo(`${weekday}'s session is today's`, () => {
+    offerUndo(`${weekdayName(date, true)}'s ${session.label} moved to today`, () => {
       if (before) saveSession(before);
       else deleteSession(today);
     });
@@ -438,7 +508,9 @@ export function TrainScreen() {
   /** Drop a moved session: today shows its own plan again (Undo restores the moved one). */
   const revertToTodaysPlan = () => {
     const before = session;
-    deleteSession(date);
+    // Notes written on the moved session (or carried into it by "Replace") stay with the day.
+    if (session.notes) saveSession({ ...fresh, label: programDay ? fresh.label : "Extra session", notes: session.notes });
+    else deleteSession(date);
     offerUndo("Back to today's plan", () => saveSession(before));
     focusWhenReady(() => document.querySelector<HTMLElement>("[data-train-title]"));
   };
@@ -579,10 +651,11 @@ export function TrainScreen() {
   const { done: doneSets, total: totalSets } = sessionCounts(session);
   const blocksFull = session.blocks.length >= MAX_BLOCKS;
   /** A previewed day with planned work can be done today instead (not once today holds logged work). */
-  const canMove = isPreview && !todayBusy && totalSets > 0 && todaySaved?.plannedFor !== date;
+  const canMove = isPreview && !earlyDone && !todayBusy && totalSets > 0 && todaySaved?.plannedFor !== date;
 
   // The rest pill's "next 225 · 45 45": the set after the one that started the rest (without one —
-  // a rest restored after a reload — the first open set of a session in progress), barbell lifts only.
+  // a rest restored after a reload — the first open set of a session in progress). Barbell lifts
+  // show their plates; anything else with a load just the load ("next 50 lb").
   const [restDate, setRestDate] = useState(date);
   if (restDate !== date) {
     setRestDate(date);
@@ -591,7 +664,28 @@ export function TrainScreen() {
   const nextUp = isPreview || session.completedAt || (!lastLogged && !isSessionStarted(session)) ? null : nextOpenSet(session, lastLogged);
   const nextIsBarbell =
     !!nextUp && nextUp.ex.measure === "reps" && (nextUp.block.kind === "primary" || exById(nextUp.ex.exerciseId)?.category === "primary");
-  const nextWeightLb = nextIsBarbell ? nextUp.set.targetWeight : null;
+  const nextWeightLb = nextUp?.set.targetWeight ?? null;
+
+  /**
+   * While resting, the next set stays clear of the dock: when the dock grows over it after the
+   * first reveal (a toast arrives — merged changes, sync — or the pill grows), bring it back up.
+   * Only a set the growth covered (it was on screen above the old dock edge); one the athlete
+   * scrolled away from is left alone.
+   */
+  const dockTop = useDockTop();
+  const lastDockTop = useRef(dockTop);
+  const resting = rest.from !== null;
+  const nextUpId = nextUp?.set.id ?? null;
+  useEffect(() => {
+    const was = lastDockTop.current;
+    lastDockTop.current = dockTop;
+    if (!resting || !nextUpId || dockTop >= was) return;
+    afterLayout(() => {
+      const el = document.querySelector(`[data-set="${nextUpId}"][data-open]`);
+      const r = el?.getBoundingClientRect();
+      if (el && r && r.top >= 0 && r.top < was && r.bottom > dockTop - 16) revealAboveDock(el);
+    });
+  }, [dockTop, resting, nextUpId, revealAboveDock]);
 
   /** Edited set can be deleted: any accessory set, or a main-lift set added beyond the plan. */
   const canDelete = (f: NonNullable<ReturnType<typeof findSet>>) =>
@@ -642,7 +736,18 @@ export function TrainScreen() {
           {session.label}
         </h1>
         <p className="mt-3 text-sm text-mute">
-          {isPreview ? (
+          {shownEarly ? (
+            <>
+              Done {weekdayName(shownEarly.date, true)} · <span className="text-fg-2">{shownEarly.label}</span> —{" "}
+              <Link
+                to={trainPath(shownEarly.date)}
+                aria-label={`View ${weekdayName(shownEarly.date)}'s ${shownEarly.label} session`}
+                className="-mx-1 -my-3 inline-block px-1 py-3 text-accent"
+              >
+                view
+              </Link>
+            </>
+          ) : isPreview ? (
             <>
               <span className="label mr-2 rounded-full bg-white/[0.05] px-2 py-1 text-fg-2">Preview</span>
               {totalSets ? (
@@ -678,17 +783,26 @@ export function TrainScreen() {
         {plannedFor && (
           <div className="mt-1 flex flex-wrap items-center gap-x-3">
             <span className="text-sm text-mute">
-              Planned for{" "}
-              <span className="text-fg-2">
-                {weekdayName(plannedFor, true)} · {session.label}
-              </span>
+              Planned for <span className="text-fg-2">{weekdayName(plannedFor, true)}</span>
             </span>
             {canRevert && (
-              <button type="button" className="tap label -mx-2 min-h-11 px-2 text-accent" onClick={revertToTodaysPlan}>
+              <button type="button" className="tap label -mx-2 min-h-11 px-2 text-left text-accent" onClick={revertToTodaysPlan}>
                 {isToday ? "Revert to today's plan" : `Revert to ${weekday}'s plan`}
               </button>
             )}
           </div>
+        )}
+        {earlyDone && saved && (
+          <p className="mt-1 text-sm text-mute">
+            Plan done {weekdayName(earlyDone.date, true)} ·{" "}
+            <Link
+              to={trainPath(earlyDone.date)}
+              aria-label={`View ${weekdayName(earlyDone.date)}'s ${earlyDone.label} session`}
+              className="-mx-1 -my-3 inline-block px-1 py-3 text-accent"
+            >
+              view
+            </Link>
+          </p>
         )}
         {(!isToday || offerRecalc) && (
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -701,12 +815,13 @@ export function TrainScreen() {
               (confirmMove ? (
                 <div role="group" aria-labelledby={`${hintId}-move`} className="flex w-full flex-wrap items-center gap-x-3 gap-y-1">
                   <span id={`${hintId}-move`} className="text-sm text-fg-2">
-                    Replace today's saved session?
+                    {todaySaved?.notes ? "Replace today's saved session? Its notes come along." : "Replace today's saved session?"}
                   </span>
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex items-center gap-2">
                     <button
                       type="button"
-                      className="tap label -ml-2 min-h-11 px-2 text-mute"
+                      data-move-cancel
+                      className="chip min-h-9 bg-white/[0.05] text-fg-2"
                       onClick={() => {
                         setConfirmMove(false);
                         focusAfter(() => document.querySelector<HTMLElement>("[data-move-start]"));
@@ -727,7 +842,8 @@ export function TrainScreen() {
                   onClick={() => {
                     if (todaySaved) {
                       setConfirmMove(true);
-                      focusAfter(() => document.querySelector<HTMLElement>("[data-move-confirm]"));
+                      // The safe choice first: a stray second tap doesn't replace anything.
+                      focusAfter(() => document.querySelector<HTMLElement>("[data-move-cancel]"));
                     } else doThisToday();
                   }}
                 >
@@ -746,7 +862,23 @@ export function TrainScreen() {
         )}
       </div>
 
-      {!isPlannedDay && !saved ? (
+      {shownEarly ? (
+        <div className="mt-10">
+          <Empty>
+            {`${weekday}'s ${shownEarly.label} was done on ${weekdayName(shownEarly.date)}.`}
+            {isPreview ? " Nothing else is planned for the day." : ""}
+          </Empty>
+          {!isPreview && (
+            <button
+              type="button"
+              className="btn-ghost whitespace-nowrap"
+              onClick={() => commit({ ...session, label: "Extra session", blocks: [] })}
+            >
+              <Plus size={16} /> Log a session anyway
+            </button>
+          )}
+        </div>
+      ) : !isPlannedDay && !saved ? (
         <div className="mt-10">
           <Empty>
             {isToday
@@ -826,8 +958,9 @@ export function TrainScreen() {
                         </span>
                       )}
                     </div>
-                    {/* Injury or fatigue: skip the main lift for today (nothing logged in it yet). */}
-                    {!isPreview && !primaryStarted && !session.completedAt && (
+                    {/* Injury or fatigue: skip the main lift for today (nothing logged in it yet), or
+                        the rest of it once some sets are in (those still count). */}
+                    {!isPreview && !session.completedAt && !primaryStarted && (
                       <button
                         type="button"
                         onClick={() => setPrimarySkipped(true)}
@@ -836,6 +969,17 @@ export function TrainScreen() {
                         className="tap label -my-2 -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
                       >
                         <SkipForward size={12} /> skip
+                      </button>
+                    )}
+                    {!isPreview && !session.completedAt && primaryStarted && openMain > 0 && (
+                      <button
+                        type="button"
+                        onClick={skipRestOfMain}
+                        aria-label={`Skip rest of ${primaryName} today`}
+                        data-main-control="skip-rest"
+                        className="tap label -my-2 -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                      >
+                        <SkipForward size={12} /> skip rest
                       </button>
                     )}
                   </div>
@@ -901,6 +1045,7 @@ export function TrainScreen() {
                               </>
                             )}
                           </MainSetButton>
+                          {/* CheckDot carries its own hc-edge (high contrast). */}
                           <CheckDot
                             done={s.done}
                             tone={beat ? "gold" : "accent"}
@@ -916,7 +1061,24 @@ export function TrainScreen() {
                       <Plates weight={primaryEx.sets.find((s) => !s.done)?.targetWeight ?? null} />
                     </div>
                     {!isPreview && (
-                      <div className="-mr-2 flex items-center">
+                      <div className="-mr-2 ml-auto flex items-center">
+                        {missingMain.length > 0 && (
+                          <span className="flex items-center">
+                            <span className="label">{plural(missingMain.length, "set")} skipped</span>
+                            <span className="label px-1.5" aria-hidden>
+                              ·
+                            </span>
+                            <button
+                              type="button"
+                              aria-label={`Restore ${plural(missingMain.length, "skipped set")} of ${primaryName}`}
+                              data-main-control="restore"
+                              className="tap label min-h-11 px-2 text-accent"
+                              onClick={restoreMain}
+                            >
+                              Restore
+                            </button>
+                          </span>
+                        )}
                         {primaryEx.sets.length < MAX_SETS && (
                           <button
                             type="button"
@@ -976,7 +1138,7 @@ export function TrainScreen() {
                                 {name}
                               </div>
                               <div className="flex shrink-0 items-center">
-                                <span className="label">Skipped</span>
+                                <span className="label">Skipped today</span>
                                 {!isPreview && (
                                   <>
                                     <span className="label px-1.5" aria-hidden>
@@ -1029,10 +1191,9 @@ export function TrainScreen() {
                             {showHint && hint && (
                               <div className="-mt-1 mb-1 flex flex-wrap items-center gap-x-2 text-xs text-mute">
                                 {hint.kind === "hold" ? (
-                                  // Calmer than an increase: nothing to apply, just "stay here".
-                                  <span title={hint.reason}>
-                                    Missed reps at <span className="num">{lb(hint.lastWeight)}</span> lb · hold
-                                  </span>
+                                  // Calmer than an increase: nothing to apply, just "stay here" — with
+                                  // when it was missed ("Missed reps at 60 lb on Nov 2 · hold").
+                                  <span>{hint.reason.replace(" — ", " · ")}</span>
                                 ) : (
                                   <>
                                     <span title={hint.reason}>
@@ -1044,7 +1205,11 @@ export function TrainScreen() {
                                       type="button"
                                       aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
                                       className="tap label -my-2 min-h-11 px-1.5 text-accent"
-                                      onClick={() => applyHint(ref, hint.suggestedWeight, name)}
+                                      onClick={() => {
+                                        applyHint(ref, hint.suggestedWeight, name);
+                                        // The hint row goes once the sets are at the suggestion.
+                                        focusWhenReady(exControl(ref, "options"));
+                                      }}
                                     >
                                       Apply
                                     </button>
@@ -1053,7 +1218,7 @@ export function TrainScreen() {
                                 <button
                                   type="button"
                                   aria-label={`Dismiss the ${name} hint for today`}
-                                  className="tap -my-2 -ml-1 grid min-h-11 w-8 place-items-center text-mute"
+                                  className="tap -my-2 -ml-2 grid min-h-11 w-11 place-items-center text-mute"
                                   onClick={() => {
                                     dismissHint(e.exerciseId);
                                     focusAfter(exControl(ref, "options"));
@@ -1092,7 +1257,7 @@ export function TrainScreen() {
                                   <button
                                     type="button"
                                     aria-label={`Add ${name} set`}
-                                    className="tap grid h-[52px] w-11 place-items-center rounded-2xl text-mute ring-1 ring-white/[0.06] ring-inset"
+                                    className="tap hc-edge grid h-[52px] w-11 place-items-center rounded-2xl text-mute ring-1 ring-white/[0.06] ring-inset"
                                     onClick={() => addAccessorySet(ref)}
                                   >
                                     <Plus size={14} />
@@ -1117,7 +1282,7 @@ export function TrainScreen() {
             {isPreview ? (
               <p className="text-xs leading-relaxed text-mute">
                 Carried over from your last {weekday}
-                {primaryBlock ? `; main-lift loads use today's max and move with any AMRAP before then` : ""}. Log it on the day.
+                {primaryBlock ? `; main-lift loads use today's max and move with any AMRAP before then` : ""}.
               </p>
             ) : (
               <>
@@ -1168,6 +1333,11 @@ export function TrainScreen() {
                   exName={exName}
                   onFinish={() => {
                     success();
+                    // A leftover Undo (a set logged a moment ago) would undo into a finished session.
+                    if (lastToast.current !== null) {
+                      toast.dismiss(lastToast.current);
+                      lastToast.current = null;
+                    }
                     commit({ ...session, completedAt: new Date().toISOString() });
                     rest.stop();
                   }}
@@ -1180,10 +1350,10 @@ export function TrainScreen() {
                     onClick={() => {
                       const before = session;
                       deleteSession(date);
-                      offerUndo("Reset to plan", () => saveSession(before));
+                      offerUndo(earlyDone ? "Session discarded" : "Reset to plan", () => saveSession(before));
                     }}
                   >
-                    Reset to plan
+                    {earlyDone ? "Discard session" : "Reset to plan"}
                   </button>
                 )}
               </div>
@@ -1201,6 +1371,7 @@ export function TrainScreen() {
         onTarget={rest.setTarget}
         onDismiss={rest.stop}
         nextWeightLb={nextWeightLb}
+        nextPlates={nextIsBarbell}
       />
 
       <SetEditSheet

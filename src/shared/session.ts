@@ -195,6 +195,34 @@ export function buildSessionFrom(sourceDate: ISODate, targetDate: ISODate, ctx: 
   return { ...planned, date: targetDate, plannedFor: sourceDate === targetDate ? null : sourceDate };
 }
 
+/**
+ * The session that did `date`'s plan on another day ("do this session today": a session with
+ * `plannedFor === date` saved under another date), or null. A completed one wins over one only
+ * saved, then the latest. `buildSession(date)` still builds that day's plan; callers decide what
+ * to show (Train shows the day as done early, the checklist credits its lift).
+ */
+export function sessionDoneEarly(date: ISODate, sessions: ReadonlyArray<Session>): Session | null {
+  return movedSessionsByPlan(sessions).get(date) ?? null;
+}
+
+const movedMemo = new WeakMap<object, Map<ISODate, Session>>();
+
+/** `sessionDoneEarly` for every plan date at once (memoized per sessions array). */
+export function movedSessionsByPlan(sessions: ReadonlyArray<Session>): ReadonlyMap<ISODate, Session> {
+  let index = movedMemo.get(sessions);
+  if (!index) {
+    index = new Map();
+    for (const s of sessions) {
+      if (!s.plannedFor || s.plannedFor === s.date) continue;
+      const held = index.get(s.plannedFor);
+      // Completed wins over only saved, then the later date.
+      if (!held || (!!s.completedAt !== !!held.completedAt ? !!s.completedAt : s.date > held.date)) index.set(s.plannedFor, s);
+    }
+    movedMemo.set(sessions, index);
+  }
+  return index;
+}
+
 export interface NextSession {
   date: ISODate;
   /** The program day's label ("Push"). */

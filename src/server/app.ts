@@ -25,6 +25,7 @@ import {
   settingsSchema,
   type Bootstrap,
   type Revs,
+  type Session,
 } from "../shared/schemas";
 import {
   clearSessionCookie,
@@ -41,6 +42,7 @@ import {
   sessionKeys,
   setDeviceCookie,
   setSessionCookie,
+  tokenHash,
   type EpochStore,
   type LoginLimiterOptions,
   type SessionConfig,
@@ -76,8 +78,11 @@ export const CSP_REPORT_BODY_LIMIT_BYTES = 8 * 1024;
 /** CSP reports accepted per client per minute, and from everyone per minute. */
 export const CSP_REPORTS_PER_CLIENT_PER_MIN = 30;
 export const CSP_REPORTS_PER_MIN = 300;
-/** How long a write waits for the one before it (see `writeLock`) before going ahead unchained. */
-export const WRITE_LOCK_WAIT_MS = 5_000;
+/** CSP violations logged per report, and distinct (directive, host) pairs logged per minute. */
+export const CSP_LOG_PER_REPORT = 2;
+export const CSP_LOG_PAIRS_PER_MIN = 20;
+/** Longest blocked host (or keyword) a CSP log line carries. */
+export const CSP_BLOCKED_MAX_CHARS = 100;
 const HEALTH_TIMEOUT_MS = 2_000;
 
 function badRequest(error: z.ZodError) {
@@ -195,27 +200,55 @@ const timing = (entries: Record<string, number>) =>
     .join(", ");
 
 /**
- * Serialises writes in this process, so the dataset version read just before a write and the one
- * just after it bracket that write alone (see the `x-dataset-etag-prev` header). A write that
- * waited longer than `waitMs` goes ahead unserialised (`acquire` resolves null) rather than
- * stalling behind a stuck one.
+ * The data set's version: the `dataset_version` counter, which a trigger on every data table
+ * bumps once per writing transaction inside that transaction (migration 0004), plus the session
+ * epoch and key salt — a restore or a database-level rollback moves those on, so a counter that
+ * starts over (or rolls back) never repeats a tag a device already holds.
  */
-export function writeLock(waitMs = WRITE_LOCK_WAIT_MS) {
-  let tail: Promise<void> = Promise.resolve();
-  return {
-    async acquire(): Promise<(() => void) | null> {
-      let release!: () => void;
-      const mine = new Promise<void>((r) => (release = r));
-      const before = tail;
-      tail = tail.then(() => mine);
-      let timer: NodeJS.Timeout | undefined;
-      const got = await Promise.race([before.then(() => true), new Promise<false>((r) => (timer = setTimeout(() => r(false), waitMs)))]);
-      clearTimeout(timer);
-      if (got) return release;
-      // Gave up waiting: don't hold up those queued behind us once our turn comes.
-      void before.then(release);
-      return null;
-    },
+interface DatasetVersion {
+  v: number;
+  epoch: number;
+  salt: string;
+  /** The transaction this was read in bumped the counter (it wrote data). */
+  bumped: boolean;
+}
+
+/** One cheap lookup: the counter row and the auth row, by primary key. */
+const datasetVersionQuery = sql`
+  select coalesce(d.v, 0)::text as v, coalesce(a.session_epoch, 0) as epoch, coalesce(a.key_salt, '') as salt,
+         coalesce(current_setting('strawvine.dataset_bumped', true), '') = 'on' as bumped
+  from (select 1) one
+  left join dataset_version d on d.id = 1
+  left join auth_state a on a.id = 1`;
+
+async function readDatasetVersion(db: Db | Tx): Promise<DatasetVersion> {
+  const [row] = await db.execute<{ v: string; epoch: number; salt: string; bumped: boolean }>(datasetVersionQuery);
+  return { v: Number(row!.v), epoch: Number(row!.epoch), salt: row!.salt, bumped: !!row!.bumped };
+}
+
+/** The ETag for a data set version (what /bootstrap answers with at that version). */
+export function datasetTag(buildId: string, ver: Omit<DatasetVersion, "bumped">): string {
+  const hash = createHash("sha256").update(`${buildId}\0${ver.v}\0${ver.epoch}\0${ver.salt}`).digest("base64url");
+  return `W/"${hash.slice(0, 27)}"`;
+}
+
+/**
+ * Logs each distinct (directive, blocked) CSP violation at most once per window, and at most
+ * `maxPairs` of them per window: a page that keeps violating (or someone posting reports) can't
+ * flood the logs.
+ */
+function cspLogGate(maxPairs = CSP_LOG_PAIRS_PER_MIN, windowMs = 60_000) {
+  let start = 0;
+  const seen = new Set<string>();
+  return (v: { directive: string; blocked: string }, now = Date.now()): boolean => {
+    if (now - start >= windowMs) {
+      start = now;
+      seen.clear();
+    }
+    const key = `${v.directive}\0${v.blocked}`;
+    if (seen.has(key) || seen.size >= maxPairs) return false;
+    seen.add(key);
+    return true;
   };
 }
 
@@ -250,7 +283,7 @@ export function cspViolations(body: unknown): Array<{ directive: string; blocked
     if (typeof v !== "string" || !v) return "";
     try {
       const u = new URL(v);
-      return u.host || u.protocol.replace(/:$/, "");
+      return (u.host || u.protocol.replace(/:$/, "")).replace(/[^\w\-.:[\]]/g, "").slice(0, CSP_BLOCKED_MAX_CHARS);
     } catch {
       return clean(v.split(/[\s/?#]/)[0], 40); // "inline", "eval", "data", "self"…
     }
@@ -275,17 +308,23 @@ const tooLarge = (c: Context) => c.json({ error: "Request body too large" }, 413
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export const CSP_REPORT_PATH = "/api/csp-report";
 
+/** Per-request values of the authenticated API: the data set's version as of a write. */
+type ApiEnv = { Variables: { dataset?: DatasetVersion; datasetMs?: number } };
+
 /**
- * CSRF guard for the JSON API. Hono's `csrf()` only inspects "simple" form content types and
- * compares Origin with the request URL, whose scheme is http behind Heroku's TLS-terminating
- * router — so this checks Origin against the Host header instead, refuses cross-site fetch
- * metadata, and refuses any body that isn't JSON (a cross-origin JSON request needs a CORS
- * preflight, which this API never grants).
+ * CSRF guard for the JSON API. Any request whose fetch metadata says another site sent it is
+ * refused — writes, and reads too (a cross-site link or navigation could otherwise make the
+ * browser download the export with the athlete's cookie). Hono's `csrf()` only inspects "simple"
+ * form content types and compares Origin with the request URL, whose scheme is http behind
+ * Heroku's TLS-terminating router — so writes check Origin against the Host header instead, and
+ * refuse any body that isn't JSON (a cross-origin JSON request needs a CORS preflight, which this
+ * API never grants).
  */
 const jsonApiGuard: MiddlewareHandler = async (c, next) => {
-  if (!MUTATING.has(c.req.method) || c.req.path === CSP_REPORT_PATH) return next();
+  if (c.req.path === CSP_REPORT_PATH) return next();
   const site = c.req.header("sec-fetch-site");
   if (site && site !== "same-origin" && site !== "none") return c.json({ error: "Cross-site request refused" }, 403);
+  if (!MUTATING.has(c.req.method)) return next();
   const origin = c.req.header("origin");
   if (origin !== undefined) {
     let host: string | null = null;
@@ -386,8 +425,10 @@ export function createApp(opts: AppOptions) {
 
   // ---- CSP reports (Report-Only trial) ----------------------------------------
   // No auth (browsers send reports without credentials), small bodies, rate-limited; logs only
-  // the violated directive and the blocked resource's host.
+  // the violated directive and the blocked resource's host — each pair once a minute, at most
+  // CSP_LOG_PER_REPORT lines per report and CSP_LOG_PAIRS_PER_MIN lines a minute.
   const cspLimit = windowLimiter(CSP_REPORTS_PER_CLIENT_PER_MIN, CSP_REPORTS_PER_MIN);
+  const cspLogOnce = cspLogGate();
   app.post(CSP_REPORT_PATH, async (c) => {
     if (!cspLimit(clientKey(clientIp(c, !!opts.trustProxy)))) return c.body(null, 429);
     let body: unknown = null;
@@ -396,7 +437,14 @@ export function createApp(opts: AppOptions) {
     } catch {
       return c.body(null, 400);
     }
-    for (const v of cspViolations(body)) log("CSP violation (report-only)", v);
+    let logged = 0;
+    for (const v of cspViolations(body)) {
+      if (logged >= CSP_LOG_PER_REPORT) break;
+      if (cspLogOnce(v)) {
+        log("CSP violation (report-only)", v);
+        logged++;
+      }
+    }
     return c.body(null, 204);
   });
 
@@ -449,49 +497,57 @@ export function createApp(opts: AppOptions) {
     return c.json({ ok: true });
   });
 
-  const api = new Hono();
+  const api = new Hono<ApiEnv>();
   api.use("*", requireAuth(session));
 
   // ---- dataset version on writes ------------------------------------------------
-  // Every successful write answers with the dataset's new version (`x-dataset-etag`, the ETag
-  // /bootstrap would give now) and the version just before it (`x-dataset-etag-prev`). Writes in
-  // this process are serialised so the two bracket this write alone: a client whose copy was at
-  // `prev` holds exactly the `x-dataset-etag` version once it applies the response, and its next
-  // revalidation is a 304. (`prev` is left out when a write couldn't be serialised in time.)
-  const writes = writeLock();
-  /** The dataset tag, or null when it can't be read (a write never fails over its version header). */
-  const tagOrNull = () => datasetTag().catch(() => null);
+  // Every successful write answers with the dataset's version after it (`x-dataset-etag`, the
+  // ETag /bootstrap gives once it's committed) and just before it (`x-dataset-etag-prev`). Both
+  // are exact: the counter is bumped by the write's own transaction (a trigger, migration 0004)
+  // and read at its end, while the bump's row lock keeps every other writer — in this process,
+  // another dyno, or an older release — out until it commits. So a client whose copy was at
+  // `prev` holds exactly the new version once it applies the response, and its next
+  // revalidation is a 304. A write that changed nothing (an idempotent replay, a delete of
+  // nothing) answers with the current version as both.
+  const buildId = opts.buildId ?? "dev";
+  const tagOf = (ver: Omit<DatasetVersion, "bumped">) => datasetTag(buildId, ver);
+  /** Reads the data set's version at the end of a write's transaction (see the middleware below). */
+  const recordVersion = async (c: Context<ApiEnv>, tx: Tx) => {
+    const t0 = performance.now();
+    c.set("dataset", await readDatasetVersion(tx));
+    c.set("datasetMs", performance.now() - t0);
+  };
+  /** Runs a write in a transaction and records the data set's version as of its end. */
+  const write = <T>(c: Context<ApiEnv>, fn: (tx: Tx) => Promise<T>): Promise<T> =>
+    db.transaction(async (tx) => {
+      const out = await fn(tx);
+      await recordVersion(c, tx);
+      return out;
+    });
   api.use("*", async (c, next) => {
     if (!MUTATING.has(c.req.method) || c.req.path.startsWith("/api/auth/")) return next();
-    const release = await writes.acquire();
-    try {
-      const t0 = performance.now();
-      const prev = release ? await tagOrNull() : null;
-      const t1 = performance.now();
-      await next();
-      const t2 = performance.now();
-      let stampMs = t1 - t0;
-      if (c.res.status >= 200 && c.res.status < 300) {
-        const tag = await tagOrNull();
-        stampMs += performance.now() - t2;
-        if (tag) {
-          c.res.headers.set("x-dataset-etag", tag);
-          if (prev) c.res.headers.set("x-dataset-etag-prev", prev);
-        }
-      }
-      c.res.headers.set("Server-Timing", timing({ db: t2 - t1, etag: stampMs }));
-    } finally {
-      release?.();
+    const t0 = performance.now();
+    await next();
+    const ver = c.get("dataset");
+    const etagMs = c.get("datasetMs") ?? 0;
+    if (ver && c.res.status >= 200 && c.res.status < 300) {
+      c.res.headers.set("x-dataset-etag", tagOf(ver));
+      c.res.headers.set("x-dataset-etag-prev", tagOf(ver.bumped ? { ...ver, v: ver.v - 1 } : ver));
     }
+    c.res.headers.set("Server-Timing", timing({ db: performance.now() - t0 - etagMs, etag: etagMs }));
   });
 
   api.get("/auth/me", (c) => c.json({ ok: true }));
 
   /**
    * "Forget this device": signs this browser out (only this one — other devices stay signed in)
-   * and drops its known-device mark, so the login limiter treats it like any unknown client.
+   * and drops its known-device mark, so the login limiter treats it like any unknown client. The
+   * session token is revoked server-side too, so a copy of the cookie (or a browser that never
+   * applied this response) can't keep using it.
    */
-  api.post("/auth/forget-device", (c) => {
+  api.post("/auth/forget-device", async (c) => {
+    const current = await currentSession(c, session);
+    if (current) await session.epochs.revoke?.(tokenHash(current.token), new Date(current.expiresAt));
     deleteCookie(c, deviceCookieName(opts.secureCookies), { path: "/", secure: opts.secureCookies });
     clearSessionCookie(c, session);
     c.header("Clear-Site-Data", '"cache"');
@@ -500,33 +556,13 @@ export function createApp(opts: AppOptions) {
 
   // ---- bootstrap ----------------------------------------------------------
   // Never stored by the browser (`no-store`: health data stays out of the HTTP cache). The
-  // client keeps its own copy and revalidates it with `If-None-Match`: the ETag comes from a
-  // cheap version stamp of every table (row counts, last update, row versions), so an unchanged
-  // dataset answers 304 without reading or serialising it.
-  const versionStamp = async (): Promise<string> => {
-    const [row] = await db.execute<{ stamp: string }>(sql`
-      select concat_ws('|',
-        (select count(*) || ':' || coalesce(max(updated_at)::text, '') || ':' || coalesce(sum(xmin::text::bigint), 0) from day_logs),
-        (select count(*) || ':' || coalesce(max(updated_at)::text, '') || ':' || coalesce(sum(xmin::text::bigint), 0) from sessions),
-        (select count(*) || ':' || coalesce(max(updated_at)::text, '') || ':' || coalesce(sum(xmin::text::bigint), 0) from exercises),
-        (select count(*) || ':' || coalesce(max(id), 0) || ':' || coalesce(sum(xmin::text::bigint), 0) from max_entries),
-        (select count(*) || ':' || coalesce(sum(xmin::text::bigint), 0) from seen_achievements),
-        (select coalesce(max(updated_at)::text, '') || ':' || coalesce(sum(xmin::text::bigint), 0) from settings),
-        (select coalesce(max(session_epoch), 0) || ':' || coalesce(max(key_salt), '') from auth_state)
-      ) as stamp`);
-    return row!.stamp;
-  };
-
-  /** The dataset's ETag right now (what /bootstrap answers with). */
-  const datasetTag = async () =>
-    `W/"${createHash("sha256")
-      .update(`${opts.buildId ?? "dev"}\0${await versionStamp()}`)
-      .digest("base64url")
-      .slice(0, 27)}"`;
-
+  // client keeps its own copy and revalidates it with `If-None-Match`: the ETag comes from the
+  // data set's version (one primary-key lookup), so an unchanged data set answers 304 without
+  // reading or serialising it. The version is read before the data, so a write committing in
+  // between can only make the body newer than its tag (one extra download later), never older.
   api.get("/bootstrap", async (c) => {
     const t0 = performance.now();
-    const tag = await datasetTag();
+    const tag = tagOf(await readDatasetVersion(db));
     c.header("ETag", tag);
     c.header("Cache-Control", "no-store");
     if (etagMatches(c.req.header("If-None-Match"), tag)) {
@@ -571,11 +607,13 @@ export function createApp(opts: AppOptions) {
     if (!date.success) return c.json(badRequest(date.error), 400);
     if (!patch.success) return c.json(badRequest(patch.error), 400);
     const values = { ...patch.data, updatedAt: new Date() };
-    const [row] = await db
-      .insert(dayLogs)
-      .values({ date: date.data, ...values })
-      .onConflictDoUpdate({ target: dayLogs.date, set: values })
-      .returning();
+    const [row] = await write(c, (tx) =>
+      tx
+        .insert(dayLogs)
+        .values({ date: date.data, ...values })
+        .onConflictDoUpdate({ target: dayLogs.date, set: values })
+        .returning(),
+    );
     return c.json(toDay(row!));
   });
 
@@ -585,7 +623,7 @@ export function createApp(opts: AppOptions) {
     const parsed = settingsSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
     const pre = precondition(c);
-    const out = await db.transaction(async (tx) => {
+    const out = await write(c, async (tx) => {
       const [cur] = await tx
         .select({ data: settings.data, rev: xmin(settings) })
         .from(settings)
@@ -609,10 +647,15 @@ export function createApp(opts: AppOptions) {
   api.post("/exercises", async (c) => {
     const parsed = exerciseCreateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
-    return idempotent(c, { path: "/api/exercises", body: parsed.data }, async (tx) => {
-      const [row] = await tx.insert(exercises).values(parsed.data).returning();
-      return { status: 201, body: toExercise(row!) };
-    });
+    return idempotent(
+      c,
+      { path: "/api/exercises", body: parsed.data },
+      async (tx) => {
+        const [row] = await tx.insert(exercises).values(parsed.data).returning();
+        return { status: 201, body: toExercise(row!) };
+      },
+      { beforeCommit: (tx) => recordVersion(c, tx) },
+    );
   });
 
   api.patch("/exercises/:id", async (c) => {
@@ -620,11 +663,13 @@ export function createApp(opts: AppOptions) {
     if (!id.success) return c.json(badRequest(id.error), 400);
     const parsed = exercisePatchSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
-    const [row] = await db
-      .update(exercises)
-      .set({ ...parsed.data, updatedAt: new Date() })
-      .where(eq(exercises.id, id.data))
-      .returning();
+    const [row] = await write(c, (tx) =>
+      tx
+        .update(exercises)
+        .set({ ...parsed.data, updatedAt: new Date() })
+        .where(eq(exercises.id, id.data))
+        .returning(),
+    );
     return row ? c.json(toExercise(row)) : c.json({ error: "not found" }, 404);
   });
 
@@ -637,19 +682,24 @@ export function createApp(opts: AppOptions) {
     const [ex] = await db.select().from(exercises).where(eq(exercises.id, exerciseId));
     if (!ex) return c.json({ error: "not found" }, 404);
     const { createdAt, ...entry } = parsed.data;
-    return idempotent(c, { path: `/api/exercises/${exerciseId}/maxes`, body: parsed.data }, async (tx) => {
-      const [row] = await tx
-        .insert(maxEntries)
-        .values({ exerciseId, ...entry, createdAt: clampCreatedAt(createdAt) })
-        .returning();
-      return { status: 201, body: toMax(row!) };
-    });
+    return idempotent(
+      c,
+      { path: `/api/exercises/${exerciseId}/maxes`, body: parsed.data },
+      async (tx) => {
+        const [row] = await tx
+          .insert(maxEntries)
+          .values({ exerciseId, ...entry, createdAt: clampCreatedAt(createdAt) })
+          .returning();
+        return { status: 201, body: toMax(row!) };
+      },
+      { beforeCommit: (tx) => recordVersion(c, tx) },
+    );
   });
 
   api.delete("/maxes/:id", async (c) => {
     const id = idParam.safeParse(c.req.param("id"));
     if (!id.success) return c.json(badRequest(id.error), 400);
-    const found = await db.transaction(async (tx) => {
+    const found = await write(c, async (tx) => {
       const rows = await tx.delete(maxEntries).where(eq(maxEntries.id, id.data)).returning({ id: maxEntries.id });
       // A stored "created" response for a row that no longer exists must not be replayed.
       if (rows.length) await forgetMaxCreate(tx, id.data);
@@ -660,37 +710,76 @@ export function createApp(opts: AppOptions) {
 
   // ---- sessions ---------------------------------------------------------------
   // Version-checked like settings. The new revision comes back as the response's ETag.
+  const currentSessionDoc = (tx: Tx, date: string, lock: boolean) => {
+    const q = tx
+      .select({ data: sessions.data, rev: xmin(sessions) })
+      .from(sessions)
+      .where(eq(sessions.date, date));
+    return lock ? q.for("update") : q;
+  };
+
   api.put("/sessions/:date", async (c) => {
     const parsed = sessionSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
     if (parsed.data.date !== c.req.param("date")) return c.json({ error: "date mismatch" }, 400);
     const pre = precondition(c);
     const doc = parsed.data;
-    const out = await db.transaction(async (tx: Tx) => {
-      if (pre) {
-        const [cur] = await tx
-          .select({ data: sessions.data, rev: xmin(sessions) })
-          .from(sessions)
-          .where(eq(sessions.date, doc.date))
-          .for("update");
-        if (cur && conflicts(pre, cur.rev)) return { conflict: cur };
+    type Out = { conflict: { data: Session; rev: string } } | { rev: string | null; conflict?: undefined };
+    const out = await write(c, async (tx): Promise<Out> => {
+      if (!pre) {
+        const [row] = await tx
+          .insert(sessions)
+          .values({ date: doc.date, data: doc })
+          .onConflictDoUpdate({ target: sessions.date, set: { data: doc, updatedAt: new Date() } })
+          .returning({ rev: xmin(sessions) });
+        return { rev: row?.rev ?? null };
       }
-      const [row] = await tx
-        .insert(sessions)
-        .values({ date: doc.date, data: doc })
-        .onConflictDoUpdate({ target: sessions.date, set: { data: doc, updatedAt: new Date() } })
-        .returning({ rev: xmin(sessions) });
-      return { rev: row?.rev ?? null };
+      for (let attempt = 0; ; attempt++) {
+        const [cur] = await currentSessionDoc(tx, doc.date, true);
+        if (cur) {
+          if (conflicts(pre, cur.rev)) return { conflict: cur };
+          const [row] = await tx
+            .update(sessions)
+            .set({ data: doc, updatedAt: new Date() })
+            .where(eq(sessions.date, doc.date))
+            .returning({ rev: xmin(sessions) });
+          return { rev: row?.rev ?? null };
+        }
+        // None saved (a row deleted since isn't a conflict). `select … for update` locks nothing
+        // when there's no row, so create it atomically: when another save creates it first (in
+        // any process), this insert waits for that one to commit and inserts nothing — a 409
+        // with that save's document, whatever the precondition said.
+        const [row] = await tx
+          .insert(sessions)
+          .values({ date: doc.date, data: doc })
+          .onConflictDoNothing()
+          .returning({ rev: xmin(sessions) });
+        if (row) return { rev: row.rev };
+        const [created] = await currentSessionDoc(tx, doc.date, false);
+        if (created) return { conflict: created };
+        if (attempt >= 2) throw new Error("session row kept changing"); // created and deleted again, three times over
+      }
     });
     if (out.conflict) return c.json({ error: "conflict", current: out.conflict.data, rev: out.conflict.rev }, 409);
     if (out.rev) c.header("ETag", `"${out.rev}"`);
     return c.json(doc);
   });
 
+  // Version-checked like saves: `If-Match` with a revision the session no longer has is a 409
+  // with the current document (another device changed it since; the client keeps that copy).
   api.delete("/sessions/:date", async (c) => {
     const date = isoDate.safeParse(c.req.param("date"));
     if (!date.success) return c.json(badRequest(date.error), 400);
-    await db.delete(sessions).where(eq(sessions.date, date.data));
+    const pre = precondition(c);
+    const conflict = await write(c, async (tx) => {
+      if (pre) {
+        const [cur] = await currentSessionDoc(tx, date.data, true);
+        if (cur && conflicts(pre, cur.rev)) return cur;
+      }
+      await tx.delete(sessions).where(eq(sessions.date, date.data));
+      return null;
+    });
+    if (conflict) return c.json({ error: "conflict", current: conflict.data, rev: conflict.rev }, 409);
     return c.json({ ok: true });
   });
 
@@ -698,11 +787,13 @@ export function createApp(opts: AppOptions) {
   api.post("/achievements/seen", async (c) => {
     const parsed = z.object({ keys: z.array(safeString().max(120)).max(500) }).safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json(badRequest(parsed.error), 400);
-    if (parsed.data.keys.length)
-      await db
-        .insert(seenAchievements)
-        .values(parsed.data.keys.map((key) => ({ key })))
-        .onConflictDoNothing();
+    await write(c, async (tx) => {
+      if (parsed.data.keys.length)
+        await tx
+          .insert(seenAchievements)
+          .values(parsed.data.keys.map((key) => ({ key })))
+          .onConflictDoNothing();
+    });
     return c.json({ ok: true });
   });
 

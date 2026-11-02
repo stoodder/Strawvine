@@ -7,13 +7,33 @@ import * as schema from "./schema";
 export type Db = ReturnType<typeof createDb>["db"];
 export type Sql = ReturnType<typeof createDb>["sql"];
 
-export function createDb(url: string) {
+/** How long one statement of a web request may run before Postgres cancels it (see `createWebDb`). */
+export const WEB_STATEMENT_TIMEOUT_MS = 10_000;
+
+export interface DbOptions {
+  /** Server-side `statement_timeout` for every connection of the pool (none when omitted). */
+  statementTimeoutMs?: number;
+}
+
+export function createDb(url: string, { statementTimeoutMs }: DbOptions = {}) {
   const local = /@(localhost|127\.0\.0\.1|db)(:|\/)/.test(url);
   // Heroku Postgres requires TLS but presents a certificate that isn't publicly chained.
-  const sql = postgres(url, { ssl: local ? false : { rejectUnauthorized: false }, max: 5, onnotice: () => {} });
+  const sql = postgres(url, {
+    ssl: local ? false : { rejectUnauthorized: false },
+    max: 5,
+    onnotice: () => {},
+    ...(statementTimeoutMs ? { connection: { statement_timeout: statementTimeoutMs } } : {}),
+  });
   const db = drizzle(sql, { schema });
   return { db, sql };
 }
+
+/**
+ * The web server's pool: a statement that runs longer than WEB_STATEMENT_TIMEOUT_MS is cancelled
+ * (a stuck query or lock wait fails that request instead of holding a connection and every
+ * write queued behind it). Migrations, restore and the release phase use `createDb` without one.
+ */
+export const createWebDb = (url: string) => createDb(url, { statementTimeoutMs: WEB_STATEMENT_TIMEOUT_MS });
 
 export async function runMigrations(db: Db) {
   await migrate(db, { migrationsFolder: path.resolve(process.cwd(), "drizzle") });
