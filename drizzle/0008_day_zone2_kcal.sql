@@ -1,0 +1,1 @@
+ALTER TABLE "day_logs" ADD COLUMN "zone2_kcal" integer;

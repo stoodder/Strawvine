@@ -27,6 +27,7 @@ export function emptyDayLog(date: string): DayLog {
     soreness: null,
     zone2Done: false,
     zone2Minutes: null,
+    zone2Kcal: null,
     metconDone: false,
     metconNotes: null,
     metconBenchmark: null,

@@ -319,19 +319,42 @@ export function StepsEditor({ day, patch, target }: EditorProps & { target: numb
   );
 }
 
+/**
+ * Duration (entering one ticks the session off) and, optionally, the machine's calorie reading. The
+ * reading is just that: it never counts toward the day's intake, the TDEE or the targets, and it
+ * doesn't tick the session off. A reading out of range is refused, not clamped.
+ */
 export function Zone2Editor({ day, patch }: EditorProps) {
   return (
-    <div className="flex items-baseline gap-2">
-      <NumberInput
-        ariaLabel="Zone 2 minutes"
-        value={day.zone2Minutes}
-        onCommit={(v) => patch({ zone2Minutes: v, zone2Done: v !== null && v > 0 ? true : day.zone2Done })}
-        placeholder="30"
-        inputClassName="text-5xl font-light tracking-tight"
-        min={0}
-        max={600}
-      />
-      <span className="text-sm text-mute">min</span>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2">
+        <div className="flex items-baseline gap-2">
+          <NumberInput
+            ariaLabel="Zone 2 minutes"
+            value={day.zone2Minutes}
+            onCommit={(v) => patch({ zone2Minutes: v, zone2Done: v !== null && v > 0 ? true : day.zone2Done })}
+            placeholder="30"
+            inputClassName="text-5xl font-light tracking-tight"
+            min={0}
+            max={600}
+          />
+          <span className="text-sm text-mute">min</span>
+        </div>
+        {/* Read with `??`: a day cached by an older build has no such field. The unit sits inside the
+            field's label, so the range hint (when a reading is refused) goes under both. */}
+        <NumberInput
+          ariaLabel="Zone 2 machine calories"
+          value={day.zone2Kcal ?? null}
+          onCommit={(v) => patch({ zone2Kcal: v })}
+          inputClassName="text-3xl font-light tracking-tight"
+          unit={<span className="ml-1 text-sm">kcal</span>}
+          min={0}
+          max={3000}
+          outOfRange="reject"
+          rangeHint="0–3000 kcal"
+        />
+      </div>
+      <p className="text-xs text-mute">Machine reading · not added to intake</p>
     </div>
   );
 }

@@ -42,9 +42,10 @@ export const EXPORT_FORMAT = "strawvine-export";
  * v3: adds exercises[].weighted (v1/v2 exercises restore as weighted, as everything was then).
  * v4: adds days[].restingHrBpm, vo2Max, alcohol, nicotine, thc and caffeine (absent in older
  * exports: restored as null, not recorded).
+ * v5: adds days[].zone2Kcal (older exports: restored as null).
  * A restore refuses versions newer than this one (fields it would silently drop).
  */
-export const EXPORT_VERSION = 4;
+export const EXPORT_VERSION = 5;
 
 /** A day as exports hold it: fields added after v1 may be missing from older files (read as null). */
 const exportDaySchema = dayLogSchema.extend({
@@ -54,6 +55,7 @@ const exportDaySchema = dayLogSchema.extend({
   nicotine: dayLogFields.nicotine.default(null),
   thc: dayLogFields.thc.default(null),
   caffeine: dayLogFields.caffeine.default(null),
+  zone2Kcal: dayLogFields.zone2Kcal.default(null),
 });
 
 export interface ExportFile {

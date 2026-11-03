@@ -25,6 +25,8 @@ export const dayLogs = pgTable("day_logs", {
   soreness: integer("soreness"),
   zone2Done: boolean("zone2_done").notNull().default(false),
   zone2Minutes: doublePrecision("zone2_minutes"),
+  /** The Zone 2 machine's calorie reading (whole kcal); never part of intake or the TDEE. */
+  zone2Kcal: integer("zone2_kcal"),
   metconDone: boolean("metcon_done").notNull().default(false),
   metconNotes: text("metcon_notes"),
   metconBenchmark: varchar("metcon_benchmark", { length: 120 }),

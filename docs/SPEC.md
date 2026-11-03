@@ -40,7 +40,7 @@ All fields are optional and can be edited at any time during the day (or later).
 | Morning check-in | body weight (lb), sleep score, HRV (ms), sleep duration, energy (1–5), soreness (1–5); optional resting HR (bpm) and VO2 max (mL/kg/min) (§3.3) |
 | Nutrition        | calories, protein, carbs, fat; optional micronutrients; "Also today": alcohol, nicotine, THC, caffeine (tracking only, §3.4)                    |
 | Steps            | daily count                                                                                                                                     |
-| Zone 2           | done + duration (default 30 min)                                                                                                                |
+| Zone 2           | done + duration (default 30 min); optional machine kcal reading — a reading only, never part of intake or the TDEE (§3.5)                       |
 | Metcon           | done, optional notes, optional benchmark name (autocompleted from past ones) + score                                                            |
 | Lifting          | the session (see §6)                                                                                                                            |
 | Journal          | free-form text for the day                                                                                                                      |
@@ -139,12 +139,26 @@ tile.
   when none.
 - Nothing reads them yet: no insight, checklist item or score.
 
+### 3.5 Zone 2 machine kcal
+
+- The Zone 2 editor takes the machine's calorie reading (`zone2Kcal`, whole kcal, 0–3000) beside the duration, captioned
+  "Machine reading · not added to intake". Optional; out of range it is refused like the recovery readings (§3.3), the
+  range said under the field ("0–3000 kcal").
+- It is **a reading only**: it is not the day's calories and is excluded from intake, the TDEE estimate (§4), energy
+  balance, calorie and macro targets, the fuel bars (§3.1), adherence, the check-in's intake average and every insight.
+  Nothing but the Zone 2 row and the check-in's Zone 2 count reads it.
+- It doesn't close anything: the Zone 2 item is still done by "done" (the dot, or entering a duration), never by the
+  reading alone.
+- The Zone 2 row's summary on Today adds it once logged ("Cycling · 320 kcal"); the weekly check-in (§4.6) adds the
+  week's total under the Zone 2 count ("940 kcal"), and the shared check-in text after it ("Zone 2 3/5 (940 kcal on the
+  machine)").
+
 ## 4. Energy engine (TDEE)
 
 Units: **lb**, **3,500 kcal per lb**.
 
 A day is **logged** only when it has **both** a weight and a calorie entry. Unlogged days are skipped
-everywhere below.
+everywhere below. "Calories" is always the day's intake: the Zone 2 machine's kcal reading (§3.5) is never part of it.
 
 ### 4.1 Descending weighted 7-day average
 
@@ -194,7 +208,8 @@ into milestones (first weigh-in → averages online → first TDEE → calibrate
 
 Smoothed TDEE, actual vs target rate, adherence (each day's calories against the target that day showed, within
 ±10%), averages (intake, protein, steps, sleep, HRV, and resting HR once logged), the latest VO2 max with its change
-over ~30 days (§3.3), and next week's recommended calories & macros.
+over ~30 days (§3.3), lifts / metcon / Zone 2 done against planned (Zone 2 with the week's total machine kcal once
+logged, §3.5), and next week's recommended calories & macros.
 
 ## 5. Goals
 
@@ -428,11 +443,11 @@ optional note.
   sets only the fields a patch names, so another device's edit of a different field survives. A patch the exercise
   locks refuse (§6.5: a program day's main lift, a lift with a strength target) is answered 409 with the reason and no
   document — not a version conflict, so it isn't merged or re-sent: it shows as a change not saved (Retry / Discard)
-  with that reason. A measure change sends no workout: sessions follow it when read (§6.5). Exports are version 4
-  (v3: exercises carry `weighted`; v4: days carry resting HR, VO2 max and the four "Also today" flags); older ones
-  restore every exercise as weighted and those day fields as null (not recorded). Migration 0006 turned the flag off once
-  for existing exercises with no sign of a load (not main lifts or max-tracked, no max entry, strength target, program
-  day or logged/planned load).
+  with that reason. A measure change sends no workout: sessions follow it when read (§6.5). Exports are version 5
+  (v3: exercises carry `weighted`; v4: days carry resting HR, VO2 max and the four "Also today" flags; v5: days carry
+  the Zone 2 machine kcal); older ones restore every exercise as weighted and those day fields as null (not recorded).
+  Migration 0006 turned the flag off once for existing exercises with no sign of a load (not main lifts or max-tracked,
+  no max entry, strength target, program day or logged/planned load).
 - Edits the server would reject (limits a person can hit: too many sets, an overlong note…) are refused before they are
   queued; Settings → Sync lists the last 20 with why, until cleared.
 - **Version-checked saves.** Workouts and settings are saved as whole documents, each with a server revision. An edit

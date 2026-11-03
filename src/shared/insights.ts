@@ -49,6 +49,8 @@ export interface WeeklyCheckin {
   calorieAdherence: number | null;
   avgSteps: number | null;
   zone2: { done: number; planned: number };
+  /** The week's total of the Zone 2 machine's calorie readings (a reading only, not intake); null when none logged. */
+  zone2Kcal: number | null;
   metcon: { done: number; planned: number };
   lifts: { done: number; planned: number };
   avgSleepMinutes: number | null;
@@ -61,6 +63,7 @@ export interface WeeklyCheckin {
 }
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+const sumOrNull = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) : null);
 
 export interface Model {
   today: ISODate;
@@ -126,6 +129,7 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
       (d) => !!settings.schedule.zone2[weekdayOf(d)],
       (d) => !!byDate.get(d)?.zone2Done,
     ),
+    zone2Kcal: sumOrNull(days.filter((d) => d.zone2Kcal != null).map((d) => d.zone2Kcal!)),
     metcon: count(
       (d) => !!settings.schedule.metcon[weekdayOf(d)],
       (d) => !!byDate.get(d)?.metconDone,

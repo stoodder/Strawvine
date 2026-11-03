@@ -129,6 +129,38 @@ describe("api", () => {
     expect(await res.json()).toMatchObject({ restingHrBpm: 48, vo2Max: 52.3 });
   });
 
+  it("stores the Zone 2 machine kcal reading beside the duration, without touching the day's calories", async () => {
+    let res = await req("/api/days/2026-11-03", json("PUT", { zone2Done: true, zone2Minutes: 30, zone2Kcal: 320 }));
+    expect(res.status).toBe(200);
+    const stored = await res.json();
+    expect(stored).toMatchObject({ zone2Done: true, zone2Minutes: 30, zone2Kcal: 320 });
+    const calories = stored.calories;
+    // A patch without it (an older build's, or another field) leaves it alone.
+    res = await req("/api/days/2026-11-03", json("PUT", { zone2Minutes: 35 }));
+    expect(await res.json()).toMatchObject({ zone2Minutes: 35, zone2Kcal: 320, calories });
+    // Cleared, then set again: round trip through bootstrap.
+    res = await req("/api/days/2026-11-03", json("PUT", { zone2Kcal: null }));
+    expect(await res.json()).toMatchObject({ zone2Kcal: null });
+    res = await req("/api/days/2026-11-03", json("PUT", { zone2Minutes: 30, zone2Kcal: 320 }));
+    expect(await res.json()).toMatchObject({ zone2Kcal: 320, calories });
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(b.days.find((d) => d.date === "2026-11-03")).toMatchObject({ zone2Minutes: 30, zone2Kcal: 320, calories });
+    // A day that never had it reads as null.
+    expect(b.days.find((d) => d.date === "2026-11-02")).toMatchObject({ zone2Kcal: null });
+  });
+
+  it("refuses a Zone 2 kcal reading out of 0–3000 or not a whole number", async () => {
+    for (const zone2Kcal of [0, 3000, 320]) {
+      const res = await req("/api/days/2026-11-03", json("PUT", { zone2Kcal }));
+      expect(res.status, String(zone2Kcal)).toBe(200);
+      expect(await res.json()).toMatchObject({ zone2Kcal });
+    }
+    for (const zone2Kcal of [-1, 3001, 320.5, "320", true])
+      expect((await req("/api/days/2026-11-03", json("PUT", { zone2Kcal }))).status, JSON.stringify(zone2Kcal)).toBe(400);
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(b.days.find((d) => d.date === "2026-11-03")).toMatchObject({ zone2Kcal: 320 });
+  });
+
   it("validates input", async () => {
     expect((await req("/api/days/2026-13-40", json("PUT", { weightLb: 200 }))).status).toBe(400);
     expect((await req("/api/days/2026-11-02", json("PUT", { weightLb: "heavy" }))).status).toBe(400);
@@ -924,11 +956,12 @@ describe("export & restore", () => {
     const res = await req("/api/export");
     expect(res.headers.get("content-disposition")).toMatch(/^attachment; filename="strawvine-export-\d{4}-\d{2}-\d{2}\.json"$/);
     const exported = await res.json();
-    expect(exported).toMatchObject({ format: "strawvine-export", version: 4 });
+    expect(exported).toMatchObject({ format: "strawvine-export", version: 5 });
     expect(exported.days.find((d: { date: string }) => d.date === "2026-11-03")).toMatchObject({
       restingHrBpm: 48,
       vo2Max: 52.3,
       thc: true,
+      zone2Kcal: 320,
     });
     expect(exported.seenAchievements.map((s: { key: string }) => s.key)).toEqual(["calib-1", "etag-test", "streak-3"]);
     expect(exported.exercises[0].createdAt).toMatch(/Z$/);
@@ -968,10 +1001,10 @@ describe("export & restore", () => {
 
   it("restores a v2 export (before the weighted flag) as weighted, and refuses newer versions", async () => {
     const current = await buildExport(db);
-    expect(current.version).toBe(4);
+    expect(current.version).toBe(5);
     expect(current.exercises.some((e) => !e.weighted)).toBe(true);
     const v2 = { ...current, version: 2, exercises: current.exercises.map(({ weighted: _w, ...e }) => e) };
-    await expect(restoreExport(db, { ...current, version: 5 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
+    await expect(restoreExport(db, { ...current, version: 6 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
     await restoreExport(db, v2, { force: true });
     const after = await buildExport(db);
     expect(after.exercises.map((e) => e.weighted)).toEqual(current.exercises.map(() => true));
@@ -1015,6 +1048,31 @@ describe("export & restore", () => {
       const bad = { ...current, days: current.days.map((d) => (d.date === "2026-11-03" ? { ...d, ...patch } : d)) };
       const field = Object.keys(patch)[0]!;
       await expect(restoreExport(db, bad, { force: true }), JSON.stringify(patch)).rejects.toThrow(new RegExp(`days\\.\\d+\\.${field}`));
+    }
+    // Back to the data as it was, for the tests below.
+    await restoreExport(db, current, { force: true });
+    expect((await buildExport(db)).days).toEqual(current.days);
+  });
+
+  it("restores a v4 export (days before the Zone 2 kcal reading) with it as null, and refuses v6", async () => {
+    const current = await buildExport(db);
+    const day = current.days.find((d) => d.date === "2026-11-03")!;
+    expect(day).toMatchObject({ zone2Minutes: 30, zone2Kcal: 320 });
+    const v4 = { ...current, version: 4, days: current.days.map(({ zone2Kcal: _z, ...d }) => d) };
+    await expect(restoreExport(db, { ...current, version: 6 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
+    await restoreExport(db, v4, { force: true });
+    const after = await buildExport(db);
+    expect(after.days.find((d) => d.date === "2026-11-03")).toMatchObject({
+      zone2Minutes: 30,
+      restingHrBpm: day.restingHrBpm,
+      calories: day.calories,
+      zone2Kcal: null,
+    });
+    expect(after.days.every((d) => d.zone2Kcal === null)).toBe(true);
+    // A current export refuses a malformed reading.
+    for (const zone2Kcal of [3001, -5, 320.5, "320"]) {
+      const bad = { ...current, days: current.days.map((d) => (d.date === "2026-11-03" ? { ...d, zone2Kcal } : d)) };
+      await expect(restoreExport(db, bad, { force: true }), JSON.stringify(zone2Kcal)).rejects.toThrow(/days\.\d+\.zone2Kcal/);
     }
     // Back to the data as it was, for the tests below.
     await restoreExport(db, current, { force: true });

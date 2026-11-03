@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import { addDays, dateRange } from "./dates";
 import { defaultSettings } from "./defaults";
 import { computeEnergySeries } from "./energy";
-import type { AppData } from "./gamify";
+import { dayChecklist, type AppData } from "./gamify";
 import { buildModel, insights, targetsFor, weeklyCheckin } from "./insights";
+import { overTarget } from "./nutrition";
 import { emptyDayLog, type DayLog, type Settings } from "./schemas";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -149,5 +150,62 @@ describe("insights", () => {
   it("says nothing without data", () => {
     const d = data([]);
     expect(insights(d, [], today, { basis: null, tdee: null, recommendation: null })).toEqual([]);
+  });
+});
+
+describe("Zone 2 machine kcal", () => {
+  // 40 days of a cut with varied intake and weight, Zone 2 on most of them; today half logged.
+  const goal = { targetLb: 185, pacePctPerWeek: 0.75, setOn: addDays(today, -40), startLb: 204 };
+  const s = { ...settings, weightGoal: goal };
+  const base = dateRange(addDays(today, -40), today).map((date, i) => ({
+    ...emptyDayLog(date),
+    weightLb: i % 6 === 3 ? null : Math.round((204 - i * 0.12 + (i % 3) * 0.3) * 10) / 10,
+    calories: i % 7 === 4 ? null : 2400 + ((i * 37) % 5) * 90,
+    proteinG: 190 + (i % 4) * 6,
+    zone2Done: i % 2 === 0,
+    zone2Minutes: i % 2 === 0 ? 30 + (i % 3) * 10 : null,
+  }));
+  const withKcal = base.map((d, i) => ({ ...d, zone2Kcal: i % 2 === 0 ? 250 + (i % 5) * 150 : i % 3 === 0 ? 3000 : null }));
+
+  it("leaves intake, the TDEE, targets, macros, fuel bars, insights and closing the day exactly as without it", () => {
+    expect(withKcal.filter((d) => d.zone2Kcal !== null).length).toBeGreaterThan(20);
+    const a = buildModel(data(base, { settings: s }), today);
+    const b = buildModel(data(withKcal, { settings: s }), today);
+    expect(a.targets.recommendation).not.toBeNull();
+    expect(b.series).toEqual(a.series);
+    expect(b.todayEnergy).toEqual(a.todayEnergy);
+    expect(b.targets).toEqual(a.targets);
+    expect(b.insights).toEqual(a.insights);
+    // Every past day's own target too (adherence, the check-in's averages, next week's numbers).
+    const { zone2Kcal, ...checkin } = b.checkin;
+    const { zone2Kcal: none, ...without } = a.checkin;
+    expect(checkin).toEqual(without);
+    expect(none).toBeNull();
+    expect(zone2Kcal).toBeGreaterThan(0);
+    for (const date of dateRange(addDays(today, -14), today))
+      expect(targetsFor(date, b.series, data(withKcal, { settings: s }))).toEqual(targetsFor(date, a.series, data(base, { settings: s })));
+    // Today's fuel bar and the energy series computed directly.
+    const day = (days: DayLog[]) => days.find((d) => d.date === today)!;
+    expect(overTarget(day(withKcal).calories, b.targets.recommendation!.calories)).toEqual(
+      overTarget(day(base).calories, a.targets.recommendation!.calories),
+    );
+    expect(computeEnergySeries(withKcal, addDays(today, -40), today, 3500)).toEqual(
+      computeEnergySeries(base, addDays(today, -40), today, 3500),
+    );
+    // Closing the day: Zone 2 is still done by "done", whatever the reading.
+    for (const date of dateRange(addDays(today, -7), today))
+      expect(dayChecklist(date, data(withKcal, { settings: s }))).toEqual(dayChecklist(date, data(base, { settings: s })));
+    const readingOnly = [{ ...emptyDayLog(today), zone2Kcal: 400 }];
+    expect(dayChecklist(today, data(readingOnly, { settings: s })).find((i) => i.key === "zone2")?.done ?? false).toBe(false);
+  });
+
+  it("totals the week's readings in the check-in (null when none were logged)", () => {
+    const week = daysBefore(7, (i) => ({ zone2Done: true, zone2Minutes: 30, zone2Kcal: i < 3 ? 300 + i * 10 : null }));
+    const series = computeEnergySeries(week, addDays(today, -120), today, 3500);
+    expect(weeklyCheckin(data(week), series, today).zone2Kcal).toBe(930);
+    // Today's reading isn't in last week's check-in; nor is a day cached by an older build (no field).
+    const legacy = week.map(({ zone2Kcal: _z, ...d }) => d as DayLog);
+    const todayToo = [...legacy, { ...emptyDayLog(today), zone2Kcal: 500 }];
+    expect(weeklyCheckin(data(todayToo), series, today).zone2Kcal).toBeNull();
   });
 });

@@ -254,6 +254,12 @@ export function ProgressScreen() {
                       )}
                     </div>
                     <Bar className="mt-2" value={v.planned ? v.done / v.planned : 0} />
+                    {/* The week's Zone 2 machine readings, once logged: a reading, not intake. */}
+                    {label === "Zone 2" && c.zone2Kcal !== null && (
+                      <div className="num mt-1.5 text-xs text-mute">
+                        {fmt(c.zone2Kcal)} kcal<span className="sr-only"> on the machine</span>
+                      </div>
+                    )}
                   </div>
                 );
               })}

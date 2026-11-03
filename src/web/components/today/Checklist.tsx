@@ -168,7 +168,8 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
     case "zone2":
       return {
         value: day.zone2Done ? <Value n={fmt(day.zone2Minutes)} unit="min" /> : null,
-        sub: "Cycling",
+        // The machine's reading, once logged (`!= null`: absent on a day cached by an older build).
+        sub: day.zone2Kcal != null ? `Cycling · ${fmt(day.zone2Kcal)} kcal` : "Cycling",
       };
     case "metcon":
       return {

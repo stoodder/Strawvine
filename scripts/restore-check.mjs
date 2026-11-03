@@ -8,8 +8,8 @@
  *
  * 1. starts the production server (dist/server/index.js) on a fresh database A and signs in;
  * 2. seeds a dataset through the API with every column non-null (or true) somewhere: day logs
- *    with micros, sleep score, HRV, energy/soreness, zone 2, metcon notes and benchmarks, unicode
- *    journal; exercises of every measure, one archived, tracked lifts; max entries of every source
+ *    with micros, sleep score, HRV, energy/soreness, zone 2 (with machine kcal), metcon notes and
+ *    benchmarks, unicode journal; exercises of every measure, one archived, tracked lifts; max entries of every source
  *    (incl. a correction); settings with a weight goal, strength targets, training and display
  *    prefs; sessions with an applied AMRAP bump, a superset, a skipped exercise, a skipped main
  *    lift, a moved session (plannedFor) and a plan signature; seen achievements;
@@ -184,6 +184,7 @@ async function seed(call) {
       soreness: 5 - (i % 5),
       zone2Done: i % 2 === 0,
       zone2Minutes: i % 2 === 0 ? 40 + i : null,
+      zone2Kcal: i % 2 === 0 ? 300 + i * 7 : null,
       ...(i % 4 === 0
         ? {
             metconDone: true,

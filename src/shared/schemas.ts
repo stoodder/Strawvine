@@ -43,6 +43,11 @@ export const dayLogFields = {
   soreness: z.number().int().min(1).max(5).nullable(),
   zone2Done: z.boolean(),
   zone2Minutes: optNum(0, 600),
+  /**
+   * The Zone 2 machine's calorie reading, whole kcal. A reading only: never part of intake, the
+   * TDEE estimate, targets or anything else energy-related (nothing but the Zone 2 row reads it).
+   */
+  zone2Kcal: z.number().int().min(0).max(3000).nullable(),
   metconDone: z.boolean(),
   metconNotes: safeString().max(5000).nullable(),
   metconBenchmark: safeString().max(120).nullable(),

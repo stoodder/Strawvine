@@ -12,6 +12,13 @@ describe("day log: resting HR and VO2 max", () => {
   });
 });
 
+describe("day log: Zone 2 machine kcal", () => {
+  it("accepts a whole number of kcal in 0–3000, or null", () => {
+    for (const zone2Kcal of [0, 320, 3000, null]) expect(ok({ zone2Kcal })).toBe(true);
+    for (const zone2Kcal of [-1, 3001, 320.5, Number.NaN, "320", true]) expect(ok({ zone2Kcal })).toBe(false);
+  });
+});
+
 describe("day log: Also today flags", () => {
   it("are true, false or null (not recorded)", () => {
     for (const k of ["alcohol", "nicotine", "thc", "caffeine"]) {
@@ -30,7 +37,15 @@ describe("day log patch", () => {
 
   it("starts every new field as null on a blank day", () => {
     const day = emptyDayLog("2026-11-03");
-    expect(day).toMatchObject({ restingHrBpm: null, vo2Max: null, alcohol: null, nicotine: null, thc: null, caffeine: null });
+    expect(day).toMatchObject({
+      restingHrBpm: null,
+      vo2Max: null,
+      alcohol: null,
+      nicotine: null,
+      thc: null,
+      caffeine: null,
+      zone2Kcal: null,
+    });
     expect(dayLogSchema.safeParse(day).success).toBe(true);
   });
 });

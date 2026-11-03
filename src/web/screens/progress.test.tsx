@@ -78,3 +78,21 @@ describe("Progress check-in recovery tiles", () => {
     expect(screen.getAllByText("VO2 max", { exact: true }).at(-1)!.parentElement!.textContent).toBe("VO2 max51.0mL/kg/min+3.0 since Oct 1");
   });
 });
+
+describe("Progress check-in Zone 2 machine kcal", () => {
+  const zone2Tile = () => screen.getByText("Zone 2", { exact: true }).parentElement!;
+
+  it("adds the week's total under the Zone 2 count once logged, leaving Avg intake alone", () => {
+    withDays((d) => (d >= "2026-10-27" && d <= "2026-10-29" ? { zone2Done: true, zone2Minutes: 30, zone2Kcal: 300 } : {}));
+    show();
+    expect(zone2Tile().textContent).toContain("900 kcal on the machine");
+    expect(screen.getByText("Avg intake").parentElement!.textContent).toContain("2,800");
+  });
+
+  it("shows no kcal line without readings (or on days cached by an older build)", () => {
+    withDays((d) => (d >= "2026-10-27" ? { zone2Done: true, zone2Minutes: 30 } : {}));
+    store.data = { ...store.data, days: store.data.days.map(({ zone2Kcal: _z, ...d }) => d as DayLog) };
+    show();
+    expect(zone2Tile().textContent).not.toContain("kcal");
+  });
+});

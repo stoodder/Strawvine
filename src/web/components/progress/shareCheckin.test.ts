@@ -15,6 +15,7 @@ const base: WeeklyCheckin = {
   calorieAdherence: 0.71,
   avgSteps: 9820,
   zone2: { done: 1, planned: 2 },
+  zone2Kcal: null,
   metcon: { done: 2, planned: 3 },
   lifts: { done: 3, planned: 4 },
   avgSleepMinutes: 440,
@@ -74,6 +75,13 @@ describe("checkinText", () => {
         "Goal 185 lb projected Dec 19 – Jan 8, 2027",
       ].join("\n"),
     );
+  });
+
+  it("adds the week's Zone 2 machine kcal to the Zone 2 count, once logged", () => {
+    const text = checkinText({ ...base, zone2Kcal: 1240 }, { today: "2026-11-02" });
+    expect(text).toContain("\nLifts 3/4 · Metcon 2/3 · Zone 2 1/2 (1,240 kcal on the machine)\n");
+    // Not part of intake.
+    expect(text).toContain("\nIntake 2,310 kcal avg · ");
   });
 
   it("drops what isn't known yet", () => {

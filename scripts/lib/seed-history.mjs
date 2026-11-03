@@ -10,7 +10,7 @@
  * week 1 of the first cycle):
  *   - `weeks` × 7 day logs ending at `through` (a missed day each week), with weight, calories,
  *     macros, micros, steps, sleep, HRV, resting HR, VO2 max, caffeine/alcohol flags, energy/soreness,
- *     zone 2, metcons (a benchmark repeated so it has a PR), journal entries;
+ *     zone 2 (minutes, machine kcal), metcons (a benchmark repeated so it has a PR), journal entries;
  *   - completed sessions on the Mondays and Wednesdays before `through` (bench / squat + a
  *     pull-up accessory block), the last Monday's carried into the next one;
  *   - older max entries (and squat / deadlift maxes) and seen achievements left alone;
@@ -66,6 +66,8 @@ export async function seedHistory(call, { through = "2026-10-25", weeks = 3 } = 
       soreness: 1 + ((i + 2) % 5),
       zone2Done: wd === 2 || wd === 4 || wd === 6,
       zone2Minutes: wd === 2 || wd === 4 || wd === 6 ? 35 + (i % 3) * 5 : null,
+      // The bike's reading, most sessions (one left unrecorded).
+      zone2Kcal: (wd === 2 || wd === 4 || wd === 6) && i % 5 !== 0 ? 280 + (i % 4) * 30 : null,
       ...(wd === 3 || wd === 5
         ? {
             metconDone: true,

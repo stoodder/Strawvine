@@ -83,6 +83,10 @@ that names one of the new fields, and because a device combines its queued edits
 combined `{weightLb, caffeine}` is refused as a whole — the weight with it — and stays a change not saved (Retry /
 Discard) until it is discarded or the release is rolled forward.
 
+Rolling back past migration 0008 (Zone 2 machine kcal) works the same way: an older server refuses a day patch naming
+`zone2Kcal` (a combined `{zone2Minutes, zone2Kcal}` with it) and a version 5 export; the migration only adds a
+nullable column and need not be reverted.
+
 Avoid long table rewrites and locks: a booting dyno waits at most 30 s for the migration lock (Heroku kills a dyno that
 doesn't bind its port within 60 s) and the release phase at most 15 minutes.
 
@@ -251,7 +255,7 @@ The app-level export (below) is a second, database-independent copy.
 ## Data
 
 Settings → **Export JSON** (`GET /api/export`) downloads everything: settings, every day log, exercise, max entry,
-session and seen achievement, with their ids (format `strawvine-export`, version 4). Nothing derived is stored; the
+session and seen achievement, with their ids (format `strawvine-export`, version 5). Nothing derived is stored; the
 export is the complete source of truth.
 
 To restore an export into a database:
