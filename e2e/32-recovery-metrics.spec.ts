@@ -102,11 +102,10 @@ test("Also today chips cycle not recorded → none → had → not recorded, sav
   await nutritionRow(page).click();
   const group = page.getByRole("group", { name: "Also today" });
   const NAMES = ["Alcohol", "Nicotine", "THC", "Caffeine"];
-  /** A chip by its label, whatever its state ("Alcohol: none recorded"). */
-  const chip = (name: string) => group.getByRole("button", { name: new RegExp(`^${name}: `) });
+  /** A chip by its label: the name is fixed, the state is in its description and visible word. */
+  const chip = (name: string) => group.getByRole("button", { name, exact: true });
   const today = async () => (await serverData(page)).days.find((d) => d.date === TODAY);
-  for (const name of NAMES) await expect(chip(name)).toHaveAccessibleName(`${name}: not recorded`);
-  await expect(chip("Alcohol")).toHaveAccessibleDescription("Next tap: none recorded");
+  for (const name of NAMES) await expect(chip(name)).toHaveAccessibleDescription("not recorded · next tap: had none");
 
   const look = (name: string) =>
     chip(name).evaluate((b) => ({ bg: getComputedStyle(b).backgroundColor, text: (b as HTMLElement).innerText }));
@@ -114,9 +113,9 @@ test("Also today chips cycle not recorded → none → had → not recorded, sav
 
   // None: lime tint and the word "none".
   await chip("Alcohol").click();
-  await expect(chip("Alcohol")).toHaveAccessibleName("Alcohol: none recorded");
-  await expect(chip("Alcohol")).toHaveAccessibleDescription("Next tap: had");
-  await expect(page.getByRole("status").filter({ hasText: "Alcohol: none recorded" })).toHaveCount(1);
+  await expect(chip("Alcohol")).toHaveAccessibleDescription("had none · next tap: had");
+  await expect(chip("Alcohol")).toHaveAccessibleName("Alcohol");
+  await expect(page.getByRole("status").filter({ hasText: /^Alcohol: had none$/ })).toHaveCount(1);
   const none = await look("Alcohol");
   expect(none.text.replace(/\s+/g, " ")).toBe("Alcohol none");
   expect(none.bg).not.toBe(grey.bg);
@@ -125,8 +124,8 @@ test("Also today chips cycle not recorded → none → had → not recorded, sav
 
   // Had: coral tint and the word "had".
   await chip("Alcohol").click();
-  await expect(chip("Alcohol")).toHaveAccessibleName("Alcohol: had");
-  await expect(chip("Alcohol")).toHaveAccessibleDescription("Next tap: not recorded");
+  await expect(chip("Alcohol")).toHaveAccessibleDescription("had · next tap: not recorded");
+  await expect(page.getByRole("status").filter({ hasText: /^Alcohol: had$/ })).toHaveCount(1);
   const had = await look("Alcohol");
   expect(had.text.replace(/\s+/g, " ")).toBe("Alcohol had");
   expect(had.bg).not.toBe(none.bg);
@@ -136,7 +135,8 @@ test("Also today chips cycle not recorded → none → had → not recorded, sav
 
   // And back to not recorded (the server gets null).
   await chip("Alcohol").click();
-  await expect(chip("Alcohol")).toHaveAccessibleName("Alcohol: not recorded");
+  await expect(chip("Alcohol")).toHaveAccessibleDescription("not recorded · next tap: had none");
+  expect((await look("Alcohol")).text.trim()).toBe("Alcohol");
   expect((await look("Alcohol")).bg).toBe(grey.bg);
   await expectSynced(page);
   expect(await today()).toMatchObject({ alcohol: null });
@@ -147,8 +147,9 @@ test("Also today chips cycle not recorded → none → had → not recorded, sav
   await page.keyboard.press("Space");
   await chip("THC").focus();
   await page.keyboard.press("Enter");
-  await expect(chip("Caffeine")).toHaveAccessibleName("Caffeine: had");
-  await expect(chip("THC")).toHaveAccessibleName("THC: none recorded");
+  await expect(chip("Caffeine")).toHaveAccessibleDescription("had · next tap: not recorded");
+  await expect(chip("THC")).toHaveAccessibleDescription("had none · next tap: had");
+  for (const name of NAMES) await expect(chip(name)).toHaveAccessibleName(name);
 
   // 44px targets: two by two inside a 320 px phone, all four in a row at 390; the state word fits.
   const boxes = async () => Promise.all(NAMES.map(async (n) => (await chip(n).boundingBox())!));

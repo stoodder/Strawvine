@@ -2,7 +2,7 @@
  * The morning editor's resting HR and VO2 max, the Nutrition editor's "Also today" chips, and how
  * Today shows them (Recovery section, checklist summaries).
  */
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -105,61 +105,65 @@ describe("MorningEditor", () => {
 });
 
 describe("Also today chips", () => {
-  it("cycle not recorded → none → had → not recorded, each state named, described and announced", async () => {
+  /** The chip's description: its state and what the next tap records. */
+  const description = (chip: HTMLElement) => document.getElementById(chip.getAttribute("aria-describedby")!)!.textContent;
+
+  it("cycle not recorded → none → had → not recorded: a fixed name, the state described, each change announced once", async () => {
     const user = userEvent.setup();
     const patches = harness(FuelEditor);
     const group = screen.getByRole("group", { name: "Also today" });
     const chips = within(group).getAllByRole("button");
-    expect(chips.map((c) => c.getAttribute("aria-label"))).toEqual([
-      "Alcohol: not recorded",
-      "Nicotine: not recorded",
-      "THC: not recorded",
-      "Caffeine: not recorded",
-    ]);
+    expect(chips.map((c) => c.getAttribute("aria-label"))).toEqual(["Alcohol", "Nicotine", "THC", "Caffeine"]);
     // Tri-state, not a pressed toggle (aria-pressed="mixed" would mean partly pressed).
     for (const c of chips) expect(c.hasAttribute("aria-pressed")).toBe(false);
     const status = screen.getByRole("status");
+    expect(status.textContent).toBe("");
 
     const caffeine = chips[3]!;
     // Not recorded: grey, label only.
     expect(caffeine.className).toContain("bg-white/[0.05]");
     expect(within(caffeine).queryByText(/^(none|had)$/)).toBeNull();
-    expect(document.getElementById(caffeine.getAttribute("aria-describedby")!)!.textContent).toBe("Next tap: none recorded");
+    expect(description(caffeine)).toBe("not recorded · next tap: had none");
 
-    // None: lime tint with the word "none" (the goal; first because it is the common tap).
+    // None: lime tint with the word "none" (the goal; first because it is the common tap). Spoken
+    // "had none", never "none recorded" (one sound from "not recorded").
     await user.click(caffeine);
     expect(patches.at(-1)).toEqual({ caffeine: false });
-    expect(caffeine.getAttribute("aria-label")).toBe("Caffeine: none recorded");
+    expect(screen.getByRole("button", { name: "Caffeine" })).toBe(caffeine);
     expect(caffeine.className).toContain("bg-accent/15");
     expect(caffeine.className).not.toContain("bg-warn/15");
     expect(within(caffeine).getByText("none").className).toContain("text-accent");
-    expect(document.getElementById(caffeine.getAttribute("aria-describedby")!)!.textContent).toBe("Next tap: had");
-    expect(status.textContent).toBe("Caffeine: none recorded");
+    expect(description(caffeine)).toBe("had none · next tap: had");
+    expect(status.textContent).toBe("Caffeine: had none");
 
     // Had: coral tint with the word "had".
     await user.click(caffeine);
     expect(patches.at(-1)).toEqual({ caffeine: true });
-    expect(caffeine.getAttribute("aria-label")).toBe("Caffeine: had");
+    expect(screen.getByRole("button", { name: "Caffeine" })).toBe(caffeine);
     expect(caffeine.className).toContain("bg-warn/15");
     expect(caffeine.className).not.toContain("bg-accent/15");
     expect(within(caffeine).getByText("had").className).toContain("text-warn");
-    expect(document.getElementById(caffeine.getAttribute("aria-describedby")!)!.textContent).toBe("Next tap: not recorded");
+    expect(description(caffeine)).toBe("had · next tap: not recorded");
     expect(status.textContent).toBe("Caffeine: had");
 
     // Back to not recorded.
     await user.click(caffeine);
     expect(patches.at(-1)).toEqual({ caffeine: null });
-    expect(caffeine.getAttribute("aria-label")).toBe("Caffeine: not recorded");
     expect(caffeine.className).toContain("bg-white/[0.05]");
     expect(within(caffeine).queryByText(/^(none|had)$/)).toBeNull();
+    expect(description(caffeine)).toBe("not recorded · next tap: had none");
     expect(status.textContent).toBe("Caffeine: not recorded");
+
+    // The name never changed; nothing but the status region speaks the change.
+    expect(chips.map((c) => c.getAttribute("aria-label"))).toEqual(["Alcohol", "Nicotine", "THC", "Caffeine"]);
+    expect(document.querySelectorAll("[aria-live]")).toHaveLength(1);
 
     // Keyboard: Enter and Space cycle too. Each patch touches only its own flag.
     const thc = chips[2]!;
     thc.focus();
     await user.keyboard("{Enter}");
     await user.keyboard(" ");
-    expect(thc.getAttribute("aria-label")).toBe("THC: had");
+    expect(description(thc)).toBe("had · next tap: not recorded");
     expect(patches).toEqual([{ caffeine: false }, { caffeine: true }, { caffeine: null }, { thc: false }, { thc: true }]);
     // 44px tap targets.
     for (const c of chips) expect(c.className).toContain("min-h-11");
@@ -169,11 +173,28 @@ describe("Also today chips", () => {
     const user = userEvent.setup();
     const patches = harness(FuelEditor, { alcohol: false, nicotine: true });
     const group = screen.getByRole("group", { name: "Also today" });
-    const alcohol = within(group).getByRole("button", { name: "Alcohol: none recorded" });
-    within(group).getByRole("button", { name: "Nicotine: had" });
+    const alcohol = within(group).getByRole("button", { name: "Alcohol" });
+    const nicotine = within(group).getByRole("button", { name: "Nicotine" });
+    expect(description(alcohol)).toBe("had none · next tap: had");
+    expect(description(nicotine)).toBe("had · next tap: not recorded");
     await user.click(alcohol);
-    await user.click(within(group).getByRole("button", { name: "Nicotine: had" }));
+    await user.click(nicotine);
     expect(patches).toEqual([{ alcohol: true }, { nicotine: null }]);
+  });
+
+  it("two clicks in one task advance two steps (each from the latest value, not the last render)", () => {
+    const patches = harness(FuelEditor);
+    const alcohol = screen.getByRole("button", { name: "Alcohol" });
+    act(() => {
+      alcohol.click();
+      alcohol.click();
+    });
+    expect(patches).toEqual([{ alcohol: false }, { alcohol: true }]);
+    expect(description(alcohol)).toBe("had · next tap: not recorded");
+    expect(screen.getByRole("status").textContent).toBe("Alcohol: had");
+    // And a third, after the render, carries on from there.
+    act(() => alcohol.click());
+    expect(patches.at(-1)).toEqual({ alcohol: null });
   });
 
   it("a day cached by an older build (no flags) shows them not recorded", async () => {
@@ -185,7 +206,9 @@ describe("Also today chips", () => {
         <FuelEditor day={legacy as DayLog} patch={(p) => patches.push(p)} />
       </ToastProvider>,
     );
-    await user.click(screen.getByRole("button", { name: "THC: not recorded" }));
+    const thc = screen.getByRole("button", { name: "THC" });
+    expect(description(thc)).toBe("not recorded · next tap: had none");
+    await user.click(thc);
     expect(patches).toEqual([{ thc: false }]);
   });
 });

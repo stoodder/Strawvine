@@ -135,8 +135,11 @@ tile.
   None comes first: it is the goal and the most common entry; a mistaken tap is undone by cycling on.
 - Not recorded is the plain grey chip, label only. None is a lime tint (the accent: the goal met) with the word "none"
   under the label; had is a coral tint (`warn`) with "had". The word carries the state, not colour alone. Each chip
-  is a plain button named with its state ("Alcohol: none recorded" / "Alcohol: had" / "Alcohol: not recorded"),
-  described by what the next tap records ("Next tap: had"), and each change is announced politely.
+  is a plain button whose name is its label alone ("Alcohol"), so it never changes under focus. Its description is
+  the state and what the next tap records — "not recorded · next tap: had none", "had none · next tap: had",
+  "had · next tap: not recorded" (spoken "had none", never "none recorded", which is one sound from "not
+  recorded") — and a polite status region is the single announcement of each change ("Alcohol: had none"). Taps
+  advance from the latest value, so two taps before a re-render still move two steps.
 - The Nutrition row's summary on Today lists what was had, then what was recorded as none, on a line of its own:
   "Had caffeine · No alcohol or THC" (`substanceSummary`; a narrow phone truncates the none part first). Nothing when
   no flag is recorded.

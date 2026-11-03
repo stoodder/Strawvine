@@ -4,7 +4,7 @@ import { useId, useMemo, useRef, useState } from "react";
 import { benchmarkBest, benchmarkNames, isBetterScore, normalizeBenchmark, parseScore, type ParsedScore } from "../../../shared/benchmarks";
 import { formatShortDate } from "../../../shared/dates";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
-import { nextSubstanceState, SUBSTANCES } from "../../../shared/substances";
+import { nextSubstanceState, SUBSTANCES, type SubstanceKey } from "../../../shared/substances";
 import { fmt } from "../../lib/format";
 import { useData } from "../../lib/store";
 import { useToast } from "../Toast";
@@ -114,7 +114,7 @@ export function MorningEditor({ day, patch }: EditorProps) {
 
 /** What a substance chip shows and says for each recorded state (SPEC §3.4). */
 const SUBSTANCE_STATE = {
-  none: { word: "none", spoken: "none recorded" },
+  none: { word: "none", spoken: "had none" },
   had: { word: "had", spoken: "had" },
   unset: { word: null, spoken: "not recorded" },
 } as const;
@@ -123,14 +123,24 @@ const stateOf = (v: boolean | null | undefined) => (v === false ? "none" : v ===
 /**
  * "Also today": tracking-only three-state chips. A tap cycles not recorded (null, grey) → none
  * (false, lime: the goal) → had (true, coral) → not recorded, so a mistaken tap is undone by
- * cycling on. Colour is never alone: recorded chips carry the state word under the label, and the
- * accessible name says it ("Alcohol: none recorded"); the description says what the next tap
- * does, and each change is announced politely. Four in a row, two by two where they don't fit (a
- * container query: the editor's own width).
+ * cycling on. Colour is never alone: recorded chips carry the state word under the label. Each
+ * chip's accessible name is its label alone, so it never changes under focus; the description
+ * carries the state and what the next tap records ("had none · next tap: had"), and the polite
+ * status region is the one announcement of a change ("Alcohol: had"). Four in a row, two by two
+ * where they don't fit (a container query: the editor's own width).
  */
 function AlsoToday({ day, patch }: EditorProps) {
   const id = useId();
   const [announcement, setAnnouncement] = useState("");
+  // Each tap advances from the latest value: the day as last rendered, or what a tap recorded
+  // since. Two taps in one task (before a re-render) would otherwise both start from the same
+  // render and end one step short.
+  const latest = useRef<Pick<DayLog, SubstanceKey>>(day);
+  const rendered = useRef(day);
+  if (rendered.current !== day) {
+    rendered.current = day;
+    latest.current = day;
+  }
   return (
     <div className="@container">
       <div className="label mb-2" id={id}>
@@ -144,11 +154,12 @@ function AlsoToday({ day, patch }: EditorProps) {
             <button
               key={k}
               type="button"
-              aria-label={`${label}: ${SUBSTANCE_STATE[state].spoken}`}
+              aria-label={label}
               aria-describedby={`${id}-${k}`}
               data-state={state}
               onClick={() => {
-                const v = nextSubstanceState(day[k]);
+                const v = nextSubstanceState(latest.current[k]);
+                latest.current = { ...latest.current, [k]: v };
                 patch({ [k]: v });
                 setAnnouncement(`${label}: ${SUBSTANCE_STATE[stateOf(v)].spoken}`);
               }}
@@ -166,7 +177,7 @@ function AlsoToday({ day, patch }: EditorProps) {
                 </span>
               )}
               <span id={`${id}-${k}`} hidden>
-                Next tap: {SUBSTANCE_STATE[next].spoken}
+                {SUBSTANCE_STATE[state].spoken} · next tap: {SUBSTANCE_STATE[next].spoken}
               </span>
             </button>
           );
