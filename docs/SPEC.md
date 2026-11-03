@@ -103,26 +103,38 @@ tile.
 - **Resting HR** (`restingHrBpm`, 20–220 bpm, whole numbers in the editor) and **VO2 max** (`vo2Max`, 10–100
   mL/kg/min, one decimal) sit in the morning editor under sleep, score and HRV. Both are optional: the morning item is
   done by the weigh-in alone, as before, and neither counts toward closing the day.
-- Today's Recovery section shows them, with units, once logged; the Weigh-in row's summary adds "RHR 48" after sleep and
-  HRV (it truncates on a narrow screen).
+- The editor rounds every number to the precision it shows before saving it (51.54 saves as 51.5). Resting HR, VO2 max,
+  HRV (0–500 ms) and the sleep score (0–100) refuse a value outside their range instead of clamping it — "5" for resting
+  HR would otherwise save a believable 20 bpm that then feeds the baseline: the field keeps its previous value, is
+  marked invalid and says the range under it ("20–220 bpm", announced politely) until the next accepted entry.
+- Today's Recovery section shows them once logged (resting HR with its unit; VO2 max as the number alone, which keeps
+  the tile on one line on a narrow phone); the Weigh-in row's summary adds "RHR 48" after sleep and HRV (it truncates on
+  a narrow screen; screen readers hear "resting heart rate").
 - The weekly check-in (§4.6) shows the week's average resting HR and the latest VO2 max with its change over about a
   month (`vo2MaxTrend`, `src/shared/recovery.ts`): latest value on or before the week's last day (none logged in the 90
   days up to it: not shown), compared with the oldest value logged in the 30 days before that latest one ("+1.2 since
-  Oct 2"; "as of Oct 30" with nothing to compare). The shared check-in text carries both when present.
+  Oct 2"; "as of Oct 30" with nothing to compare). A latest value from before the check-in week is labelled with its
+  date instead of a change ("as of Aug 20"), so it never reads as this week's. The shared check-in text carries both when
+  present.
 - **Recovery insight** (one at most): the last 3 days' mean (today included) against the 28 days before them, for HRV
-  and for resting HR, each needing a value in both windows. HRV is low under 88 % of its baseline, high over 108 %;
-  resting HR is elevated at +5 bpm or +7 % over its baseline (whichever comes first), down at −5 bpm or −7 %. HRV low
-  and resting HR elevated are the same story, so together they make one warning ("HRV is 14% under and resting HR
-  6 bpm above your baseline. A lighter day may pay off."), never two; either alone is its own warning ("Resting HR is
-  6 bpm above your baseline. A lighter day may pay off."). A warning wins over good news from the other metric; both
-  good is one note ("HRV is up and resting HR is down — primed to push."), either alone its own. The thresholds are
-  insight constants (`src/shared/recovery.ts`), not training rules.
+  and for resting HR, each needing at least 2 readings in the recent window and 7 in the baseline
+  (`RECOVERY_MIN_RECENT_READINGS`, `RECOVERY_MIN_BASELINE_READINGS`), so one stray reading can't raise a warning. HRV is
+  low under 88 % of its baseline, high over 108 %; resting HR is elevated at +5 bpm or +7 % over its baseline (whichever
+  comes first), down at −5 bpm or −7 %. Differences are shown as rounded magnitudes (−3.5 bpm reads "4 bpm below").
+  HRV low and resting HR elevated are the same story, so together they make one warning ("HRV is 14% under and resting
+  HR 6 bpm above your 4-week baseline. A lighter day may pay off."), never two; either alone is its own warning
+  ("Resting HR is 6 bpm above your 4-week baseline. A lighter day may pay off."). A warning wins over good news from
+  the other metric; both good is one note ("HRV is up and resting HR is down — primed to push."), either alone its own.
+  The thresholds are insight constants (`src/shared/recovery.ts`), not training rules.
 
 ### 3.4 Also today (Nutrition)
 
-- Four tracking-only flags in the Nutrition editor — **alcohol, nicotine, THC, caffeine** — as toggle chips. Each is
-  null (not recorded, unpressed) until tapped: a tap marks it had (true), another tap records none (false, unpressed
-  again), and so on.
+- Four tracking-only flags in the Nutrition editor — **alcohol, nicotine, THC, caffeine** — as on/off chips in a row
+  of four (two by two under ~340 px). Each is null (not recorded, unpressed) until tapped: a tap marks it had (true),
+  another tap clears it back to not recorded (null), so a mistaken tap is fully undone. The editor never writes false;
+  the field still accepts it (boolean | null).
+- Pressed chips are a neutral light fill, not the lime "done" fill or a check mark: having had alcohol isn't an
+  achievement. The pressed state is carried by `aria-pressed`.
 - The Nutrition row's summary on Today lists the ones marked had ("Alcohol · Caffeine") on a line of its own; nothing
   when none.
 - Nothing reads them yet: no insight, checklist item or score.
@@ -385,7 +397,8 @@ optional note.
   in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or
   only after the device comes back online.
 - Rule-based insights (protein adherence, sleep, recovery trend from HRV and resting HR — one insight at most, §3.3 —
-  steps, rate-of-change safety).
+  steps, rate-of-change safety). Today's Signals list warnings first, then notes, then good news (in that order within
+  each).
 - Tasteful motion: smooth fills, a satisfying check, a restrained glow for PRs. Haptics where available.
 - Optional **high-contrast "outdoor" mode** (brighter secondary text, thicker chart lines) for gym glare.
 

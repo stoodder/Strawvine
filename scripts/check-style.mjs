@@ -78,7 +78,9 @@ export const ALLOW = {
     "src/web/components/charts.tsx": ["0.02"], // the table under a chart: a barely-there well
     "src/web/components/progress/IntakeStrip.tsx": ["0.035"], // intake bars' track
     "src/web/components/train/SetControls.tsx": ["0.035"], // unlogged set chip
-    "src/web/components/ui.tsx": ["0.1"], // active:bg of round icon buttons
+    // active:bg of round icon buttons; a pressed neutral ChoiceChip (lighter than any surface step, so
+    // it reads as pressed without the lime of "done"; fg on it ≈ 11:1).
+    "src/web/components/ui.tsx": ["0.1", "0.14"],
   },
   "mute-on-tint": {
     // Unselected weekday chips on the page background (ink-950 + white/0.04 ≈ 4.8:1 — passes there,

@@ -42,7 +42,9 @@ export function checkinText(c: WeeklyCheckin, opts: { today: ISODate; goalLb?: n
       c.avgRestingHr != null && `resting HR ${fmt(c.avgRestingHr)} bpm`,
     ]),
   );
-  if (c.vo2Max) lines.push(`VO2 max ${fmt(c.vo2Max.value, 1)}${c.vo2Max.change !== null ? ` (${vo2Change(c.vo2Max)})` : ""}`);
+  // With a change, or from before the week (dated, so it doesn't read as this week's): in brackets.
+  if (c.vo2Max)
+    lines.push(`VO2 max ${fmt(c.vo2Max.value, 1)}${c.vo2Max.change !== null || !c.vo2Max.current ? ` (${vo2Change(c.vo2Max)})` : ""}`);
   // A group with nothing planned and nothing done (e.g. no lifting days set up) says nothing.
   const count = (name: string, v: { done: number; planned: number }) => (v.planned > 0 || v.done > 0) && `${name} ${v.done}/${v.planned}`;
   lines.push(join([count("Lifts", c.lifts), count("Metcon", c.metcon), count("Zone 2", c.zone2)]));
@@ -55,9 +57,14 @@ export function checkinText(c: WeeklyCheckin, opts: { today: ISODate; goalLb?: n
   return lines.filter(Boolean).join("\n");
 }
 
-/** "+1.2 since Oct 2" — the VO2 max change over ~30 days; "as of Oct 30" without an earlier value to compare with. */
+/**
+ * "+1.2 since Oct 2" — the VO2 max change over ~30 days; "as of Oct 30" without an earlier value to
+ * compare with, or when the latest value is from before the check-in week (it isn't this week's).
+ */
 export function vo2Change(v: Vo2Trend): string {
-  return v.change !== null && v.since ? `${signed(v.change, 1)} since ${formatShortDate(v.since)}` : `as of ${formatShortDate(v.date)}`;
+  return v.current && v.change !== null && v.since
+    ? `${signed(v.change, 1)} since ${formatShortDate(v.since)}`
+    : `as of ${formatShortDate(v.date)}`;
 }
 
 export type ShareOutcome = "shared" | "copied" | "cancelled" | "failed";

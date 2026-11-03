@@ -134,6 +134,18 @@ describe("insights", () => {
     ).not.toContain("steps-low");
   });
 
+  it("lists warnings first, then notes, then good news, keeping their own order within a tone", () => {
+    // Protein good (pushed first), short sleep (warn), HRV low (warn), steps low (info).
+    const days = dateRange(addDays(today, -30), today).map((date) => ({
+      ...emptyDayLog(date),
+      ...(date < today ? { weightLb: 200, calories: 3000, proteinG: 300, sleepMinutes: 360, steps: 5000 } : {}),
+      hrvMs: date >= addDays(today, -2) ? 40 : 60,
+    }));
+    const list = buildModel(data(days), today).insights;
+    expect(list.map((i) => i.key)).toEqual(["sleep-low", "hrv-low", "steps-low", "protein-good"]);
+    expect(list.map((i) => i.tone)).toEqual(["warn", "warn", "info", "good"]);
+  });
+
   it("says nothing without data", () => {
     const d = data([]);
     expect(insights(d, [], today, { basis: null, tdee: null, recommendation: null })).toEqual([]);

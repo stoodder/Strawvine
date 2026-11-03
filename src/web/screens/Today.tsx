@@ -310,7 +310,8 @@ export function Recovery({ day }: { day: DayLog }) {
         <Stat label="Score" value={fmt(day.sleepScore)} size="sm" />
         <Stat label="HRV" value={fmt(day.hrvMs)} unit={day.hrvMs != null ? "ms" : undefined} size="sm" />
         {day.restingHrBpm != null && <Stat label="Resting HR" value={fmt(day.restingHrBpm)} unit="bpm" size="sm" />}
-        {day.vo2Max != null && <Stat label="VO2 max" value={fmt(day.vo2Max, 1)} unit="mL/kg/min" size="sm" />}
+        {/* No unit here: "mL/kg/min" wraps onto a line of its own at 360 px (Progress's check-in keeps it). */}
+        {day.vo2Max != null && <Stat label="VO2 max" value={fmt(day.vo2Max, 1)} size="sm" />}
       </div>
     </Section>
   );

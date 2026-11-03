@@ -117,6 +117,18 @@ describe("api", () => {
     expect(b.days.find((d) => d.date === "2026-11-03")).toMatchObject({ restingHrBpm: 48, vo2Max: 52.3, thc: true });
   });
 
+  it("keeps resting HR and VO2 max exactly as sent (fractional columns, not integers or reals)", async () => {
+    let res = await req("/api/days/2026-11-03", json("PUT", { restingHrBpm: 48.5, vo2Max: 52.35 }));
+    expect(await res.json()).toMatchObject({ restingHrBpm: 48.5, vo2Max: 52.35 });
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const day = b.days.find((d) => d.date === "2026-11-03")!;
+    expect(day.restingHrBpm).toBe(48.5);
+    expect(day.vo2Max).toBe(52.35);
+    // Back to the values the tests below expect.
+    res = await req("/api/days/2026-11-03", json("PUT", { restingHrBpm: 48, vo2Max: 52.3 }));
+    expect(await res.json()).toMatchObject({ restingHrBpm: 48, vo2Max: 52.3 });
+  });
+
   it("validates input", async () => {
     expect((await req("/api/days/2026-13-40", json("PUT", { weightLb: 200 }))).status).toBe(400);
     expect((await req("/api/days/2026-11-02", json("PUT", { weightLb: "heavy" }))).status).toBe(400);
@@ -988,9 +1000,22 @@ describe("export & restore", () => {
       thc: null,
       caffeine: null,
     });
-    // A current export refuses a malformed value in them.
-    const bad = { ...current, days: current.days.map((d) => (d.date === "2026-11-03" ? { ...d, vo2Max: 500 } : d)) };
-    await expect(restoreExport(db, bad, { force: true })).rejects.toThrow(/days\.\d+\.vo2Max/);
+    // A current export refuses a malformed value in any of them.
+    const malformed: Array<Partial<Record<string, unknown>>> = [
+      { restingHrBpm: 500 },
+      { restingHrBpm: "48" },
+      { vo2Max: 5 },
+      { vo2Max: 500 },
+      { alcohol: "yes" },
+      { nicotine: 1 },
+      { thc: "yes" },
+      { caffeine: 0 },
+    ];
+    for (const patch of malformed) {
+      const bad = { ...current, days: current.days.map((d) => (d.date === "2026-11-03" ? { ...d, ...patch } : d)) };
+      const field = Object.keys(patch)[0]!;
+      await expect(restoreExport(db, bad, { force: true }), JSON.stringify(patch)).rejects.toThrow(new RegExp(`days\\.\\d+\\.${field}`));
+    }
     // Back to the data as it was, for the tests below.
     await restoreExport(db, current, { force: true });
     expect((await buildExport(db)).days).toEqual(current.days);

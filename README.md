@@ -78,6 +78,11 @@ was live before it — expand, then contract:
 2. **Migrate data** if needed (in code or a follow-up migration), then switch the code over to the new shape.
 3. **Contract** (a later deploy, once no running release uses it): drop the old column/table.
 
+Rolling back past migration 0007 (resting HR, VO2 max, "Also today"): the older server refuses (400) any day patch
+that names one of the new fields, and because a device combines its queued edits of one day into a single patch, a
+combined `{weightLb, caffeine}` is refused as a whole — the weight with it — and stays a change not saved (Retry /
+Discard) until it is discarded or the release is rolled forward.
+
 Avoid long table rewrites and locks: a booting dyno waits at most 30 s for the migration lock (Heroku kills a dyno that
 doesn't bind its port within 60 s) and the release phase at most 15 minutes.
 

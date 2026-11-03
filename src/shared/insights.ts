@@ -142,7 +142,7 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     avgSleepMinutes: mean(days.filter((d) => d.sleepMinutes !== null).map((d) => d.sleepMinutes!)),
     avgHrv: mean(days.filter((d) => d.hrvMs != null).map((d) => d.hrvMs!)),
     avgRestingHr: mean(days.filter((d) => d.restingHrBpm != null).map((d) => d.restingHrBpm!)),
-    vo2Max: vo2MaxTrend(data.days, to),
+    vo2Max: vo2MaxTrend(data.days, to, from),
     next,
     projection: end?.avgWeight != null ? project(settings, today, end.avgWeight, weekAgo?.avgWeight ?? null) : null,
   };
@@ -241,5 +241,8 @@ export function insights(data: AppData, series: ReadonlyArray<EnergyDay>, today:
       out.push({ key: "steps-good", tone: "good", text: "Step target hit every logged day this week." });
   }
 
-  return out;
+  // Warnings first, then notes, then good news; within a tone, the order above (a stable sort).
+  return out.sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
 }
+
+const TONE_ORDER: Record<Insight["tone"], number> = { warn: 0, info: 1, good: 2 };

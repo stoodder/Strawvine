@@ -40,7 +40,8 @@ export function MorningEditor({ day, patch }: EditorProps) {
         <span className="text-sm text-mute">lb</span>
       </div>
       {/* Sleep, score and HRV in thirds; the optional resting HR and VO2 max (never part of closing the day) in
-          halves below, so "Resting HR" fits its column on a 320 px phone. */}
+          halves below, so "Resting HR" fits its column on a 320 px phone. Readings out of range are refused, not
+          clamped: a clamped "5" would save a believable 20 bpm. */}
       <div className="grid grid-cols-6 gap-4">
         <div className="col-span-2">
           <div className="label mb-2">Sleep</div>
@@ -54,6 +55,7 @@ export function MorningEditor({ day, patch }: EditorProps) {
             onCommit={(v) => patch({ sleepScore: v })}
             min={0}
             max={100}
+            outOfRange="reject"
             className="w-full"
             align="left"
           />
@@ -64,8 +66,10 @@ export function MorningEditor({ day, patch }: EditorProps) {
             ariaLabel="HRV"
             value={day.hrvMs}
             onCommit={(v) => patch({ hrvMs: v })}
+            unit="ms"
             min={0}
             max={500}
+            outOfRange="reject"
             className="w-full"
             align="left"
           />
@@ -76,8 +80,10 @@ export function MorningEditor({ day, patch }: EditorProps) {
             ariaLabel="Resting HR"
             value={day.restingHrBpm ?? null}
             onCommit={(v) => patch({ restingHrBpm: v })}
+            unit="bpm"
             min={20}
             max={220}
+            outOfRange="reject"
             className="w-full"
             align="left"
           />
@@ -91,6 +97,7 @@ export function MorningEditor({ day, patch }: EditorProps) {
             decimals={1}
             min={10}
             max={100}
+            outOfRange="reject"
             className="w-full"
             align="left"
           />
@@ -118,19 +125,21 @@ export function substancesHad(day: DayLog): string[] {
 }
 
 /**
- * "Also today": tracking-only toggles. Untouched is null (not recorded) and looks unpressed; a
- * tap marks it had (true), another tap records none (false).
+ * "Also today": tracking-only on/off chips. Untouched is null (not recorded) and looks unpressed; a
+ * tap marks it had (true), another clears it back to not recorded (null), so a mistaken tap is
+ * fully undone — the editor never writes false. Pressed chips are neutral, not the lime of "done".
+ * Four in a row, two by two where they don't fit (a container query: the editor's own width).
  */
 function AlsoToday({ day, patch }: EditorProps) {
   const id = useId();
   return (
-    <div>
+    <div className="@container">
       <div className="label mb-2" id={id}>
         Also today
       </div>
-      <div className="flex flex-wrap gap-2" role="group" aria-labelledby={id}>
+      <div className="grid grid-cols-2 gap-2 @min-[17rem]:grid-cols-4" role="group" aria-labelledby={id}>
         {SUBSTANCES.map(([k, label]) => (
-          <ChoiceChip key={k} tall on={day[k] === true} onClick={() => patch({ [k]: day[k] !== true })}>
+          <ChoiceChip key={k} tall fill tone="neutral" on={day[k] === true} onClick={() => patch({ [k]: day[k] === true ? null : true })}>
             {label}
           </ChoiceChip>
         ))}

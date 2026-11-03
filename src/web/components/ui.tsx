@@ -342,7 +342,9 @@ export function useFieldIds(): FieldIds | null {
 }
 
 /**
- * An inline number that looks like text until edited. Commits on blur / enter.
+ * An inline number that looks like text until edited. Commits on blur / enter, rounded to
+ * `decimals` (what is saved is what is shown). Out of `min`–`max` it clamps — or, with
+ * `outOfRange="reject"`, keeps the previous value and says the range under the field.
  * Sizes itself to its content (field-sizing, with a ch-width fallback) unless the caller sets a width.
  */
 export function NumberInput({
@@ -362,6 +364,8 @@ export function NumberInput({
   align,
   onDraft,
   grouping = false,
+  outOfRange = "clamp",
+  rangeHint,
 }: {
   value: number | null;
   onCommit: (v: number | null) => void;
@@ -383,11 +387,22 @@ export function NumberInput({
   /** CSS width of the input (e.g. "100%", "4ch"). Default: fit the content. */
   width?: string;
   align?: "left" | "right" | "center";
+  /**
+   * "clamp" (default): a value past `min` / `max` saves as the limit. "reject": nothing is saved,
+   * the field keeps its previous value, is marked invalid and shows `rangeHint` under it (announced
+   * politely) until the next accepted entry — for readings where the limit would look believable.
+   */
+  outOfRange?: "clamp" | "reject";
+  /** The range shown when a value is rejected. Default: "min–max" and the unit, when it's text ("20–220 bpm"). */
+  rangeHint?: string;
 }) {
   const field = useFieldIds();
+  const hintId = useId();
+  const [rejected, setRejected] = useState(false);
+  const round = (v: number) => (decimals ? +v.toFixed(decimals) : Math.round(v));
   const show = (v: number | null) => {
     if (v === null) return "";
-    const n = decimals ? +v.toFixed(decimals) : Math.round(v);
+    const n = round(v);
     return grouping ? n.toLocaleString("en-US", { maximumFractionDigits: decimals }) : String(n);
   };
   const [text, setText] = useState(show(value));
@@ -400,10 +415,16 @@ export function NumberInput({
   const commit = () => {
     let n = parseNum(text);
     if (n !== null) {
+      n = round(n);
+      if (outOfRange === "reject" && ((min !== undefined && n < min) || (max !== undefined && n > max))) {
+        setRejected(true);
+        setText(show(value));
+        return;
+      }
       if (min !== undefined) n = Math.max(min, n);
       if (max !== undefined) n = Math.min(max, n);
-      if (!decimals) n = Math.round(n);
     }
+    setRejected(false);
     if (n !== value) onCommit(n);
     setText(show(n));
   };
@@ -413,13 +434,14 @@ export function NumberInput({
   const chars = Math.max(1, (text || placeholder).length);
   const style: CSSProperties | undefined = width ? { width } : callerSized ? undefined : { width: `calc(${chars}ch + 2px)` };
 
-  return (
+  const describedBy = [field?.describedBy, rejected && hintId].filter(Boolean).join(" ") || undefined;
+  const input = (
     <label className={clsx("inline-flex items-baseline gap-1", className)}>
       <input
         aria-label={ariaLabel}
         aria-labelledby={field ? field.labelId : undefined}
-        aria-describedby={field?.describedBy}
-        aria-invalid={field?.invalid || undefined}
+        aria-describedby={describedBy}
+        aria-invalid={field?.invalid || rejected || undefined}
         inputMode={decimals ? "decimal" : "numeric"}
         enterKeyHint="done"
         autoFocus={autoFocus}
@@ -445,6 +467,22 @@ export function NumberInput({
       />
       {unit && <span className={clsx("text-xs", unitClassName ?? "text-mute")}>{unit}</span>}
     </label>
+  );
+  if (outOfRange !== "reject") return input;
+  const range = rangeHint ?? `${min ?? ""}–${max ?? ""}${typeof unit === "string" ? ` ${unit}` : ""}`;
+  // The live region is always there (empty until a rejection), so the hint is announced when it appears.
+  return (
+    <div>
+      {input}
+      <div id={hintId} aria-live="polite" className={clsx(rejected && "mt-1.5 text-xs text-warn")}>
+        {rejected && (
+          <>
+            <span className="sr-only">{ariaLabel} not saved: use </span>
+            {range}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1233,12 +1271,19 @@ export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-6 text-sm leading-relaxed text-mute">{children}</div>;
 }
 
-/** A pressed/unpressed chip (aria-pressed): one choice of a ChipGroup, or a toggle of its own. */
+/**
+ * A pressed/unpressed chip (aria-pressed): one choice of a ChipGroup, or a toggle of its own.
+ * `tone="accent"` (default) fills a pressed chip lime with a check — a choice made. `tone="neutral"`
+ * presses to a light graphite fill with no check, for a plain on/off record that isn't an achievement
+ * (the "Also today" flags); aria-pressed carries the state.
+ */
 export function ChoiceChip({
   on,
   onClick,
   disabled,
   tall,
+  tone = "accent",
+  fill,
   children,
 }: {
   on: boolean;
@@ -1246,6 +1291,9 @@ export function ChoiceChip({
   disabled?: boolean;
   /** A 44px-tall chip (a stand-alone toggle), instead of 36px inside a compact form. */
   tall?: boolean;
+  tone?: "accent" | "neutral";
+  /** Fill a grid cell: centred, with tighter side padding. */
+  fill?: boolean;
   children: string;
 }) {
   // Locked chips stay focusable (aria-disabled, not disabled): Tab reaches them, and with them the
@@ -1259,11 +1307,16 @@ export function ChoiceChip({
       className={clsx(
         "chip gap-1",
         tall ? "min-h-11" : "min-h-9",
-        on ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2",
+        fill && "w-full min-w-0 justify-center px-1.5",
+        on
+          ? tone === "neutral"
+            ? "bg-white/[0.14] text-fg ring-1 ring-white/30 ring-inset"
+            : "bg-accent text-accent-ink"
+          : "bg-white/[0.05] text-fg-2",
         disabled && !on && "opacity-40",
       )}
     >
-      {on && <Check size={12} strokeWidth={3} aria-hidden />}
+      {on && tone === "accent" && <Check size={12} strokeWidth={3} aria-hidden />}
       {children}
     </button>
   );

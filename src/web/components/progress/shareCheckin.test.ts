@@ -20,7 +20,7 @@ const base: WeeklyCheckin = {
   avgSleepMinutes: 440,
   avgHrv: 52,
   avgRestingHr: 48.4,
-  vo2Max: { value: 52.3, date: "2026-11-01", change: 1.2, since: "2026-10-02" },
+  vo2Max: { value: 52.3, date: "2026-11-01", change: 1.2, since: "2026-10-02", current: true },
   next: {
     direction: "lose",
     rateLbPerWeek: -1,
@@ -43,10 +43,22 @@ const base: WeeklyCheckin = {
 
 describe("checkinText", () => {
   it("gives VO2 max without a change when there is nothing to compare it with", () => {
-    const text = checkinText({ ...base, vo2Max: { value: 52, date: "2026-11-01", change: null, since: null } }, { today: "2026-11-02" });
+    const text = checkinText(
+      { ...base, vo2Max: { value: 52, date: "2026-11-01", change: null, since: null, current: true } },
+      { today: "2026-11-02" },
+    );
     expect(text).toContain("\nVO2 max 52.0\n");
-    expect(vo2Change({ value: 52, date: "2026-11-01", change: null, since: null })).toBe("as of Nov 1");
-    expect(vo2Change({ value: 52, date: "2026-11-01", change: -0.5, since: "2026-10-05" })).toBe("−0.5 since Oct 5");
+    expect(vo2Change({ value: 52, date: "2026-11-01", change: null, since: null, current: true })).toBe("as of Nov 1");
+    expect(vo2Change({ value: 52, date: "2026-11-01", change: -0.5, since: "2026-10-05", current: true })).toBe("−0.5 since Oct 5");
+  });
+
+  it("dates a VO2 max from before the check-in week instead of showing its change as this week's", () => {
+    const stale = { value: 50, date: "2026-08-20", change: 2, since: "2026-08-01", current: false };
+    expect(vo2Change(stale)).toBe("as of Aug 20");
+    expect(checkinText({ ...base, vo2Max: stale }, { today: "2026-11-02" })).toContain("\nVO2 max 50.0 (as of Aug 20)\n");
+    expect(checkinText({ ...base, vo2Max: { ...stale, change: null, since: null } }, { today: "2026-11-02" })).toContain(
+      "\nVO2 max 50.0 (as of Aug 20)\n",
+    );
   });
 
   it("summarises what the check-in shows, one line per group", () => {

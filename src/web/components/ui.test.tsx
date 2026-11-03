@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DotScale, Sheet, Stepper } from "./ui";
+import { ChoiceChip, DotScale, NumberInput, Sheet, Stepper } from "./ui";
 
 const root = () => document.getElementById("root")!;
 
@@ -585,5 +585,129 @@ describe("DotScale", () => {
     await user.click(screen.getByRole("radio", { name: "Energy 5 of 5" }));
     await user.click(screen.getByRole("button", { name: "Clear Energy" }));
     expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+});
+
+describe("NumberInput", () => {
+  function Harness(props: Partial<Parameters<typeof NumberInput>[0]> & { initial?: number | null; onSave?: (v: number | null) => void }) {
+    const { initial = null, onSave, ...rest } = props;
+    const [v, setV] = useState<number | null>(initial);
+    return (
+      <NumberInput
+        ariaLabel="Reading"
+        {...rest}
+        value={v}
+        onCommit={(n) => {
+          onSave?.(n);
+          setV(n);
+        }}
+      />
+    );
+  }
+
+  it("saves what it shows: rounded to `decimals` on commit", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<Harness decimals={1} onSave={onSave} />);
+    const input = screen.getByRole("textbox", { name: "Reading" });
+    await user.type(input, "51.54{Enter}");
+    expect(onSave).toHaveBeenLastCalledWith(51.5);
+    expect(input).toHaveProperty("value", "51.5");
+    await user.clear(input);
+    await user.type(input, "51.56{Enter}");
+    expect(onSave).toHaveBeenLastCalledWith(51.6);
+    await user.clear(input);
+    await user.type(input, "0.125{Enter}");
+    expect(onSave).toHaveBeenLastCalledWith(0.1);
+  });
+
+  it("clamps out-of-range values by default", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<Harness min={20} max={220} onSave={onSave} />);
+    const input = screen.getByRole("textbox", { name: "Reading" });
+    await user.type(input, "5{Enter}");
+    expect(onSave).toHaveBeenLastCalledWith(20);
+    expect(input.getAttribute("aria-invalid")).toBeNull();
+  });
+
+  it('with outOfRange="reject", keeps the previous value and says the range until an accepted entry', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<Harness initial={48} min={20} max={220} unit="bpm" outOfRange="reject" onSave={onSave} />);
+    const input = screen.getByRole("textbox", { name: "Reading" });
+    expect(input.getAttribute("aria-invalid")).toBeNull();
+    expect(input.getAttribute("aria-describedby")).toBeNull();
+
+    await user.clear(input);
+    await user.type(input, "5{Enter}");
+    expect(onSave).not.toHaveBeenCalled();
+    expect(input).toHaveProperty("value", "48");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    const hint = document.getElementById(input.getAttribute("aria-describedby")!)!;
+    expect(hint.getAttribute("aria-live")).toBe("polite");
+    expect(hint.textContent).toBe("Reading not saved: use 20–220 bpm");
+    expect(hint.querySelector(".sr-only")!.textContent).toBe("Reading not saved: use ");
+
+    // Above the range too — judged after rounding (220.4 is 220, accepted).
+    await user.clear(input);
+    await user.type(input, "520{Enter}");
+    expect(onSave).not.toHaveBeenCalled();
+    await user.clear(input);
+    await user.type(input, "220.4{Enter}");
+    expect(onSave).toHaveBeenLastCalledWith(220);
+    expect(input.getAttribute("aria-invalid")).toBeNull();
+    expect(input.getAttribute("aria-describedby")).toBeNull();
+    expect(hint.textContent).toBe("");
+
+    // Clearing is never out of range.
+    await user.clear(input);
+    await user.type(input, "{Enter}");
+    expect(onSave).toHaveBeenLastCalledWith(null);
+  });
+
+  it("names the range from `rangeHint` when given", async () => {
+    const user = userEvent.setup();
+    render(<Harness min={10} max={100} decimals={1} outOfRange="reject" rangeHint="10–100 mL/kg/min" />);
+    const input = screen.getByRole("textbox", { name: "Reading" });
+    await user.type(input, "9.94{Enter}");
+    expect(document.getElementById(input.getAttribute("aria-describedby")!)!.textContent).toContain("10–100 mL/kg/min");
+    // 9.96 rounds to 10.0: in range.
+    await user.clear(input);
+    await user.type(input, "9.96{Enter}");
+    expect(input).toHaveProperty("value", "10");
+    expect(input.getAttribute("aria-invalid")).toBeNull();
+  });
+});
+
+describe("ChoiceChip", () => {
+  it("presses lime with a check by default, and to a neutral fill without one", () => {
+    const { rerender } = render(
+      <ChoiceChip on onClick={() => {}}>
+        Barbell
+      </ChoiceChip>,
+    );
+    const chip = () => screen.getByRole("button");
+    expect(chip().getAttribute("aria-pressed")).toBe("true");
+    expect(chip().className).toContain("bg-accent");
+    expect(chip().querySelector("svg")).not.toBeNull();
+
+    rerender(
+      <ChoiceChip on tone="neutral" onClick={() => {}}>
+        Alcohol
+      </ChoiceChip>,
+    );
+    expect(chip().getAttribute("aria-pressed")).toBe("true");
+    expect(chip().className).not.toContain("bg-accent");
+    expect(chip().className).toContain("bg-white/[0.14]");
+    expect(chip().querySelector("svg")).toBeNull();
+
+    rerender(
+      <ChoiceChip on={false} tone="neutral" onClick={() => {}}>
+        Alcohol
+      </ChoiceChip>,
+    );
+    expect(chip().getAttribute("aria-pressed")).toBe("false");
+    expect(chip().className).not.toContain("bg-white/[0.14]");
   });
 });

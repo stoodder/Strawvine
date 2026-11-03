@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
-import { useId, useState, type ReactNode } from "react";
+import { Fragment, useId, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 import { weekdayName } from "../../../shared/dates";
 import type { ChecklistItem } from "../../../shared/gamify";
@@ -118,19 +118,33 @@ function Value({ n, unit }: { n: ReactNode; unit?: string }) {
   );
 }
 
+/** "7h 30m · HRV 55 · RHR 48"; "RHR" is read out as "resting heart rate" (VoiceOver spells the letters). */
+function morningSub(day: DayLog): ReactNode {
+  const parts: ReactNode[] = [];
+  if (day.sleepMinutes != null) parts.push(minutesToHM(day.sleepMinutes));
+  if (day.hrvMs != null) parts.push(`HRV ${fmt(day.hrvMs)}`);
+  if (day.restingHrBpm != null)
+    parts.push(
+      <>
+        <span aria-hidden>RHR</span>
+        <span className="sr-only">resting heart rate</span> {fmt(day.restingHrBpm)}
+      </>,
+    );
+  if (!parts.length) return "Weight · sleep · HRV";
+  return parts.map((p, i) => (
+    <Fragment key={i}>
+      {i > 0 && " · "}
+      {p}
+    </Fragment>
+  ));
+}
+
 function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: LiftSummary): Summary {
   switch (item.key) {
     case "morning":
       return {
         value: day.weightLb !== null ? <Value n={fmt(day.weightLb, 1)} unit="lb" /> : null,
-        sub:
-          [
-            day.sleepMinutes != null && minutesToHM(day.sleepMinutes),
-            day.hrvMs != null && `HRV ${fmt(day.hrvMs)}`,
-            day.restingHrBpm != null && `RHR ${fmt(day.restingHrBpm)}`,
-          ]
-            .filter(Boolean)
-            .join(" · ") || "Weight · sleep · HRV",
+        sub: morningSub(day),
       };
     case "fuel":
       return {

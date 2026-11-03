@@ -2,7 +2,9 @@
  * Optional recovery metrics and the "Also today" flags (SPEC §3.3, §3.4): resting HR and VO2 max
  * are logged in the morning editor, shown on Today (Recovery, the Weigh-in summary) and averaged /
  * trended in the weekly check-in; alcohol, nicotine, THC and caffeine are tracking-only chips in
- * the Nutrition editor. Neither closes the day. Nothing overflows a 320 px phone with both open.
+ * the Nutrition editor (on/off: a second tap clears back to not recorded, in a neutral style, not
+ * lime). Readings out of range are refused, not clamped. Neither closes the day. Nothing overflows
+ * a 320 px phone with both open.
  */
 import type { Locator, Page } from "@playwright/test";
 import { dismissCelebrations, expect, expectSynced, fillNumber, login, pageOverflow, serverData, startClockAt, test } from "./helpers";
@@ -42,23 +44,44 @@ test("resting HR and VO2 max from the morning editor show on Today and in the ch
   await logMorning(page, "/day/2026-10-29", "50", "51.2");
   await page.goto("/");
   await morningRow(page).click();
+  const rhrInput = page.getByRole("textbox", { name: "Resting HR", exact: true });
+  const vo2Input = page.getByRole("textbox", { name: "VO2 max", exact: true });
   await fillNumber(page, "Resting HR", "48.6"); // whole bpm
-  await fillNumber(page, "VO2 max", "51.54"); // one decimal
-  await expect(page.getByRole("textbox", { name: "Resting HR", exact: true })).toHaveValue("49");
-  await expect(page.getByRole("textbox", { name: "VO2 max", exact: true })).toHaveValue("51.5");
+  await fillNumber(page, "VO2 max", "51.54"); // one decimal, saved as shown
+  await expect(rhrInput).toHaveValue("49");
+  await expect(vo2Input).toHaveValue("51.5");
+  // Units sit in the boxes.
+  await expect(rhrInput.locator("xpath=..")).toContainText("bpm");
+  await expect(page.getByRole("textbox", { name: "HRV", exact: true }).locator("xpath=..")).toContainText("ms");
+  // Out of range: refused (not clamped to a believable 20 bpm), the range said under the field.
+  await fillNumber(page, "Resting HR", "5");
+  await expect(rhrInput).toHaveValue("49");
+  await expect(rhrInput).toHaveAttribute("aria-invalid", "true");
+  await expect(rhrInput).toHaveAccessibleDescription("Resting HR not saved: use 20–220 bpm");
+  await expect(page.getByText("20–220 bpm")).toBeVisible();
   expect(await pageOverflow(page)).toBeNull();
+  await fillNumber(page, "VO2 max", "520");
+  await expect(vo2Input).toHaveValue("51.5");
+  await expect(vo2Input).toHaveAttribute("aria-invalid", "true");
+  expect(await pageOverflow(page)).toBeNull();
+  // The next accepted entry clears it.
+  await fillNumber(page, "Resting HR", "49");
+  await expect(rhrInput).not.toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText("20–220 bpm")).toHaveCount(0);
   await morningRow(page).click();
   await expectSynced(page);
 
   const server = await serverData(page);
   expect(server.days.find((d) => d.date === "2026-10-29")).toMatchObject({ restingHrBpm: 50, vo2Max: 51.2 });
-  expect(server.days.find((d) => d.date === TODAY)).toMatchObject({ restingHrBpm: 49, vo2Max: 51.54, weightLb: null });
+  expect(server.days.find((d) => d.date === TODAY)).toMatchObject({ restingHrBpm: 49, vo2Max: 51.5, weightLb: null });
 
-  // Today: in the Recovery stats with units, and in the Weigh-in row's summary — which they don't close.
+  // Today: in the Recovery stats (VO2 max without its unit, which would wrap here), and in the
+  // Weigh-in row's summary — which they don't close.
   const recovery = page.locator("section").filter({ has: page.getByRole("heading", { name: "Recovery", exact: true }) });
   await expect(stat(recovery, "Resting HR")).toHaveText("Resting HR49bpm");
-  await expect(stat(recovery, "VO2 max")).toHaveText("VO2 max51.5mL/kg/min");
-  await expect(morningRow(page)).toContainText("RHR 49");
+  await expect(stat(recovery, "VO2 max")).toHaveText("VO2 max51.5");
+  await expect(morningRow(page)).toContainText("RHR");
+  await expect(page.getByRole("button", { name: /resting heart rate 49/ })).toHaveCount(1);
   await expect(morningRow(page)).toContainText("not done");
   expect(await pageOverflow(page)).toBeNull();
 
@@ -85,21 +108,36 @@ test("Also today chips in the Nutrition editor are saved as tracking-only flags"
   await chip("Alcohol").click();
   await expect(chip("Caffeine")).toHaveAttribute("aria-pressed", "true");
   await expect(chip("Alcohol")).toHaveAttribute("aria-pressed", "true");
-  // Tapping again records none.
+  // Pressed is a neutral fill — not the lime of "done" — and carries no check mark.
+  const look = await chip("Caffeine").evaluate((b) => ({ bg: getComputedStyle(b).backgroundColor, svg: !!b.querySelector("svg") }));
+  expect(look.svg).toBe(false);
+  expect(look.bg).not.toMatch(/183,\s*243,\s*106|b7f36a/i);
+  // Tapping again clears it back to not recorded (the server gets null, never false).
   await chip("Alcohol").click();
   await expect(chip("Alcohol")).toHaveAttribute("aria-pressed", "false");
-  // 44px targets that wrap inside the phone.
-  for (const name of ["Alcohol", "Nicotine", "THC", "Caffeine"]) {
-    const box = (await chip(name).boundingBox())!;
+  await expectSynced(page);
+  expect((await serverData(page)).days.find((d) => d.date === TODAY)).toMatchObject({ caffeine: true, alcohol: null });
+
+  // 44px targets: two by two inside a 320 px phone, all four in a row at 390.
+  const boxes = async () => Promise.all(["Alcohol", "Nicotine", "THC", "Caffeine"].map(async (n) => (await chip(n).boundingBox())!));
+  const rows = (bs: Array<{ y: number }>) => new Set(bs.map((b) => Math.round(b.y))).size;
+  let bs = await boxes();
+  for (const box of bs) {
     expect(box.height).toBeGreaterThanOrEqual(44);
     expect(box.x + box.width).toBeLessThanOrEqual(320 - 16 + 0.5);
   }
+  expect(rows(bs)).toBe(2);
+  expect(await pageOverflow(page)).toBeNull();
+  await page.setViewportSize({ width: 390, height: 844 });
+  bs = await boxes();
+  expect(rows(bs)).toBe(1);
+  for (const box of bs) expect(box.x + box.width).toBeLessThanOrEqual(390 - 16 + 0.5);
   expect(await pageOverflow(page)).toBeNull();
   await nutritionRow(page).click();
   await expectSynced(page);
 
   const day = (await serverData(page)).days.find((d) => d.date === TODAY);
-  expect(day).toMatchObject({ caffeine: true, alcohol: false, nicotine: null, thc: null, calories: null });
+  expect(day).toMatchObject({ caffeine: true, alcohol: null, nicotine: null, thc: null, calories: null });
   // The Nutrition row lists what was had; nothing else changes.
   await expect(nutritionRow(page)).toContainText("Caffeine");
   await expect(nutritionRow(page)).not.toContainText("Alcohol");

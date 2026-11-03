@@ -10,6 +10,12 @@ import type { DayLog } from "./schemas";
 export const RECOVERY_RECENT_DAYS = 3;
 /** The baseline: the 28 days before the recent window. */
 export const RECOVERY_BASELINE_DAYS = 28;
+/**
+ * Readings a window needs before it's compared at all: one stray value can't make a "recent"
+ * mean (+7 % is ~3.4 bpm at a 48 bpm baseline), nor a handful of days a baseline.
+ */
+export const RECOVERY_MIN_RECENT_READINGS = 2;
+export const RECOVERY_MIN_BASELINE_READINGS = 7;
 
 /** HRV is low under 88 % of its baseline, high over 108 %. */
 export const HRV_LOW_RATIO = 0.88;
@@ -27,7 +33,7 @@ export const VO2_CHANGE_DAYS = 30;
 /** A VO2 max logged longer ago than this isn't shown as "latest". */
 export const VO2_STALE_DAYS = 90;
 
-const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
 
 export interface BaselineReading {
   /** Mean of the recent window (today and the two days before). */
@@ -38,41 +44,44 @@ export interface BaselineReading {
 
 /**
  * A field's recent mean against its baseline as of `today`: days without a value are skipped;
- * null unless both windows have at least one value.
+ * null unless the recent window has `RECOVERY_MIN_RECENT_READINGS` values and the baseline
+ * `RECOVERY_MIN_BASELINE_READINGS`.
  */
 export function baselineReading(
   byDate: ReadonlyMap<ISODate, DayLog>,
   today: ISODate,
   pick: (d: DayLog) => number | null | undefined,
 ): BaselineReading | null {
-  const avg = (from: number, to: number) =>
-    mean(
-      dateRange(addDays(today, -from), addDays(today, -to))
-        .map((d) => {
-          const day = byDate.get(d);
-          return day ? pick(day) : null;
-        })
-        .filter((v): v is number => v != null),
-    );
-  const recent = avg(RECOVERY_RECENT_DAYS - 1, 0);
-  const baseline = avg(RECOVERY_RECENT_DAYS + RECOVERY_BASELINE_DAYS - 1, RECOVERY_RECENT_DAYS);
-  return recent !== null && baseline !== null ? { recent, baseline } : null;
+  const values = (from: number, to: number) =>
+    dateRange(addDays(today, -from), addDays(today, -to))
+      .map((d) => {
+        const day = byDate.get(d);
+        return day ? pick(day) : null;
+      })
+      .filter((v): v is number => v != null && Number.isFinite(v));
+  const recent = values(RECOVERY_RECENT_DAYS - 1, 0);
+  const baseline = values(RECOVERY_RECENT_DAYS + RECOVERY_BASELINE_DAYS - 1, RECOVERY_RECENT_DAYS);
+  if (recent.length < RECOVERY_MIN_RECENT_READINGS || baseline.length < RECOVERY_MIN_BASELINE_READINGS) return null;
+  return { recent: mean(recent), baseline: mean(baseline) };
 }
 
 export type Signal = "low" | "high" | null;
 
+/** Float noise ignored at the thresholds (50 × 0.07 is 3.5000000000000004; a mean of 52.8s may be 52.79999…). */
+const EPS = 1e-9;
+
+/** Low strictly under 88 % of the baseline, high strictly over 108 %. */
 export function hrvSignal(r: BaselineReading | null): Signal {
   if (!r) return null;
-  if (r.recent < r.baseline * HRV_LOW_RATIO) return "low";
-  if (r.recent > r.baseline * HRV_HIGH_RATIO) return "high";
+  if (r.recent < r.baseline * HRV_LOW_RATIO - EPS) return "low";
+  if (r.recent > r.baseline * HRV_HIGH_RATIO + EPS) return "high";
   return null;
 }
 
 export function restingHrSignal(r: BaselineReading | null): Signal {
   if (!r) return null;
   const diff = r.recent - r.baseline;
-  // "At least", with float noise ignored (50 × 0.07 is 3.5000000000000004).
-  const atLeast = (x: number, limit: number) => x >= limit - 1e-9;
+  const atLeast = (x: number, limit: number) => x >= limit - EPS;
   if (atLeast(diff, RHR_HIGH_BPM) || atLeast(diff, r.baseline * RHR_HIGH_PCT)) return "high";
   if (atLeast(-diff, RHR_LOW_BPM) || atLeast(-diff, r.baseline * RHR_LOW_PCT)) return "low";
   return null;
@@ -95,22 +104,24 @@ export function recoveryInsight(byDate: ReadonlyMap<ISODate, DayLog>, today: ISO
   const rhr = baselineReading(byDate, today, (d) => d.restingHrBpm);
   const h = hrvSignal(hrv);
   const r = restingHrSignal(rhr);
-  const hrvUnder = hrv && Math.round((1 - hrv.recent / hrv.baseline) * 100);
-  const rhrOver = rhr && Math.round(rhr.recent - rhr.baseline);
+  // Magnitudes, rounded half away from zero: −3.5 bpm reads "4 bpm below", like +3.5 "4 bpm above".
+  const hrvUnder = hrv && Math.round(Math.abs(1 - hrv.recent / hrv.baseline) * 100);
+  const rhrBy = rhr && Math.round(Math.abs(rhr.recent - rhr.baseline));
   const lighter = "A lighter day may pay off.";
+  const base = "your 4-week baseline";
 
   if (h === "low" && r === "high")
     return {
       key: "recovery-low",
       tone: "warn",
-      text: `HRV is ${hrvUnder}% under and resting HR ${rhrOver} bpm above your baseline. ${lighter}`,
+      text: `HRV is ${hrvUnder}% under and resting HR ${rhrBy} bpm above ${base}. ${lighter}`,
     };
-  if (h === "low") return { key: "hrv-low", tone: "warn", text: `HRV is ${hrvUnder}% under your baseline. ${lighter}` };
-  if (r === "high") return { key: "rhr-high", tone: "warn", text: `Resting HR is ${rhrOver} bpm above your baseline. ${lighter}` };
+  if (h === "low") return { key: "hrv-low", tone: "warn", text: `HRV is ${hrvUnder}% under ${base}. ${lighter}` };
+  if (r === "high") return { key: "rhr-high", tone: "warn", text: `Resting HR is ${rhrBy} bpm above ${base}. ${lighter}` };
   if (h === "high" && r === "low")
     return { key: "recovery-high", tone: "good", text: "HRV is up and resting HR is down — primed to push." };
-  if (h === "high") return { key: "hrv-high", tone: "good", text: "HRV is running above baseline — primed to push." };
-  if (r === "low") return { key: "rhr-low", tone: "good", text: `Resting HR is ${-rhrOver!} bpm below your baseline — recovering well.` };
+  if (h === "high") return { key: "hrv-high", tone: "good", text: `HRV is running above ${base} — primed to push.` };
+  if (r === "low") return { key: "rhr-low", tone: "good", text: `Resting HR is ${rhrBy} bpm below ${base} — recovering well.` };
   return null;
 }
 
@@ -121,20 +132,29 @@ export interface Vo2Trend {
   /** Latest minus the oldest value in the 30 days before it (one decimal); null without one. */
   change: number | null;
   since: ISODate | null;
+  /** Logged within the period being shown (on/after `currentFrom`); a stale value is labelled with its date. */
+  current: boolean;
 }
 
 /**
  * VO2 max moves slowly, so it is shown as the latest value with its change over about a month:
  * against the oldest value logged in the `VO2_CHANGE_DAYS` before the latest (daily logging
  * compares with 30 days earlier; sparser logging with the earliest it has, named by `since`).
- * Null when nothing was logged in the `VO2_STALE_DAYS` up to `asOf`.
+ * Null when nothing was logged in the `VO2_STALE_DAYS` up to `asOf`. With `currentFrom` (the
+ * check-in week's first day), a latest value from before it is not `current`.
  */
-export function vo2MaxTrend(days: ReadonlyArray<DayLog>, asOf: ISODate): Vo2Trend | null {
+export function vo2MaxTrend(days: ReadonlyArray<DayLog>, asOf: ISODate, currentFrom?: ISODate): Vo2Trend | null {
   const logged = days.filter((d) => d.vo2Max != null && d.date <= asOf).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   const latest = logged.at(-1);
   if (!latest || latest.date < addDays(asOf, -VO2_STALE_DAYS)) return null;
   const from = addDays(latest.date, -VO2_CHANGE_DAYS);
   const ref = logged.find((d) => d.date >= from && d.date < latest.date);
   const change = ref ? Math.round((latest.vo2Max! - ref.vo2Max!) * 10) / 10 || 0 : null;
-  return { value: latest.vo2Max!, date: latest.date, change, since: ref?.date ?? null };
+  return {
+    value: latest.vo2Max!,
+    date: latest.date,
+    change,
+    since: ref?.date ?? null,
+    current: currentFrom === undefined || latest.date >= currentFrom,
+  };
 }
