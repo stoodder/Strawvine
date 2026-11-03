@@ -1,5 +1,6 @@
 import { formatShortDate, type ISODate } from "../../../shared/dates";
 import type { WeeklyCheckin } from "../../../shared/insights";
+import type { Vo2Trend } from "../../../shared/recovery";
 import { fmt, minutesToHM, signed } from "../../lib/format";
 import { formatProjectedRange } from "../projection";
 
@@ -10,7 +11,8 @@ import { formatProjectedRange } from "../projection";
  *   Strawvine check-in · Oct 26 – Nov 1
  *   TDEE 2,850 kcal · trend 201.3 lb (−0.8 this week, plan −1.0)
  *   Intake 2,310 kcal avg · 5/7 days on target · protein 188 g
- *   Steps 9,820 avg · sleep 7h 20m · HRV 52 ms
+ *   Steps 9,820 avg · sleep 7h 20m · HRV 52 ms · resting HR 48 bpm
+ *   VO2 max 52.3 (+1.2 since Oct 2)
  *   Lifts 3/4 · Metcon 2/3 · Zone 2 1/2
  *   Next week 2,400 kcal/day · P 200 · C 220 · F 70
  *   Goal 185 lb projected Dec 19 – Jan 8, 2027
@@ -37,8 +39,10 @@ export function checkinText(c: WeeklyCheckin, opts: { today: ISODate; goalLb?: n
       c.avgSteps !== null && `Steps ${fmt(c.avgSteps)} avg`,
       c.avgSleepMinutes !== null && `sleep ${minutesToHM(c.avgSleepMinutes)}`,
       c.avgHrv !== null && `HRV ${fmt(c.avgHrv)} ms`,
+      c.avgRestingHr != null && `resting HR ${fmt(c.avgRestingHr)} bpm`,
     ]),
   );
+  if (c.vo2Max) lines.push(`VO2 max ${fmt(c.vo2Max.value, 1)}${c.vo2Max.change !== null ? ` (${vo2Change(c.vo2Max)})` : ""}`);
   // A group with nothing planned and nothing done (e.g. no lifting days set up) says nothing.
   const count = (name: string, v: { done: number; planned: number }) => (v.planned > 0 || v.done > 0) && `${name} ${v.done}/${v.planned}`;
   lines.push(join([count("Lifts", c.lifts), count("Metcon", c.metcon), count("Zone 2", c.zone2)]));
@@ -49,6 +53,11 @@ export function checkinText(c: WeeklyCheckin, opts: { today: ISODate; goalLb?: n
   if (c.projection?.range && opts.goalLb != null)
     lines.push(`Goal ${fmt(opts.goalLb, opts.goalLb % 1 ? 1 : 0)} lb projected ${formatProjectedRange(c.projection.range, opts.today)}`);
   return lines.filter(Boolean).join("\n");
+}
+
+/** "+1.2 since Oct 2" — the VO2 max change over ~30 days; "as of Oct 30" without an earlier value to compare with. */
+export function vo2Change(v: Vo2Trend): string {
+  return v.change !== null && v.since ? `${signed(v.change, 1)} since ${formatShortDate(v.since)}` : `as of ${formatShortDate(v.date)}`;
 }
 
 export type ShareOutcome = "shared" | "copied" | "cancelled" | "failed";

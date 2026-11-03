@@ -23,9 +23,21 @@ export const dayLogFields = {
   carbsG: optNum(0, 3000),
   fatG: optNum(0, 1000),
   micros: z.record(safeString().max(40), z.number().min(0).max(1_000_000)).nullable(),
+  /**
+   * Tracking only (no insight, checklist or score reads them): null = not recorded, true = had
+   * it that day, false = recorded as none.
+   */
+  alcohol: z.boolean().nullable(),
+  nicotine: z.boolean().nullable(),
+  thc: z.boolean().nullable(),
+  caffeine: z.boolean().nullable(),
   steps: z.number().int().min(0).max(200_000).nullable(),
   sleepScore: optNum(0, 100),
   hrvMs: optNum(0, 500),
+  /** Resting heart rate, bpm (whole numbers in the editor). */
+  restingHrBpm: optNum(20, 220),
+  /** VO2 max estimate, mL/kg/min (one decimal in the editor). */
+  vo2Max: optNum(10, 100),
   sleepMinutes: optNum(0, 24 * 60),
   energy: z.number().int().min(1).max(5).nullable(),
   soreness: z.number().int().min(1).max(5).nullable(),

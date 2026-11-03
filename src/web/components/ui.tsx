@@ -1232,3 +1232,39 @@ export function Field({
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-6 text-sm leading-relaxed text-mute">{children}</div>;
 }
+
+/** A pressed/unpressed chip (aria-pressed): one choice of a ChipGroup, or a toggle of its own. */
+export function ChoiceChip({
+  on,
+  onClick,
+  disabled,
+  tall,
+  children,
+}: {
+  on: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  /** A 44px-tall chip (a stand-alone toggle), instead of 36px inside a compact form. */
+  tall?: boolean;
+  children: string;
+}) {
+  // Locked chips stay focusable (aria-disabled, not disabled): Tab reaches them, and with them the
+  // group's note saying why they're locked. Activating one does nothing.
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      aria-disabled={disabled || undefined}
+      onClick={disabled ? undefined : onClick}
+      className={clsx(
+        "chip gap-1",
+        tall ? "min-h-11" : "min-h-9",
+        on ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2",
+        disabled && !on && "opacity-40",
+      )}
+    >
+      {on && <Check size={12} strokeWidth={3} aria-hidden />}
+      {children}
+    </button>
+  );
+}

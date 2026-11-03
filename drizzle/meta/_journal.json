@@ -50,6 +50,13 @@
       "when": 1793623221133,
       "tag": "0006_exercise_weighted_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793712795704,
+      "tag": "0007_day_recovery_and_substances",
+      "breakpoints": true
     }
   ]
 }

@@ -257,15 +257,7 @@ export function TodayScreen() {
       </Section>
 
       {/* Recovery snapshot */}
-      {(day.sleepMinutes !== null || day.sleepScore !== null || day.hrvMs !== null || day.energy !== null || day.soreness !== null) && (
-        <Section label="Recovery">
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
-            <Stat label="Sleep" value={day.sleepMinutes !== null ? minutesToHM(day.sleepMinutes) : "—"} size="sm" />
-            <Stat label="Score" value={fmt(day.sleepScore)} size="sm" />
-            <Stat label="HRV" value={fmt(day.hrvMs)} unit={day.hrvMs !== null ? "ms" : undefined} size="sm" />
-          </div>
-        </Section>
-      )}
+      <Recovery day={day} />
 
       {/* Journal */}
       <Section label="Journal" right={<SavedTick show={saved.shown === "journal"} />}>
@@ -301,6 +293,26 @@ export function TodayScreen() {
         </Section>
       )}
     </div>
+  );
+}
+
+/**
+ * The morning's recovery numbers. Resting HR and VO2 max are optional extras: shown only when
+ * logged. (Days cached by an older build may lack those fields: read with `!= null`.)
+ */
+export function Recovery({ day }: { day: DayLog }) {
+  const any = [day.sleepMinutes, day.sleepScore, day.hrvMs, day.restingHrBpm, day.vo2Max, day.energy, day.soreness].some((v) => v != null);
+  if (!any) return null;
+  return (
+    <Section label="Recovery">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
+        <Stat label="Sleep" value={day.sleepMinutes != null ? minutesToHM(day.sleepMinutes) : "—"} size="sm" />
+        <Stat label="Score" value={fmt(day.sleepScore)} size="sm" />
+        <Stat label="HRV" value={fmt(day.hrvMs)} unit={day.hrvMs != null ? "ms" : undefined} size="sm" />
+        {day.restingHrBpm != null && <Stat label="Resting HR" value={fmt(day.restingHrBpm)} unit="bpm" size="sm" />}
+        {day.vo2Max != null && <Stat label="VO2 max" value={fmt(day.vo2Max, 1)} unit="mL/kg/min" size="sm" />}
+      </div>
+    </Section>
   );
 }
 

@@ -8,6 +8,7 @@ import { type AppData } from "./gamify";
 import { project, recommend, type Projection, type Recommendation } from "./nutrition";
 import { scheduledProgramDay } from "./program";
 import type { DayLog } from "./schemas";
+import { recoveryInsight, vo2MaxTrend, type Vo2Trend } from "./recovery";
 import { planDateOf, sessionDoneEarly } from "./session";
 
 export interface DayTargets {
@@ -52,6 +53,9 @@ export interface WeeklyCheckin {
   lifts: { done: number; planned: number };
   avgSleepMinutes: number | null;
   avgHrv: number | null;
+  avgRestingHr: number | null;
+  /** The latest VO2 max as of the week's last day, with its change over ~30 days. */
+  vo2Max: Vo2Trend | null;
   next: Recommendation | null;
   projection: Projection | null;
 }
@@ -136,7 +140,9 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
       },
     ),
     avgSleepMinutes: mean(days.filter((d) => d.sleepMinutes !== null).map((d) => d.sleepMinutes!)),
-    avgHrv: mean(days.filter((d) => d.hrvMs !== null).map((d) => d.hrvMs!)),
+    avgHrv: mean(days.filter((d) => d.hrvMs != null).map((d) => d.hrvMs!)),
+    avgRestingHr: mean(days.filter((d) => d.restingHrBpm != null).map((d) => d.restingHrBpm!)),
+    vo2Max: vo2MaxTrend(data.days, to),
     next,
     projection: end?.avgWeight != null ? project(settings, today, end.avgWeight, weekAgo?.avgWeight ?? null) : null,
   };
@@ -216,24 +222,9 @@ export function insights(data: AppData, series: ReadonlyArray<EnergyDay>, today:
       text: `Averaging ${Math.floor(avgSleep / 60)}h ${Math.round(avgSleep % 60)}m of sleep — recovery is the limiter at this volume.`,
     });
 
-  // HRV trend: last 3 days vs prior 28-day baseline.
-  const hrv = (from: number, to: number) =>
-    mean(
-      dateRange(addDays(today, -from), addDays(today, -to))
-        .map((d) => byDate.get(d)?.hrvMs)
-        .filter((v): v is number => v != null),
-    );
-  const recent = hrv(2, 0);
-  const baseline = hrv(30, 3);
-  if (recent !== null && baseline !== null) {
-    if (recent < baseline * 0.88)
-      out.push({
-        key: "hrv-low",
-        tone: "warn",
-        text: `HRV is ${Math.round((1 - recent / baseline) * 100)}% under your baseline. A lighter day may pay off.`,
-      });
-    else if (recent > baseline * 1.08) out.push({ key: "hrv-high", tone: "good", text: "HRV is running above baseline — primed to push." });
-  }
+  // Recovery: HRV and resting HR, last 3 days vs the 28 days before — one insight at most.
+  const recovery = recoveryInsight(byDate, today);
+  if (recovery) out.push(recovery);
 
   // Steps.
   const steps = last7.filter((d) => d.steps !== null).map((d) => d.steps!);

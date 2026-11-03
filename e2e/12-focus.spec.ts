@@ -19,8 +19,8 @@ test("Skip today moves focus to the exercise's Unskip button", async ({ page }) 
 
   await page.getByRole("button", { name: "Pull-up options" }).click();
   await page.getByRole("dialog").getByRole("button", { name: /^Skip today/ }).click();
-  const focused = await expectFocusNotOnBody(page, "Skip today");
-  expect(focused).toContain("Unskip Pull-up");
+  // Focus is still on the sheet's button until the sheet has closed: wait for where it lands.
+  await expect.poll(() => expectFocusNotOnBody(page, "Skip today"), { timeout: 10_000 }).toContain("Unskip Pull-up");
 });
 
 test("AMRAP log, apply and Finish keep focus off <body>", async ({ page }) => {

@@ -9,8 +9,8 @@
  * What it writes (ending the day before `through`'s cycle start, so Monday 2026-10-26 stays
  * week 1 of the first cycle):
  *   - `weeks` × 7 day logs ending at `through` (a missed day each week), with weight, calories,
- *     macros, micros, steps, sleep, HRV, energy/soreness, zone 2, metcons (a benchmark repeated
- *     so it has a PR), journal entries;
+ *     macros, micros, steps, sleep, HRV, resting HR, VO2 max, caffeine/alcohol flags, energy/soreness,
+ *     zone 2, metcons (a benchmark repeated so it has a PR), journal entries;
  *   - completed sessions on the Mondays and Wednesdays before `through` (bench / squat + a
  *     pull-up accessory block), the last Monday's carried into the next one;
  *   - older max entries (and squat / deadlift maxes) and seen achievements left alone;
@@ -57,6 +57,11 @@ export async function seedHistory(call, { through = "2026-10-25", weeks = 3 } = 
       sleepMinutes: 400 + ((i * 13) % 80),
       sleepScore: 70 + ((i * 7) % 25),
       hrvMs: 55 + ((i * 11) % 30),
+      restingHrBpm: 46 + ((i * 5) % 7),
+      vo2Max: Math.round((49.5 + i * 0.05) * 10) / 10,
+      // "Also today": coffee most days, the odd drink; the rest not recorded.
+      caffeine: i % 5 !== 0,
+      alcohol: i % 7 === 5 ? true : i % 7 === 6 ? false : null,
       energy: 1 + (i % 5),
       soreness: 1 + ((i + 2) % 5),
       zone2Done: wd === 2 || wd === 4 || wd === 6,

@@ -172,6 +172,13 @@ async function seed(call) {
       steps: 12000 + i * 250,
       sleepScore: 80 + (i % 10),
       hrvMs: 60.5 + i,
+      restingHrBpm: 48 + (i % 4),
+      vo2Max: 51.2 + i / 10,
+      // Every state of the tracking-only flags: had, recorded none, not recorded.
+      alcohol: i % 3 === 0 ? true : i % 3 === 1 ? false : null,
+      nicotine: i % 3 === 1 ? true : i % 3 === 2 ? false : null,
+      thc: i % 3 === 2 ? true : i % 3 === 0 ? false : null,
+      caffeine: i % 2 === 0,
       sleepMinutes: 420 + i,
       energy: 1 + (i % 5),
       soreness: 5 - (i % 5),

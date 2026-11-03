@@ -246,7 +246,7 @@ The app-level export (below) is a second, database-independent copy.
 ## Data
 
 Settings → **Export JSON** (`GET /api/export`) downloads everything: settings, every day log, exercise, max entry,
-session and seen achievement, with their ids (format `strawvine-export`, version 3). Nothing derived is stored; the
+session and seen achievement, with their ids (format `strawvine-export`, version 4). Nothing derived is stored; the
 export is the complete source of truth.
 
 To restore an export into a database:

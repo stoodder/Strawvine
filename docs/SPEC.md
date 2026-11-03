@@ -35,15 +35,15 @@ weekly layout and targets are all user-editable data.
 
 All fields are optional and can be edited at any time during the day (or later).
 
-| Area             | Fields                                                                                |
-| ---------------- | ------------------------------------------------------------------------------------- |
-| Morning check-in | body weight (lb), sleep score, HRV (ms), sleep duration, energy (1–5), soreness (1–5) |
-| Nutrition        | calories, protein, carbs, fat; optional micronutrients                                |
-| Steps            | daily count                                                                           |
-| Zone 2           | done + duration (default 30 min)                                                      |
-| Metcon           | done, optional notes, optional benchmark name (autocompleted from past ones) + score  |
-| Lifting          | the session (see §6)                                                                  |
-| Journal          | free-form text for the day                                                            |
+| Area             | Fields                                                                                                                                          |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Morning check-in | body weight (lb), sleep score, HRV (ms), sleep duration, energy (1–5), soreness (1–5); optional resting HR (bpm) and VO2 max (mL/kg/min) (§3.3) |
+| Nutrition        | calories, protein, carbs, fat; optional micronutrients; "Also today": alcohol, nicotine, THC, caffeine (tracking only, §3.4)                    |
+| Steps            | daily count                                                                                                                                     |
+| Zone 2           | done + duration (default 30 min)                                                                                                                |
+| Metcon           | done, optional notes, optional benchmark name (autocompleted from past ones) + score                                                            |
+| Lifting          | the session (see §6)                                                                                                                            |
+| Journal          | free-form text for the day                                                                                                                      |
 
 - The day ends at **midnight local time**.
 - Raw entries are the source of truth; **all derived numbers are recomputed** from them, so editing
@@ -97,6 +97,35 @@ tile.
 - The chart follows the same 30 / 90 / All range toggle as the bodyweight and energy charts; the Steps section names
   the range it shows ("Last 30 days", "All time"), since the toggle is out of sight up on Bodyweight.
 - It needs counts on at least two complete days.
+
+### 3.3 Recovery metrics
+
+- **Resting HR** (`restingHrBpm`, 20–220 bpm, whole numbers in the editor) and **VO2 max** (`vo2Max`, 10–100
+  mL/kg/min, one decimal) sit in the morning editor under sleep, score and HRV. Both are optional: the morning item is
+  done by the weigh-in alone, as before, and neither counts toward closing the day.
+- Today's Recovery section shows them, with units, once logged; the Weigh-in row's summary adds "RHR 48" after sleep and
+  HRV (it truncates on a narrow screen).
+- The weekly check-in (§4.6) shows the week's average resting HR and the latest VO2 max with its change over about a
+  month (`vo2MaxTrend`, `src/shared/recovery.ts`): latest value on or before the week's last day (none logged in the 90
+  days up to it: not shown), compared with the oldest value logged in the 30 days before that latest one ("+1.2 since
+  Oct 2"; "as of Oct 30" with nothing to compare). The shared check-in text carries both when present.
+- **Recovery insight** (one at most): the last 3 days' mean (today included) against the 28 days before them, for HRV
+  and for resting HR, each needing a value in both windows. HRV is low under 88 % of its baseline, high over 108 %;
+  resting HR is elevated at +5 bpm or +7 % over its baseline (whichever comes first), down at −5 bpm or −7 %. HRV low
+  and resting HR elevated are the same story, so together they make one warning ("HRV is 14% under and resting HR
+  6 bpm above your baseline. A lighter day may pay off."), never two; either alone is its own warning ("Resting HR is
+  6 bpm above your baseline. A lighter day may pay off."). A warning wins over good news from the other metric; both
+  good is one note ("HRV is up and resting HR is down — primed to push."), either alone its own. The thresholds are
+  insight constants (`src/shared/recovery.ts`), not training rules.
+
+### 3.4 Also today (Nutrition)
+
+- Four tracking-only flags in the Nutrition editor — **alcohol, nicotine, THC, caffeine** — as toggle chips. Each is
+  null (not recorded, unpressed) until tapped: a tap marks it had (true), another tap records none (false, unpressed
+  again), and so on.
+- The Nutrition row's summary on Today lists the ones marked had ("Alcohol · Caffeine") on a line of its own; nothing
+  when none.
+- Nothing reads them yet: no insight, checklist item or score.
 
 ## 4. Energy engine (TDEE)
 
@@ -152,7 +181,8 @@ into milestones (first weigh-in → averages online → first TDEE → calibrate
 ### 4.6 Weekly check-in card
 
 Smoothed TDEE, actual vs target rate, adherence (each day's calories against the target that day showed, within
-±10%), and next week's recommended calories & macros.
+±10%), averages (intake, protein, steps, sleep, HRV, and resting HR once logged), the latest VO2 max with its change
+over ~30 days (§3.3), and next week's recommended calories & macros.
 
 ## 5. Goals
 
@@ -354,7 +384,8 @@ optional note.
 - Each achievement is celebrated once. A max gain the screen already showed (applying an AMRAP bump) is filed as seen
   in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or
   only after the device comes back online.
-- Rule-based insights (protein adherence, sleep, HRV trend, steps, rate-of-change safety).
+- Rule-based insights (protein adherence, sleep, recovery trend from HRV and resting HR — one insight at most, §3.3 —
+  steps, rate-of-change safety).
 - Tasteful motion: smooth fills, a satisfying check, a restrained glow for PRs. Haptics where available.
 - Optional **high-contrast "outdoor" mode** (brighter secondary text, thicker chart lines) for gym glare.
 
@@ -384,8 +415,9 @@ optional note.
   sets only the fields a patch names, so another device's edit of a different field survives. A patch the exercise
   locks refuse (§6.5: a program day's main lift, a lift with a strength target) is answered 409 with the reason and no
   document — not a version conflict, so it isn't merged or re-sent: it shows as a change not saved (Retry / Discard)
-  with that reason. A measure change sends no workout: sessions follow it when read (§6.5). Exports are version 3
-  (exercises carry `weighted`); older ones restore every exercise as weighted. Migration 0006 turned the flag off once
+  with that reason. A measure change sends no workout: sessions follow it when read (§6.5). Exports are version 4
+  (v3: exercises carry `weighted`; v4: days carry resting HR, VO2 max and the four "Also today" flags); older ones
+  restore every exercise as weighted and those day fields as null (not recorded). Migration 0006 turned the flag off once
   for existing exercises with no sign of a load (not main lifts or max-tracked, no max entry, strength target, program
   day or logged/planned load).
 - Edits the server would reject (limits a person can hit: too many sets, an overlong note…) are refused before they are

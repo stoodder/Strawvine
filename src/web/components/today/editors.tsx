@@ -7,7 +7,7 @@ import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
 import { useData } from "../../lib/store";
 import { useToast } from "../Toast";
-import { BoxNumber, DotScale, NumberInput } from "../ui";
+import { BoxNumber, ChoiceChip, DotScale, NumberInput } from "../ui";
 import { useFocusAfter } from "../useFocusAfter";
 import { JournalText } from "../TextArea";
 import { BenchmarkHistorySheet } from "./BenchmarkHistory";
@@ -39,12 +39,14 @@ export function MorningEditor({ day, patch }: EditorProps) {
         />
         <span className="text-sm text-mute">lb</span>
       </div>
-      <div className="grid grid-cols-3 gap-4">
-        <div>
+      {/* Sleep, score and HRV in thirds; the optional resting HR and VO2 max (never part of closing the day) in
+          halves below, so "Resting HR" fits its column on a 320 px phone. */}
+      <div className="grid grid-cols-6 gap-4">
+        <div className="col-span-2">
           <div className="label mb-2">Sleep</div>
           <SleepField value={day.sleepMinutes} onCommit={(v) => patch({ sleepMinutes: v })} />
         </div>
-        <div>
+        <div className="col-span-2">
           <div className="label mb-2">Score</div>
           <BoxNumber
             ariaLabel="Sleep score"
@@ -56,7 +58,7 @@ export function MorningEditor({ day, patch }: EditorProps) {
             align="left"
           />
         </div>
-        <div>
+        <div className="col-span-2">
           <div className="label mb-2">HRV</div>
           <BoxNumber
             ariaLabel="HRV"
@@ -68,10 +70,70 @@ export function MorningEditor({ day, patch }: EditorProps) {
             align="left"
           />
         </div>
+        <div className="col-span-3">
+          <div className="label mb-2">Resting HR</div>
+          <BoxNumber
+            ariaLabel="Resting HR"
+            value={day.restingHrBpm ?? null}
+            onCommit={(v) => patch({ restingHrBpm: v })}
+            min={20}
+            max={220}
+            className="w-full"
+            align="left"
+          />
+        </div>
+        <div className="col-span-3">
+          <div className="label mb-2">VO2 max</div>
+          <BoxNumber
+            ariaLabel="VO2 max"
+            value={day.vo2Max ?? null}
+            onCommit={(v) => patch({ vo2Max: v })}
+            decimals={1}
+            min={10}
+            max={100}
+            className="w-full"
+            align="left"
+          />
+        </div>
       </div>
       <div className="flex flex-wrap gap-x-8 gap-y-4">
         <DotScale label="Energy" lowLabel="drained" highLabel="fresh" value={day.energy} onChange={(v) => patch({ energy: v })} />
         <DotScale label="Soreness" lowLabel="none" highLabel="very sore" value={day.soreness} onChange={(v) => patch({ soreness: v })} />
+      </div>
+    </div>
+  );
+}
+
+/** The tracking-only substance flags, in the order they are shown (`substancesHad` lists them the same way). */
+export const SUBSTANCES = [
+  ["alcohol", "Alcohol"],
+  ["nicotine", "Nicotine"],
+  ["thc", "THC"],
+  ["caffeine", "Caffeine"],
+] as const;
+
+/** Names of the substances marked as had ("Alcohol", "Caffeine"), in display order. */
+export function substancesHad(day: DayLog): string[] {
+  return SUBSTANCES.filter(([k]) => day[k] === true).map(([, label]) => label);
+}
+
+/**
+ * "Also today": tracking-only toggles. Untouched is null (not recorded) and looks unpressed; a
+ * tap marks it had (true), another tap records none (false).
+ */
+function AlsoToday({ day, patch }: EditorProps) {
+  const id = useId();
+  return (
+    <div>
+      <div className="label mb-2" id={id}>
+        Also today
+      </div>
+      <div className="flex flex-wrap gap-2" role="group" aria-labelledby={id}>
+        {SUBSTANCES.map(([k, label]) => (
+          <ChoiceChip key={k} tall on={day[k] === true} onClick={() => patch({ [k]: day[k] !== true })}>
+            {label}
+          </ChoiceChip>
+        ))}
       </div>
     </div>
   );
@@ -188,6 +250,7 @@ export function FuelEditor({ day, patch }: EditorProps) {
           </div>
         ))}
       </div>
+      <AlsoToday day={day} patch={patch} />
       {showMicros ? (
         <Micros micros={day.micros} onChange={(m) => patch({ micros: m })} />
       ) : (

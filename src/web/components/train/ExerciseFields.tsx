@@ -4,9 +4,9 @@
  */
 import clsx from "clsx";
 import type { ReactNode } from "react";
-import { Check } from "lucide-react";
 import type { Exercise, ExerciseCategory, Measure } from "../../../shared/schemas";
 import { isMainLift, isWeighted } from "../../../shared/session";
+import { ChoiceChip } from "../ui";
 
 /** One name per category, used for both the chips and the list tags. */
 export const CATEGORIES: Array<[ExerciseCategory, string]> = [
@@ -47,37 +47,6 @@ export const exerciseTag = (e: Exercise) =>
 export function defaultWeighted(measure: Measure, category: ExerciseCategory): boolean {
   if (category === "carry") return true;
   return measure === "reps" && category !== "core" && category !== "conditioning";
-}
-
-export function ChoiceChip({
-  on,
-  onClick,
-  disabled,
-  children,
-}: {
-  on: boolean;
-  onClick: () => void;
-  disabled?: boolean;
-  children: string;
-}) {
-  // Locked chips stay focusable (aria-disabled, not disabled): Tab reaches them, and with them the
-  // group's note saying why they're locked. Activating one does nothing.
-  return (
-    <button
-      type="button"
-      aria-pressed={on}
-      aria-disabled={disabled || undefined}
-      onClick={disabled ? undefined : onClick}
-      className={clsx(
-        "chip min-h-9 gap-1",
-        on ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2",
-        disabled && !on && "opacity-40",
-      )}
-    >
-      {on && <Check size={12} strokeWidth={3} aria-hidden />}
-      {children}
-    </button>
-  );
 }
 
 export function ChipGroup<K extends string>({

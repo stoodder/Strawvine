@@ -95,6 +95,28 @@ describe("api", () => {
     expect(day).toMatchObject({ date: "2026-11-02", weightLb: 201.4, calories: 3100, proteinG: 210, zone2Done: false });
   });
 
+  it("stores resting HR, VO2 max and the Also today flags, field by field", async () => {
+    let res = await req("/api/days/2026-11-03", json("PUT", { restingHrBpm: 48, vo2Max: 52.3, caffeine: true, alcohol: false }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ restingHrBpm: 48, vo2Max: 52.3, caffeine: true, alcohol: false, nicotine: null, thc: null });
+    // A patch without them (an older build's, or another field) leaves them alone.
+    res = await req("/api/days/2026-11-03", json("PUT", { weightLb: 200.2 }));
+    expect(await res.json()).toMatchObject({ weightLb: 200.2, restingHrBpm: 48, vo2Max: 52.3, caffeine: true, alcohol: false });
+    // Cleared to not recorded.
+    res = await req("/api/days/2026-11-03", json("PUT", { caffeine: null, thc: true }));
+    expect(await res.json()).toMatchObject({ caffeine: null, thc: true, alcohol: false });
+    // A day that never had them reads as null.
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(b.days.find((d) => d.date === "2026-11-02")).toMatchObject({ restingHrBpm: null, vo2Max: null, alcohol: null, caffeine: null });
+  });
+
+  it("refuses resting HR, VO2 max and flags out of range", async () => {
+    for (const bad of [{ restingHrBpm: 19 }, { restingHrBpm: 221 }, { vo2Max: 9.9 }, { vo2Max: 100.5 }, { caffeine: "yes" }, { thc: 1 }])
+      expect((await req("/api/days/2026-11-03", json("PUT", bad))).status, JSON.stringify(bad)).toBe(400);
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(b.days.find((d) => d.date === "2026-11-03")).toMatchObject({ restingHrBpm: 48, vo2Max: 52.3, thc: true });
+  });
+
   it("validates input", async () => {
     expect((await req("/api/days/2026-13-40", json("PUT", { weightLb: 200 }))).status).toBe(400);
     expect((await req("/api/days/2026-11-02", json("PUT", { weightLb: "heavy" }))).status).toBe(400);
@@ -890,7 +912,12 @@ describe("export & restore", () => {
     const res = await req("/api/export");
     expect(res.headers.get("content-disposition")).toMatch(/^attachment; filename="strawvine-export-\d{4}-\d{2}-\d{2}\.json"$/);
     const exported = await res.json();
-    expect(exported).toMatchObject({ format: "strawvine-export", version: 3 });
+    expect(exported).toMatchObject({ format: "strawvine-export", version: 4 });
+    expect(exported.days.find((d: { date: string }) => d.date === "2026-11-03")).toMatchObject({
+      restingHrBpm: 48,
+      vo2Max: 52.3,
+      thc: true,
+    });
     expect(exported.seenAchievements.map((s: { key: string }) => s.key)).toEqual(["calib-1", "etag-test", "streak-3"]);
     expect(exported.exercises[0].createdAt).toMatch(/Z$/);
     expect(exported.exercises.find((e: { name: string }) => e.name === "Pull-up")).toMatchObject({ weighted: false });
@@ -929,16 +956,44 @@ describe("export & restore", () => {
 
   it("restores a v2 export (before the weighted flag) as weighted, and refuses newer versions", async () => {
     const current = await buildExport(db);
-    expect(current.version).toBe(3);
+    expect(current.version).toBe(4);
     expect(current.exercises.some((e) => !e.weighted)).toBe(true);
     const v2 = { ...current, version: 2, exercises: current.exercises.map(({ weighted: _w, ...e }) => e) };
-    await expect(restoreExport(db, { ...current, version: 4 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
+    await expect(restoreExport(db, { ...current, version: 5 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
     await restoreExport(db, v2, { force: true });
     const after = await buildExport(db);
     expect(after.exercises.map((e) => e.weighted)).toEqual(current.exercises.map(() => true));
     // Back to the flags as they were, for the test below.
     await restoreExport(db, current, { force: true });
     expect((await buildExport(db)).exercises).toEqual(current.exercises);
+  });
+
+  it("restores a v3 export (days before resting HR, VO2 max and the Also today flags) with those as null", async () => {
+    const current = await buildExport(db);
+    const day = current.days.find((d) => d.date === "2026-11-03")!;
+    expect(day).toMatchObject({ restingHrBpm: 48, vo2Max: 52.3, thc: true });
+    const v3 = {
+      ...current,
+      version: 3,
+      days: current.days.map(({ restingHrBpm: _r, vo2Max: _v, alcohol: _a, nicotine: _n, thc: _t, caffeine: _c, ...d }) => d),
+    };
+    await restoreExport(db, v3, { force: true });
+    const after = await buildExport(db);
+    expect(after.days.find((d) => d.date === "2026-11-03")).toMatchObject({
+      weightLb: day.weightLb,
+      restingHrBpm: null,
+      vo2Max: null,
+      alcohol: null,
+      nicotine: null,
+      thc: null,
+      caffeine: null,
+    });
+    // A current export refuses a malformed value in them.
+    const bad = { ...current, days: current.days.map((d) => (d.date === "2026-11-03" ? { ...d, vo2Max: 500 } : d)) };
+    await expect(restoreExport(db, bad, { force: true })).rejects.toThrow(/days\.\d+\.vo2Max/);
+    // Back to the data as it was, for the tests below.
+    await restoreExport(db, current, { force: true });
+    expect((await buildExport(db)).days).toEqual(current.days);
   });
 
   it("accepts a pre-versioning export and replaces data only with force", async () => {

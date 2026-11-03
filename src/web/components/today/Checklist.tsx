@@ -7,7 +7,7 @@ import type { ChecklistItem } from "../../../shared/gamify";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { compactSteps, fmt, minutesToHM } from "../../lib/format";
 import { Bar, CheckDot } from "../ui";
-import { FuelEditor, MetconEditor, MorningEditor, StepsEditor, Zone2Editor } from "./editors";
+import { FuelEditor, MetconEditor, MorningEditor, StepsEditor, substancesHad, Zone2Editor } from "./editors";
 import { SavedTick, type SavedFlash } from "./saved";
 
 export interface LiftSummary {
@@ -105,7 +105,8 @@ export function DayChecklist({
   );
 }
 
-type Summary = { value: ReactNode; sub?: ReactNode };
+/** `note`: an extra line under `sub` (the Nutrition row's "Also today" flags). */
+type Summary = { value: ReactNode; sub?: ReactNode; note?: string };
 
 /** Value column: light numerals, unit in mute — the same for every row. */
 function Value({ n, unit }: { n: ReactNode; unit?: string }) {
@@ -123,7 +124,11 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
       return {
         value: day.weightLb !== null ? <Value n={fmt(day.weightLb, 1)} unit="lb" /> : null,
         sub:
-          [day.sleepMinutes !== null && minutesToHM(day.sleepMinutes), day.hrvMs !== null && `HRV ${fmt(day.hrvMs)}`]
+          [
+            day.sleepMinutes != null && minutesToHM(day.sleepMinutes),
+            day.hrvMs != null && `HRV ${fmt(day.hrvMs)}`,
+            day.restingHrBpm != null && `RHR ${fmt(day.restingHrBpm)}`,
+          ]
             .filter(Boolean)
             .join(" · ") || "Weight · sleep · HRV",
       };
@@ -139,6 +144,7 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
           ) : (
             "Daily totals"
           ),
+        note: substancesHad(day).join(" · ") || undefined,
       };
     case "steps":
       return {
@@ -214,6 +220,7 @@ function RowText({ item, summary, srState, saved = false }: { item: ChecklistIte
           <SavedTick show={saved} live={false} className="ml-2.5 inline-block align-[1px]" />
         </span>
         {summary.sub && <span className="mt-0.5 block truncate text-xs text-mute">{summary.sub}</span>}
+        {summary.note && <span className="mt-0.5 block truncate text-xs text-mute">{summary.note}</span>}
         {item.key === "steps" && !item.done && item.progress > 0 && <Bar className="mt-2 w-32" value={item.progress} />}
       </span>
       {summary.value && <span className="num shrink-0 text-right text-lg font-light">{summary.value}</span>}

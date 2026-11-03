@@ -12,7 +12,7 @@ import { MaxSheet } from "../components/MaxSheet";
 import { Bar, Section, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { IntakeStrip } from "../components/progress/IntakeStrip";
-import { checkinText, shareText } from "../components/progress/shareCheckin";
+import { checkinText, shareText, vo2Change } from "../components/progress/shareCheckin";
 import { useToast } from "../components/Toast";
 import { formatProjectedRange } from "../components/projection";
 import { useTitle } from "../components/useTitle";
@@ -222,6 +222,9 @@ export function ProgressScreen() {
                 size="sm"
                 sub={c.avgHrv !== null ? `HRV ${fmt(c.avgHrv)} ms` : undefined}
               />
+              {/* Optional recovery metrics: only once logged. */}
+              {c.avgRestingHr != null && <Stat label="Resting HR" value={fmt(c.avgRestingHr)} unit="bpm" size="sm" sub="average" />}
+              {c.vo2Max && <Stat label="VO2 max" value={fmt(c.vo2Max.value, 1)} unit="mL/kg/min" size="sm" sub={vo2Change(c.vo2Max)} />}
             </div>
 
             <div className="mt-8 grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">

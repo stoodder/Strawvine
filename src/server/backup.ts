@@ -6,6 +6,7 @@
 import { asc, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
+  dayLogFields,
   dayLogSchema,
   emptyDayLog,
   exerciseSchema,
@@ -39,9 +40,21 @@ export const EXPORT_FORMAT = "strawvine-export";
 /**
  * v1: unversioned exports without seen achievements or exercise timestamps. v2: complete.
  * v3: adds exercises[].weighted (v1/v2 exercises restore as weighted, as everything was then).
+ * v4: adds days[].restingHrBpm, vo2Max, alcohol, nicotine, thc and caffeine (absent in older
+ * exports: restored as null, not recorded).
  * A restore refuses versions newer than this one (fields it would silently drop).
  */
-export const EXPORT_VERSION = 3;
+export const EXPORT_VERSION = 4;
+
+/** A day as exports hold it: fields added after v1 may be missing from older files (read as null). */
+const exportDaySchema = dayLogSchema.extend({
+  restingHrBpm: dayLogFields.restingHrBpm.default(null),
+  vo2Max: dayLogFields.vo2Max.default(null),
+  alcohol: dayLogFields.alcohol.default(null),
+  nicotine: dayLogFields.nicotine.default(null),
+  thc: dayLogFields.thc.default(null),
+  caffeine: dayLogFields.caffeine.default(null),
+});
 
 export interface ExportFile {
   format: typeof EXPORT_FORMAT;
@@ -112,7 +125,7 @@ const exportFileSchema = z.object({
   format: z.literal(EXPORT_FORMAT).optional(),
   version: z.number().int().min(1).max(EXPORT_VERSION).optional(),
   settings: settingsSchema,
-  days: z.array(dayLogSchema),
+  days: z.array(exportDaySchema),
   exercises: z.array(exerciseSchema.extend({ id: rowId, createdAt: timestamp.optional() })),
   maxEntries: z.array(
     maxEntrySchema.extend({

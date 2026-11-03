@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WeeklyCheckin } from "../../../shared/insights";
-import { checkinText, shareText } from "./shareCheckin";
+import { checkinText, shareText, vo2Change } from "./shareCheckin";
 
 const base: WeeklyCheckin = {
   from: "2026-10-26",
@@ -19,6 +19,8 @@ const base: WeeklyCheckin = {
   lifts: { done: 3, planned: 4 },
   avgSleepMinutes: 440,
   avgHrv: 52,
+  avgRestingHr: 48.4,
+  vo2Max: { value: 52.3, date: "2026-11-01", change: 1.2, since: "2026-10-02" },
   next: {
     direction: "lose",
     rateLbPerWeek: -1,
@@ -40,13 +42,21 @@ const base: WeeklyCheckin = {
 } as WeeklyCheckin;
 
 describe("checkinText", () => {
+  it("gives VO2 max without a change when there is nothing to compare it with", () => {
+    const text = checkinText({ ...base, vo2Max: { value: 52, date: "2026-11-01", change: null, since: null } }, { today: "2026-11-02" });
+    expect(text).toContain("\nVO2 max 52.0\n");
+    expect(vo2Change({ value: 52, date: "2026-11-01", change: null, since: null })).toBe("as of Nov 1");
+    expect(vo2Change({ value: 52, date: "2026-11-01", change: -0.5, since: "2026-10-05" })).toBe("−0.5 since Oct 5");
+  });
+
   it("summarises what the check-in shows, one line per group", () => {
     expect(checkinText(base, { today: "2026-11-02", goalLb: 185 })).toBe(
       [
         "Strawvine check-in · Oct 26 – Nov 1",
         "TDEE 2,850 kcal · trend 201.3 lb (−0.8 this week, plan −1.0)",
         "Intake 2,310 kcal avg · 71% of days on target · protein 188 g",
-        "Steps 9,820 avg · sleep 7h 20m · HRV 52 ms",
+        "Steps 9,820 avg · sleep 7h 20m · HRV 52 ms · resting HR 48 bpm",
+        "VO2 max 52.3 (+1.2 since Oct 2)",
         "Lifts 3/4 · Metcon 2/3 · Zone 2 1/2",
         "Next week 2,400 kcal/day · P 200 · C 220 · F 70",
         "Goal 185 lb projected Dec 19 – Jan 8, 2027",
@@ -65,6 +75,8 @@ describe("checkinText", () => {
         avgSteps: null,
         avgSleepMinutes: null,
         avgHrv: null,
+        avgRestingHr: null,
+        vo2Max: null,
         daysLogged: 3,
         lifts: { done: 0, planned: 0 },
         next: null,
