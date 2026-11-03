@@ -86,6 +86,76 @@ Sodium      2,300 mg`;
     expect(parseNutrition("   ")).toBeNull();
   });
 
+  describe("exercise is never intake (a machine's kcal is a reading, SPEC §3.5)", () => {
+    it.each([
+      // Reported: a later line's label must not pull this line's numbers along, nor its kcal become calories.
+      ["Calories 2140 protein 212 carbs 150 fat 70\nZone 2 bike 320 kcal"],
+      ["2140 212 150 70\nCycling 320 kcal burned"],
+      // On one line, between separators or commas.
+      ["2140 kcal · 212 g protein · 150 g carbs · 70 g fat · Zone 2 320 kcal"],
+      ["Calories: 2140 | Protein: 212 g | Carbs: 150 g | Fat: 70 g | Exercise: 320 kcal"],
+      ["Calories 2140, Protein 212g, Carbs 150g, Fat 70g, Exercise 320 kcal"],
+      ["Calories 2140 protein 212 carbs 150 fat 70 zone 2 bike 320 kcal"],
+      ["Exercise 320 kcal protein 212 carbs 150 fat 70 calories 2140"],
+      ["P212 C150 F70 2140 zone2 320"],
+      ["2140 212 150 70 - Exercise 320 kcal"],
+    ])("reads the food in %j", (text) => {
+      expect(parseNutrition(text)).toEqual(all(2140, 212, 150, 70));
+    });
+
+    it("doesn't move an exercise number into a gap", () => {
+      // Reported: the 320 used to fill protein.
+      expect(parseNutrition("Calories 2140\nExercise 320")).toEqual({ calories: 2140, proteinG: null, carbsG: null, fatG: null });
+      expect(parseNutrition("Protein 212 Carbs 150 Fat 70 steps 12000")).toEqual({ calories: null, proteinG: 212, carbsG: 150, fatG: 70 });
+      expect(parseNutrition("Protein 212 Carbs 150 Fat 70 320 kcal burned")).toEqual({
+        calories: null,
+        proteinG: 212,
+        carbsG: 150,
+        fatG: 70,
+      });
+    });
+
+    it("reads nothing from exercise alone", () => {
+      expect(parseNutrition("Zone 2 bike 320 kcal")).toBeNull();
+      expect(parseNutrition("Zone 2, 30 min, 320 kcal")).toBeNull();
+      expect(parseNutrition("Active energy 520 kcal\nSteps 12,400\nWorkout 45 min")).toBeNull();
+    });
+
+    it("reads a meal-app daily summary with an exercise line", () => {
+      const text = `Today — Nov 3
+Food        2,140 kcal
+Exercise    -320 kcal
+Remaining   680
+Protein     212 g (40%)
+Carbs       150 g (28%)
+Fat         70 g (29%)
+Fiber       31 g`;
+      expect(parseNutrition(text)).toEqual(all(2140, 212, 150, 70));
+    });
+
+    it("reads a Cronometer-style export with energy burned lines", () => {
+      const text = `Energy 2140.4 kcal
+Active energy 520 kcal
+Resting energy 1800 kcal
+Zone 2 cycling 320 kcal
+Protein 212.3 g
+Carbs 150.2 g
+Fat 69.6 g`;
+      expect(parseNutrition(text)).toEqual(all(2140, 212, 150, 70));
+    });
+
+    it("reads an export listing the workout before the totals", () => {
+      const text = "Workout: Zone 2 bike, 40 min, 410 kcal\nTotals: 2,140 kcal · P 212 · C 150 · F 70";
+      expect(parseNutrition(text)).toEqual(all(2140, 212, 150, 70));
+    });
+  });
+
+  it("binds labels within their own line", () => {
+    // A label at the end of one line doesn't decide how another line reads.
+    expect(parseNutrition("Protein 212\n2140 kcal")).toEqual({ calories: 2140, proteinG: 212, carbsG: null, fatG: null });
+    expect(parseNutrition("Calories 2140 Protein 212\n150g carbs 70g fat")).toEqual(all(2140, 212, 150, 70));
+  });
+
   it("counts filled fields", () => {
     expect(filledCount(null)).toBe(0);
     expect(filledCount(parseNutrition("P212 F70"))).toBe(2);

@@ -49,7 +49,10 @@ export interface WeeklyCheckin {
   calorieAdherence: number | null;
   avgSteps: number | null;
   zone2: { done: number; planned: number };
-  /** The week's total of the Zone 2 machine's calorie readings (a reading only, not intake); null when none logged. */
+  /**
+   * The week's total of the Zone 2 machine's calorie readings (a reading only, not intake), over the days `zone2.done`
+   * counts (planned and done); null when none of them has one.
+   */
   zone2Kcal: number | null;
   metcon: { done: number; planned: number };
   lifts: { done: number; planned: number };
@@ -104,11 +107,23 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     .filter((x): x is { calories: number; target: number } => x.target !== null && x.target > 0);
   const adherent = judged.filter((x) => Math.abs(x.calories - x.target) <= x.target * 0.1).length;
 
-  const count = (pred: (date: ISODate) => boolean, done: (date: ISODate) => boolean) => {
+  /** The planned days, and those done: the count's numerator. */
+  const plannedDone = (pred: (date: ISODate) => boolean, done: (date: ISODate) => boolean) => {
     const planned = dates.filter(pred);
-    return { planned: planned.length, done: planned.filter(done).length };
+    return { planned, done: planned.filter(done) };
+  };
+  const count = (pred: (date: ISODate) => boolean, done: (date: ISODate) => boolean) => {
+    const p = plannedDone(pred, done);
+    return { planned: p.planned.length, done: p.done.length };
   };
   const { settings } = data;
+  // Zone 2: the machine total covers the same days as the "done" count beside it (planned and done),
+  // so a reading from a day not ticked off, or an unplanned day, doesn't inflate it.
+  const zone2 = plannedDone(
+    (d) => !!settings.schedule.zone2[weekdayOf(d)],
+    (d) => !!byDate.get(d)?.zone2Done,
+  );
+  const zone2Readings = zone2.done.map((d) => byDate.get(d)?.zone2Kcal).filter((k): k is number => k != null);
 
   return {
     from,
@@ -125,11 +140,8 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     avgProtein: mean(days.filter((d) => d.proteinG !== null).map((d) => d.proteinG!)),
     calorieAdherence: judged.length ? adherent / judged.length : null,
     avgSteps: mean(days.filter((d) => d.steps !== null).map((d) => d.steps!)),
-    zone2: count(
-      (d) => !!settings.schedule.zone2[weekdayOf(d)],
-      (d) => !!byDate.get(d)?.zone2Done,
-    ),
-    zone2Kcal: sumOrNull(days.filter((d) => d.zone2Kcal != null).map((d) => d.zone2Kcal!)),
+    zone2: { planned: zone2.planned.length, done: zone2.done.length },
+    zone2Kcal: sumOrNull(zone2Readings),
     metcon: count(
       (d) => !!settings.schedule.metcon[weekdayOf(d)],
       (d) => !!byDate.get(d)?.metconDone,

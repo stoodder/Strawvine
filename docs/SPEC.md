@@ -209,7 +209,8 @@ into milestones (first weigh-in → averages online → first TDEE → calibrate
 Smoothed TDEE, actual vs target rate, adherence (each day's calories against the target that day showed, within
 ±10%), averages (intake, protein, steps, sleep, HRV, and resting HR once logged), the latest VO2 max with its change
 over ~30 days (§3.3), lifts / metcon / Zone 2 done against planned (Zone 2 with the week's total machine kcal once
-logged, §3.5), and next week's recommended calories & macros.
+logged, §3.5), and next week's recommended calories & macros. The Zone 2 kcal total covers the same days as the count's
+"done": planned days with Zone 2 done; a reading on a day not done, or on an unplanned day, isn't in it.
 
 ## 5. Goals
 

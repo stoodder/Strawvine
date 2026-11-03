@@ -208,4 +208,20 @@ describe("Zone 2 machine kcal", () => {
     const todayToo = [...legacy, { ...emptyDayLog(today), zone2Kcal: 500 }];
     expect(weeklyCheckin(data(todayToo), series, today).zone2Kcal).toBeNull();
   });
+
+  it("totals only the days the Zone 2 count counts (planned and done)", () => {
+    // Default plan: Mon-Fri. The week is Tue 11-24 .. Mon 11-30.
+    const week = daysBefore(7, (i) => ({
+      zone2Done: i !== 1, // Wed not done
+      zone2Minutes: i !== 1 ? 30 : null,
+      zone2Kcal: 300 + i, // Tue 300, Wed 301 (not done), Thu 302, Fri 303, Sat 304 / Sun 305 (unplanned), Mon 306
+    }));
+    const series = computeEnergySeries(week, addDays(today, -120), today, 3500);
+    const c = weeklyCheckin(data(week), series, today);
+    expect(c.zone2).toEqual({ planned: 5, done: 4 });
+    expect(c.zone2Kcal).toBe(300 + 302 + 303 + 306);
+    // Only readings from days not counted: none.
+    const notCounted = week.map((d, i) => (i === 1 || i === 4 || i === 5 ? d : { ...d, zone2Kcal: null }));
+    expect(weeklyCheckin(data(notCounted), series, today).zone2Kcal).toBeNull();
+  });
 });

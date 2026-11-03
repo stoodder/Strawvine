@@ -5,12 +5,20 @@
  *
  * How it reads:
  * 1. Noise is dropped: parentheses, percentages, dates and clock times; "2,140" becomes 2140.
+ *    So is anything about exercise rather than food ("Zone 2 bike 320 kcal", "Exercise 320",
+ *    "Active energy 520 kcal"), so a machine's kcal never reads as intake: a line, or a segment
+ *    of one between "·", "|", ";" or dashes, that names an activity and no macro is blanked
+ *    whole. When it also names a macro ("Calories 2140, Protein 212g, …, Exercise 320 kcal"),
+ *    its comma-separated parts naming an activity and no macro go, and within a part naming
+ *    both ("… fat 70 zone 2 bike 320 kcal") the text from the activity word up to the next
+ *    macro goes, with the reading just before it ("… 320 kcal burned").
  * 2. Words become labels (calories, protein, carbs, fat, or "other" for any other nutrient —
  *    "saturated fat", "sodium" — so their numbers are never mistaken for ours). Units and
  *    unknown words are ignored.
- * 3. Labels bind to numbers on the same line: a glued label ("P212", "212p") or one followed by a
- *    colon ("Protein: 212") binds to its own number; the rest bind either all forwards
- *    ("protein 212") or all backwards ("212g protein"), whichever explains more numbers.
+ * 3. Labels bind to numbers on the same line, never across lines: a glued label ("P212", "212p")
+ *    or one followed by a colon ("Protein: 212") binds to its own number; on each line the rest
+ *    bind either all forwards ("protein 212") or all backwards ("212g protein"), whichever
+ *    explains more numbers on that line.
  * 4. Numbers left without a label fill the missing fields in the order calories, protein, carbs,
  *    fat — but only when that is unambiguous (nothing labelled at all, or no more loose numbers
  *    than missing fields), so a stray date can never become a calorie count.
@@ -80,7 +88,48 @@ const OTHER = new Set([
   "water",
   "caffeine",
   "omega",
+]);
+
+/**
+ * Exercise and energy-out words: a segment naming one is about activity, not food, and is dropped
+ * before reading (step 1) — a bike's or watch's kcal is a reading, never intake (SPEC §3.5).
+ */
+const ACTIVITY = new Set([
+  "exercise",
+  "exercises",
+  "exercising",
+  "burn",
+  "burned",
+  "burnt",
+  "active",
+  "activity",
+  "activities",
+  "workout",
+  "workouts",
+  "cardio",
+  "zone",
+  "cycling",
+  "cycle",
+  "bike",
+  "biking",
+  "spin",
+  "run",
+  "running",
+  "ran",
+  "walk",
+  "walking",
+  "hike",
+  "hiking",
+  "rowing",
+  "rower",
+  "swim",
+  "swimming",
+  "elliptical",
+  "treadmill",
   "steps",
+  "resting",
+  "basal",
+  "bmr",
 ]);
 
 /** Words that turn the following fat/carb label into a different nutrient. */
@@ -110,7 +159,56 @@ function clean(input: string): string {
       .replace(new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:${MONTHS})\\b(?:,?\\s+\\d{4})?`, "g"), " ")
       // Thousands separators ("2,140"), but not a comma-separated list ("2140,212,150,70").
       .replace(/(?<![\d.,])\d{1,3}(?:,\d{3})+(?![\d]|[.,]\d)/g, (m) => m.replace(/,/g, ""))
+      // Segments about exercise (step 1).
+      .split("\n")
+      .map((line) =>
+        line
+          .split(SEGMENT)
+          .map((seg, i) => (i % 2 ? seg : dropActivity(seg)))
+          .join(""),
+      )
+      .join("\n")
   );
+}
+
+/** Between segments of a line: "·", "•", "|", ";", dashes, and a spaced hyphen ("2140 kcal - exercise 320"). */
+const SEGMENT = /([;|·•—–]|\s-\s)/;
+const isActivity = (w: string) => ACTIVITY.has(w);
+const namesActivity = (s: string) => (s.match(/[a-z]+/g) ?? []).some(isActivity);
+const MACROS = new Set<Label>(["proteinG", "carbsG", "fatG", "netCarbs"]);
+/** Where protein / carbs / fat labels start ("P212" counts; "c" in prose doesn't). */
+const macroStarts = (s: string) => tokenize(s).flatMap((t) => (t.kind === "label" && MACROS.has(t.label) ? [t.start] : []));
+const blank = (s: string) => s.replace(/[^\n]/g, " ");
+
+/** One segment (`SEGMENT`) that names an activity loses its activity parts. */
+function dropActivity(segment: string): string {
+  if (!namesActivity(segment)) return segment;
+  // Without a macro beside it ("Zone 2, 30 min, 320 kcal", "Cycling 320 kcal burned") the whole
+  // segment is the activity's: its kcal must not become the day's calories.
+  if (macroStarts(segment).length === 0) return blank(segment);
+  // "Calories 2140, Protein 212g, Exercise 320 kcal": the food parts stay.
+  return segment
+    .split(",")
+    .map((p) => (!namesActivity(p) ? p : macroStarts(p).length === 0 ? blank(p) : dropWithin(p)))
+    .join(",");
+}
+
+/** A part naming both food and an activity: each activity word takes the text up to the next macro. */
+function dropWithin(part: string): string {
+  const macros = macroStarts(part);
+  let out = part;
+  for (const m of part.matchAll(/[a-z]+/g)) {
+    if (!isActivity(m[0])) continue;
+    const from = m.index;
+    const to = macros.find((s) => s > from) ?? part.length;
+    // An activity word after a reading ("320 kcal burned") owns it too; so does one after a bare
+    // number when nothing follows it ("320 burned").
+    const unit = /\d/.test(part.slice(from, to)) ? "" : "?";
+    const before = new RegExp(`\\d+(?:\\.\\d+)?\\s*(?:k?cals?|calories)${unit}\\s*$`).exec(part.slice(0, from));
+    const start = before ? before.index : from;
+    out = out.slice(0, start) + blank(out.slice(start, to)) + out.slice(to);
+  }
+  return out;
 }
 
 function tokenize(text: string): Tok[] {
@@ -187,19 +285,23 @@ export function parseNutrition(input: string): NutritionTotals | null {
     else if (t.colon && isNum(i + 1, t.line)) bind(i + 1, i);
   });
 
-  // The rest all bind one way: whichever reads more numbers.
-  const plan = (dir: 1 | -1) => {
-    const out: Array<[number, number]> = [];
-    toks.forEach((t, i) => {
-      if (t.kind === "label" && !used.has(i) && isNum(i + dir, t.line)) out.push([i + dir, i]);
-    });
-    return out;
-  };
-  const fwd = plan(1);
-  const back = plan(-1);
-  const endsWithLabel = toks[toks.length - 1]?.kind === "label";
-  const chosen = back.length > fwd.length || (back.length === fwd.length && endsWithLabel) ? back : fwd;
-  for (const [n, l] of chosen) bind(n, l);
+  // On each line the rest all bind one way: whichever reads more of that line's numbers.
+  const lines = new Set(toks.map((t) => t.line));
+  for (const line of lines) {
+    const plan = (dir: 1 | -1) => {
+      const out: Array<[number, number]> = [];
+      toks.forEach((t, i) => {
+        if (t.kind === "label" && t.line === line && !used.has(i) && isNum(i + dir, line)) out.push([i + dir, i]);
+      });
+      return out;
+    };
+    const fwd = plan(1);
+    const back = plan(-1);
+    const onLine = toks.filter((t) => t.line === line);
+    const endsWithLabel = onLine[onLine.length - 1]?.kind === "label";
+    const chosen = back.length > fwd.length || (back.length === fwd.length && endsWithLabel) ? back : fwd;
+    for (const [n, l] of chosen) bind(n, l);
+  }
 
   const out: NutritionTotals = { calories: null, proteinG: null, carbsG: null, fatG: null };
   let net: number | null = null;

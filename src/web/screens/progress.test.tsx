@@ -86,6 +86,10 @@ describe("Progress check-in Zone 2 machine kcal", () => {
     withDays((d) => (d >= "2026-10-27" && d <= "2026-10-29" ? { zone2Done: true, zone2Minutes: 30, zone2Kcal: 300 } : {}));
     show();
     expect(zone2Tile().textContent).toContain("900 kcal on the machine");
+    // The qualifier is visible, not screen-reader only: beside intake numbers, a bare "900 kcal" reads as eaten.
+    const qualifier = screen.getByText(/on the machine/);
+    expect(qualifier.closest(".sr-only")).toBeNull();
+    expect(qualifier.textContent).toBe("900 kcal on the machine");
     expect(screen.getByText("Avg intake").parentElement!.textContent).toContain("2,800");
   });
 

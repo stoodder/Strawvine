@@ -87,6 +87,17 @@ test("Zone 2 machine kcal is logged beside the duration and leaves Today's calor
   await page.getByRole("link", { name: "Progress" }).click();
   const checkin = section(page, "Weekly check-in");
   await expect(stat(checkin, "Avg intake")).toContainText("2,500");
-  await expect(checkin.getByText("Zone 2", { exact: true }).locator("xpath=..")).toContainText("410 kcal");
+  await expect(checkin.getByText("Zone 2", { exact: true }).locator("xpath=..")).toContainText("410 kcal on the machine");
+  // Said in words on screen (not only to a screen reader), at 320 px too, wrapping inside its tile.
+  const qualifier = checkin.getByText("410 kcal on the machine");
+  await expect(qualifier).toBeVisible();
+  expect(await pageOverflow(page)).toBeNull();
+  await page.setViewportSize({ width: 320, height: 700 });
+  await expect(qualifier).toBeVisible();
+  const [tile, line] = [
+    await checkin.getByText("Zone 2", { exact: true }).locator("xpath=..").boundingBox(),
+    await qualifier.boundingBox(),
+  ];
+  expect(line!.x + line!.width).toBeLessThanOrEqual(tile!.x + tile!.width + 1);
   expect(await pageOverflow(page)).toBeNull();
 });

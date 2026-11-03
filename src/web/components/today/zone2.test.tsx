@@ -107,6 +107,12 @@ describe("Zone 2 row", () => {
     expect(row().textContent).not.toContain("kcal");
   });
 
+  it("shows the reading on a day not ticked off (a reading doesn't depend on done), with no minutes", () => {
+    render(<DayChecklist {...props} items={items} day={{ ...emptyDayLog(DATE), zone2Done: false, zone2Kcal: 320 }} />);
+    expect(row().textContent).toBe("Zone 2Cycling · 320 kcal");
+    expect(screen.getByRole("button", { name: "Zone 2 complete" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("toggling the dot still completes the item (with the default duration), leaving the reading alone", async () => {
     const user = userEvent.setup();
     const patch = vi.fn();
