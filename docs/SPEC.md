@@ -129,14 +129,17 @@ tile.
 
 ### 3.4 Also today (Nutrition)
 
-- Four tracking-only flags in the Nutrition editor — **alcohol, nicotine, THC, caffeine** — as on/off chips in a row
-  of four (two by two under ~340 px). Each is null (not recorded, unpressed) until tapped: a tap marks it had (true),
-  another tap clears it back to not recorded (null), so a mistaken tap is fully undone. The editor never writes false;
-  the field still accepts it (boolean | null).
-- Pressed chips are a neutral light fill, not the lime "done" fill or a check mark: having had alcohol isn't an
-  achievement. The pressed state is carried by `aria-pressed`.
-- The Nutrition row's summary on Today lists the ones marked had ("Alcohol · Caffeine") on a line of its own; nothing
-  when none.
+- Four tracking-only flags in the Nutrition editor — **alcohol, nicotine, THC, caffeine** — as three-state chips in a
+  row of four (two by two under ~340 px). Each is null (not recorded) until tapped; a tap cycles
+  **not recorded (null) → none (false) → had (true) → not recorded** (`nextSubstanceState`, `src/shared/substances.ts`).
+  None comes first: it is the goal and the most common entry; a mistaken tap is undone by cycling on.
+- Not recorded is the plain grey chip, label only. None is a lime tint (the accent: the goal met) with the word "none"
+  under the label; had is a coral tint (`warn`) with "had". The word carries the state, not colour alone. Each chip
+  is a plain button named with its state ("Alcohol: none recorded" / "Alcohol: had" / "Alcohol: not recorded"),
+  described by what the next tap records ("Next tap: had"), and each change is announced politely.
+- The Nutrition row's summary on Today lists what was had, then what was recorded as none, on a line of its own:
+  "Had caffeine · No alcohol or THC" (`substanceSummary`; a narrow phone truncates the none part first). Nothing when
+  no flag is recorded.
 - Nothing reads them yet: no insight, checklist item or score.
 
 ### 3.5 Zone 2 machine kcal

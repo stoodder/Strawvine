@@ -681,7 +681,7 @@ describe("NumberInput", () => {
 });
 
 describe("ChoiceChip", () => {
-  it("presses lime with a check by default, and to a neutral fill without one", () => {
+  it("presses lime with a check, and unpressed without one", () => {
     const { rerender } = render(
       <ChoiceChip on onClick={() => {}}>
         Barbell
@@ -693,21 +693,12 @@ describe("ChoiceChip", () => {
     expect(chip().querySelector("svg")).not.toBeNull();
 
     rerender(
-      <ChoiceChip on tone="neutral" onClick={() => {}}>
-        Alcohol
-      </ChoiceChip>,
-    );
-    expect(chip().getAttribute("aria-pressed")).toBe("true");
-    expect(chip().className).not.toContain("bg-accent");
-    expect(chip().className).toContain("bg-white/[0.14]");
-    expect(chip().querySelector("svg")).toBeNull();
-
-    rerender(
-      <ChoiceChip on={false} tone="neutral" onClick={() => {}}>
-        Alcohol
+      <ChoiceChip on={false} onClick={() => {}}>
+        Barbell
       </ChoiceChip>,
     );
     expect(chip().getAttribute("aria-pressed")).toBe("false");
-    expect(chip().className).not.toContain("bg-white/[0.14]");
+    expect(chip().className).not.toContain("bg-accent");
+    expect(chip().querySelector("svg")).toBeNull();
   });
 });

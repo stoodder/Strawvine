@@ -2,8 +2,8 @@
  * Optional recovery metrics and the "Also today" flags (SPEC §3.3, §3.4): resting HR and VO2 max
  * are logged in the morning editor, shown on Today (Recovery, the Weigh-in summary) and averaged /
  * trended in the weekly check-in; alcohol, nicotine, THC and caffeine are tracking-only chips in
- * the Nutrition editor (on/off: a second tap clears back to not recorded, in a neutral style, not
- * lime). Readings out of range are refused, not clamped. Neither closes the day. Nothing overflows
+ * the Nutrition editor (three states: a tap cycles not recorded → none, lime → had, coral → not
+ * recorded). Readings out of range are refused, not clamped. Neither closes the day. Nothing overflows
  * a 320 px phone with both open.
  */
 import type { Locator, Page } from "@playwright/test";
@@ -93,7 +93,7 @@ test("resting HR and VO2 max from the morning editor show on Today and in the ch
   expect(await pageOverflow(page)).toBeNull();
 });
 
-test("Also today chips in the Nutrition editor are saved as tracking-only flags", async ({ page }) => {
+test("Also today chips cycle not recorded → none → had → not recorded, saved as tracking-only flags", async ({ page }) => {
   await startClockAt(page, FRIDAY);
   await dismissCelebrations(page);
   await login(page);
@@ -101,45 +101,79 @@ test("Also today chips in the Nutrition editor are saved as tracking-only flags"
 
   await nutritionRow(page).click();
   const group = page.getByRole("group", { name: "Also today" });
-  const chip = (name: string) => group.getByRole("button", { name, exact: true });
-  for (const name of ["Alcohol", "Nicotine", "THC", "Caffeine"]) await expect(chip(name)).toHaveAttribute("aria-pressed", "false");
+  const NAMES = ["Alcohol", "Nicotine", "THC", "Caffeine"];
+  /** A chip by its label, whatever its state ("Alcohol: none recorded"). */
+  const chip = (name: string) => group.getByRole("button", { name: new RegExp(`^${name}: `) });
+  const today = async () => (await serverData(page)).days.find((d) => d.date === TODAY);
+  for (const name of NAMES) await expect(chip(name)).toHaveAccessibleName(`${name}: not recorded`);
+  await expect(chip("Alcohol")).toHaveAccessibleDescription("Next tap: none recorded");
 
-  await chip("Caffeine").click();
+  const look = (name: string) =>
+    chip(name).evaluate((b) => ({ bg: getComputedStyle(b).backgroundColor, text: (b as HTMLElement).innerText }));
+  const grey = await look("Alcohol");
+
+  // None: lime tint and the word "none".
   await chip("Alcohol").click();
-  await expect(chip("Caffeine")).toHaveAttribute("aria-pressed", "true");
-  await expect(chip("Alcohol")).toHaveAttribute("aria-pressed", "true");
-  // Pressed is a neutral fill — not the lime of "done" — and carries no check mark.
-  const look = await chip("Caffeine").evaluate((b) => ({ bg: getComputedStyle(b).backgroundColor, svg: !!b.querySelector("svg") }));
-  expect(look.svg).toBe(false);
-  expect(look.bg).not.toMatch(/183,\s*243,\s*106|b7f36a/i);
-  // Tapping again clears it back to not recorded (the server gets null, never false).
-  await chip("Alcohol").click();
-  await expect(chip("Alcohol")).toHaveAttribute("aria-pressed", "false");
+  await expect(chip("Alcohol")).toHaveAccessibleName("Alcohol: none recorded");
+  await expect(chip("Alcohol")).toHaveAccessibleDescription("Next tap: had");
+  await expect(page.getByRole("status").filter({ hasText: "Alcohol: none recorded" })).toHaveCount(1);
+  const none = await look("Alcohol");
+  expect(none.text.replace(/\s+/g, " ")).toBe("Alcohol none");
+  expect(none.bg).not.toBe(grey.bg);
   await expectSynced(page);
-  expect((await serverData(page)).days.find((d) => d.date === TODAY)).toMatchObject({ caffeine: true, alcohol: null });
+  expect(await today()).toMatchObject({ alcohol: false, nicotine: null, thc: null, caffeine: null });
 
-  // 44px targets: two by two inside a 320 px phone, all four in a row at 390.
-  const boxes = async () => Promise.all(["Alcohol", "Nicotine", "THC", "Caffeine"].map(async (n) => (await chip(n).boundingBox())!));
+  // Had: coral tint and the word "had".
+  await chip("Alcohol").click();
+  await expect(chip("Alcohol")).toHaveAccessibleName("Alcohol: had");
+  await expect(chip("Alcohol")).toHaveAccessibleDescription("Next tap: not recorded");
+  const had = await look("Alcohol");
+  expect(had.text.replace(/\s+/g, " ")).toBe("Alcohol had");
+  expect(had.bg).not.toBe(none.bg);
+  expect(had.bg).not.toBe(grey.bg);
+  await expectSynced(page);
+  expect(await today()).toMatchObject({ alcohol: true });
+
+  // And back to not recorded (the server gets null).
+  await chip("Alcohol").click();
+  await expect(chip("Alcohol")).toHaveAccessibleName("Alcohol: not recorded");
+  expect((await look("Alcohol")).bg).toBe(grey.bg);
+  await expectSynced(page);
+  expect(await today()).toMatchObject({ alcohol: null });
+
+  // From the keyboard: caffeine had (two presses), THC none (one).
+  await chip("Caffeine").focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Space");
+  await chip("THC").focus();
+  await page.keyboard.press("Enter");
+  await expect(chip("Caffeine")).toHaveAccessibleName("Caffeine: had");
+  await expect(chip("THC")).toHaveAccessibleName("THC: none recorded");
+
+  // 44px targets: two by two inside a 320 px phone, all four in a row at 390; the state word fits.
+  const boxes = async () => Promise.all(NAMES.map(async (n) => (await chip(n).boundingBox())!));
   const rows = (bs: Array<{ y: number }>) => new Set(bs.map((b) => Math.round(b.y))).size;
+  const clipped = () => group.evaluate((g) => [...g.querySelectorAll("button span")].some((s) => s.scrollWidth > s.clientWidth + 0.5));
   let bs = await boxes();
   for (const box of bs) {
     expect(box.height).toBeGreaterThanOrEqual(44);
     expect(box.x + box.width).toBeLessThanOrEqual(320 - 16 + 0.5);
   }
   expect(rows(bs)).toBe(2);
+  expect(await clipped()).toBe(false);
   expect(await pageOverflow(page)).toBeNull();
   await page.setViewportSize({ width: 390, height: 844 });
   bs = await boxes();
   expect(rows(bs)).toBe(1);
   for (const box of bs) expect(box.x + box.width).toBeLessThanOrEqual(390 - 16 + 0.5);
+  expect(await clipped()).toBe(false);
   expect(await pageOverflow(page)).toBeNull();
   await nutritionRow(page).click();
   await expectSynced(page);
 
-  const day = (await serverData(page)).days.find((d) => d.date === TODAY);
-  expect(day).toMatchObject({ caffeine: true, alcohol: null, nicotine: null, thc: null, calories: null });
-  // The Nutrition row lists what was had; nothing else changes.
-  await expect(nutritionRow(page)).toContainText("Caffeine");
-  await expect(nutritionRow(page)).not.toContainText("Alcohol");
+  expect(await today()).toMatchObject({ caffeine: true, thc: false, alcohol: null, nicotine: null, calories: null });
+  // The Nutrition row says what was had, then what was recorded as none; nothing else changes.
+  await expect(nutritionRow(page)).toContainText("Had caffeine · No THC");
+  await expect(nutritionRow(page)).not.toContainText("lcohol");
   await expect(nutritionRow(page)).toContainText("not done");
 });

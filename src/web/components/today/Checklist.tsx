@@ -5,9 +5,10 @@ import { Link, useNavigate } from "react-router";
 import { weekdayName } from "../../../shared/dates";
 import type { ChecklistItem } from "../../../shared/gamify";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
+import { substanceSummary } from "../../../shared/substances";
 import { compactSteps, fmt, minutesToHM } from "../../lib/format";
 import { Bar, CheckDot } from "../ui";
-import { FuelEditor, MetconEditor, MorningEditor, StepsEditor, substancesHad, Zone2Editor } from "./editors";
+import { FuelEditor, MetconEditor, MorningEditor, StepsEditor, Zone2Editor } from "./editors";
 import { SavedTick, type SavedFlash } from "./saved";
 
 export interface LiftSummary {
@@ -158,7 +159,7 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
           ) : (
             "Daily totals"
           ),
-        note: substancesHad(day).join(" · ") || undefined,
+        note: substanceSummary(day) || undefined,
       };
     case "steps":
       return {

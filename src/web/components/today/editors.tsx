@@ -4,10 +4,11 @@ import { useId, useMemo, useRef, useState } from "react";
 import { benchmarkBest, benchmarkNames, isBetterScore, normalizeBenchmark, parseScore, type ParsedScore } from "../../../shared/benchmarks";
 import { formatShortDate } from "../../../shared/dates";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
+import { nextSubstanceState, SUBSTANCES } from "../../../shared/substances";
 import { fmt } from "../../lib/format";
 import { useData } from "../../lib/store";
 import { useToast } from "../Toast";
-import { BoxNumber, ChoiceChip, DotScale, NumberInput } from "../ui";
+import { BoxNumber, DotScale, NumberInput } from "../ui";
 import { useFocusAfter } from "../useFocusAfter";
 import { JournalText } from "../TextArea";
 import { BenchmarkHistorySheet } from "./BenchmarkHistory";
@@ -111,38 +112,68 @@ export function MorningEditor({ day, patch }: EditorProps) {
   );
 }
 
-/** The tracking-only substance flags, in the order they are shown (`substancesHad` lists them the same way). */
-export const SUBSTANCES = [
-  ["alcohol", "Alcohol"],
-  ["nicotine", "Nicotine"],
-  ["thc", "THC"],
-  ["caffeine", "Caffeine"],
-] as const;
-
-/** Names of the substances marked as had ("Alcohol", "Caffeine"), in display order. */
-export function substancesHad(day: DayLog): string[] {
-  return SUBSTANCES.filter(([k]) => day[k] === true).map(([, label]) => label);
-}
+/** What a substance chip shows and says for each recorded state (SPEC §3.4). */
+const SUBSTANCE_STATE = {
+  none: { word: "none", spoken: "none recorded" },
+  had: { word: "had", spoken: "had" },
+  unset: { word: null, spoken: "not recorded" },
+} as const;
+const stateOf = (v: boolean | null | undefined) => (v === false ? "none" : v === true ? "had" : "unset");
 
 /**
- * "Also today": tracking-only on/off chips. Untouched is null (not recorded) and looks unpressed; a
- * tap marks it had (true), another clears it back to not recorded (null), so a mistaken tap is
- * fully undone — the editor never writes false. Pressed chips are neutral, not the lime of "done".
- * Four in a row, two by two where they don't fit (a container query: the editor's own width).
+ * "Also today": tracking-only three-state chips. A tap cycles not recorded (null, grey) → none
+ * (false, lime: the goal) → had (true, coral) → not recorded, so a mistaken tap is undone by
+ * cycling on. Colour is never alone: recorded chips carry the state word under the label, and the
+ * accessible name says it ("Alcohol: none recorded"); the description says what the next tap
+ * does, and each change is announced politely. Four in a row, two by two where they don't fit (a
+ * container query: the editor's own width).
  */
 function AlsoToday({ day, patch }: EditorProps) {
   const id = useId();
+  const [announcement, setAnnouncement] = useState("");
   return (
     <div className="@container">
       <div className="label mb-2" id={id}>
         Also today
       </div>
       <div className="grid grid-cols-2 gap-2 @min-[17rem]:grid-cols-4" role="group" aria-labelledby={id}>
-        {SUBSTANCES.map(([k, label]) => (
-          <ChoiceChip key={k} tall fill tone="neutral" on={day[k] === true} onClick={() => patch({ [k]: day[k] === true ? null : true })}>
-            {label}
-          </ChoiceChip>
-        ))}
+        {SUBSTANCES.map(([k, label]) => {
+          const state = stateOf(day[k]);
+          const next = stateOf(nextSubstanceState(day[k]));
+          return (
+            <button
+              key={k}
+              type="button"
+              aria-label={`${label}: ${SUBSTANCE_STATE[state].spoken}`}
+              aria-describedby={`${id}-${k}`}
+              data-state={state}
+              onClick={() => {
+                const v = nextSubstanceState(day[k]);
+                patch({ [k]: v });
+                setAnnouncement(`${label}: ${SUBSTANCE_STATE[stateOf(v)].spoken}`);
+              }}
+              className={clsx(
+                "chip min-h-11 w-full min-w-0 flex-col justify-center gap-0 px-1.5 leading-tight",
+                state === "none" && "bg-accent/15 text-fg ring-1 ring-accent/50 ring-inset",
+                state === "had" && "bg-warn/15 text-fg ring-1 ring-warn/50 ring-inset",
+                state === "unset" && "bg-white/[0.05] text-fg-2",
+              )}
+            >
+              <span className="max-w-full truncate">{label}</span>
+              {SUBSTANCE_STATE[state].word && (
+                <span aria-hidden className={clsx("text-2xs font-semibold", state === "none" ? "text-accent" : "text-warn")}>
+                  {SUBSTANCE_STATE[state].word}
+                </span>
+              )}
+              <span id={`${id}-${k}`} hidden>
+                Next tap: {SUBSTANCE_STATE[next].spoken}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div role="status" aria-live="polite" className="sr-only">
+        {announcement}
       </div>
     </div>
   );

@@ -1272,28 +1272,18 @@ export function Empty({ children }: { children: ReactNode }) {
 }
 
 /**
- * A pressed/unpressed chip (aria-pressed): one choice of a ChipGroup, or a toggle of its own.
- * `tone="accent"` (default) fills a pressed chip lime with a check — a choice made. `tone="neutral"`
- * presses to a light graphite fill with no check, for a plain on/off record that isn't an achievement
- * (the "Also today" flags); aria-pressed carries the state.
+ * A pressed/unpressed chip (aria-pressed): one choice of a ChipGroup, or a toggle of its own. A
+ * pressed chip fills lime with a check — a choice made.
  */
 export function ChoiceChip({
   on,
   onClick,
   disabled,
-  tall,
-  tone = "accent",
-  fill,
   children,
 }: {
   on: boolean;
   onClick: () => void;
   disabled?: boolean;
-  /** A 44px-tall chip (a stand-alone toggle), instead of 36px inside a compact form. */
-  tall?: boolean;
-  tone?: "accent" | "neutral";
-  /** Fill a grid cell: centred, with tighter side padding. */
-  fill?: boolean;
   children: string;
 }) {
   // Locked chips stay focusable (aria-disabled, not disabled): Tab reaches them, and with them the
@@ -1306,17 +1296,11 @@ export function ChoiceChip({
       onClick={disabled ? undefined : onClick}
       className={clsx(
         "chip gap-1",
-        tall ? "min-h-11" : "min-h-9",
-        fill && "w-full min-w-0 justify-center px-1.5",
-        on
-          ? tone === "neutral"
-            ? "bg-white/[0.14] text-fg ring-1 ring-white/30 ring-inset"
-            : "bg-accent text-accent-ink"
-          : "bg-white/[0.05] text-fg-2",
+        on ? "bg-accent text-accent-ink" : "bg-white/[0.05] text-fg-2",
         disabled && !on && "opacity-40",
       )}
     >
-      {on && tone === "accent" && <Check size={12} strokeWidth={3} aria-hidden />}
+      {on && <Check size={12} strokeWidth={3} aria-hidden />}
       {children}
     </button>
   );
