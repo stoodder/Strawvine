@@ -248,12 +248,13 @@ export function GoalsScreen() {
 
       {/* Achievements */}
       <Section label="Achievements" right={<span className="label">{earned.length}</span>}>
+        {/* What's next leads, so a long list never buries it. */}
+        <NextUp current={streak.current} />
         {earned.length === 0 ? (
           <Empty>Your first one unlocks the moment you log a morning weight and a day of calories.</Empty>
         ) : (
           <AchievementList earned={earned} />
         )}
-        <NextUp current={streak.current} />
       </Section>
 
       <AddTargetSheet open={addingTarget} onClose={() => setAddingTarget(false)} />
@@ -319,7 +320,7 @@ function NextUp({ current }: { current: number }) {
   const next = [3, 7, 14, 30, 60, 100, 180, 365].find((t) => t > current);
   if (!next) return null;
   return (
-    <div className="mt-6 flex items-center gap-4">
+    <div className="mb-6 flex items-center gap-4">
       <div aria-hidden className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-dashed border-white/20 text-faint">
         <Flame size={15} />
       </div>
