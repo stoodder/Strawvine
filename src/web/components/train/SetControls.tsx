@@ -9,6 +9,10 @@
  * check does for a set that can't simply be logged (an AMRAP, a weighted set without a load) is
  * the screen's business (`checkAction`); the row only says that a sheet will open.
  *
+ * Tone. Mid-session, open rows are bright and logged ones recede behind their check (what's left
+ * to do leads). On a `record` — a finished session, or a day that isn't today — the logged rows
+ * are the page's content and read a step brighter.
+ *
  * Names. The check keeps the accessible name the set has always had ("Bench press set 1: 170 × 6",
  * "Pull-up set 1: 8 reps", "Hang set 1: 30s at 25 lb", "Curl set 1: 10 reps (no load)") with
  * `aria-pressed`. The values control is "Edit <exercise> set <n>: <what the row shows>" — the text
@@ -178,7 +182,12 @@ function RowValues({ number, size, children }: Pick<RowProps, "number" | "size" 
   );
 }
 
-const rowGap = (size: RowProps["size"]) => (size === "main" ? "min-h-[3.75rem] gap-4" : "min-h-12 gap-3");
+/** Main-lift rows are 60 px tall, accessory rows 44 px: the check, as tall as its row, stays a 44 px target. */
+const rowGap = (size: RowProps["size"]) =>
+  // Below 360 px the main row closes up a little, so "140 × 12+ AMRAP" and its pencil stay on one line.
+  size === "main" ? "min-h-[3.75rem] gap-4 py-1 max-[359px]:gap-3" : "min-h-11 gap-3 py-0.5";
+/** A logged value's colour: receding mid-session, a step brighter on a record (see the note above). */
+const doneTone = (record: boolean) => (record ? "text-fg-2" : "text-mute");
 
 function SetRow({ title, spoken, shown = spoken, number, done, size, tone = "accent", dataSet, checkOpensSheet, onCheck, onEdit, children }: RowProps) {
   return (
@@ -188,9 +197,11 @@ function SetRow({ title, spoken, shown = spoken, number, done, size, tone = "acc
         aria-label={`Edit ${title}: ${shown}`}
         aria-haspopup="dialog"
         onClick={onEdit}
-        // The press tint and the pencil say "editable" without boxing every row.
+        // The press tint and the pencil say "editable" without boxing every row. The right
+        // padding keeps what the row shows (ending in the pencil) 16 px clear of the check's
+        // target, however long the values run (an AMRAP's tag on a 320 px screen).
         className={clsx(
-          "tap -ml-2 flex min-w-0 flex-1 items-center rounded-xl py-1 pl-2 text-left select-none active:bg-white/[0.04]",
+          "tap -ml-2 flex min-w-0 flex-1 items-center rounded-xl pr-4 pl-2 text-left select-none active:bg-white/[0.04]",
           rowGap(size),
         )}
         style={noCallout}
@@ -198,7 +209,8 @@ function SetRow({ title, spoken, shown = spoken, number, done, size, tone = "acc
         <RowValues number={number} size={size}>
           {children}
         </RowValues>
-        <Pencil aria-hidden size={12} className="shrink-0 text-faint" />
+        {/* It signals an action, so it's information: mute at 14 px, not the decorative faint. */}
+        <Pencil aria-hidden size={14} className="shrink-0 text-mute" />
       </button>
       <button
         type="button"
@@ -219,7 +231,7 @@ function SetRow({ title, spoken, shown = spoken, number, done, size, tone = "acc
 /** A planned set in a read-only preview: the row's shape, nothing to press. */
 function PlannedRow({ spoken, number, size, children }: { spoken: string; number: number; size: RowProps["size"]; children: ReactNode }) {
   return (
-    <li className={clsx("flex items-center py-1", rowGap(size))}>
+    <li className={clsx("flex items-center", rowGap(size))}>
       <span className="sr-only">{spoken}</span>
       <RowValues number={number} size={size}>
         {children}
@@ -236,6 +248,8 @@ interface SetRowCommon {
   dataSet?: string;
   /** A read-only preview of a coming day: the planned targets, no controls. */
   preview?: boolean;
+  /** The page is a record (a finished session, or a day that isn't today): logged rows read a step brighter. */
+  record?: boolean;
   /** The check: log / unlog (or whatever `checkAction` says this set needs first). */
   onCheck?: () => void;
   /** The values: open the set's editor. */
@@ -250,6 +264,7 @@ export function MainSetRow({
   extra = false,
   dataSet,
   preview = false,
+  record = false,
   onCheck,
   onEdit,
 }: SetRowCommon & {
@@ -265,10 +280,11 @@ export function MainSetRow({
   const values = (
     <>
       {/* Open sets are the bright ones: what's left to do leads, what's done recedes behind its check. */}
-      <span className={clsx("num text-3xl font-light tracking-tight", preview ? "text-fg-2" : done ? "text-mute" : "text-fg")}>
+      <span className={clsx("num text-3xl font-light tracking-tight", preview ? "text-fg-2" : done ? doneTone(record) : "text-fg")}>
         {weight ?? EMPTY}
       </span>{" "}
-      <span className="text-sm whitespace-nowrap text-mute">
+      {/* On a record the reps are as much the content as the load. */}
+      <span className={clsx("text-sm whitespace-nowrap", done && record ? "text-fg-2" : "text-mute")}>
         × {reps ?? EMPTY}
         {shown.amrap && !done && "+"}
       </span>
@@ -318,6 +334,7 @@ export function AccessorySetRow({
   needsLoad = false,
   dataSet,
   preview = false,
+  record = false,
   onCheck,
   onEdit,
 }: SetRowCommon & {
@@ -332,7 +349,7 @@ export function AccessorySetRow({
   const done = shown.done;
   const p = accessoryParts(shown, measure, weighted);
   const numeralShape = "num text-xl font-light tracking-tight";
-  const numeral = clsx(numeralShape, preview ? "text-fg-2" : done ? "text-mute" : "text-fg");
+  const numeral = clsx(numeralShape, preview ? "text-fg-2" : done ? doneTone(record) : "text-fg");
   const word = "text-sm whitespace-nowrap text-mute";
   const values = (
     <>

@@ -3,7 +3,7 @@
  * helpers only (no training formulas): the plan itself comes from src/shared.
  */
 import type { Block, BlockExercise, Measure, Session, SetEntry } from "../../../shared/schemas";
-import { needsLoadBeforeLogging, shownLoad } from "../../../shared/session";
+import { logAtTargets, needsLoadBeforeLogging, shownLoad } from "../../../shared/session";
 
 export type SetRef = { blockId: string; exIdx: number; setId: string };
 export type ExRef = { blockId: string; exIdx: number };
@@ -47,6 +47,20 @@ export function checkAction(set: SetEntry, kind: Block["kind"], weighted: boolea
   if (set.amrap && !set.done) return "count";
   if (kind === "accessory" && needsLoadBeforeLogging(set, weighted)) return "load";
   return "toggle";
+}
+
+/**
+ * What saving the set editor did to a set:
+ *   "none"   — nothing changed;
+ *   "check"  — it only logged the set as it stood, which is what the row's check does (and undoes);
+ *   "values" — a value changed (reps, load or a target): the one case with no other undo.
+ */
+export type EditorChange = "none" | "check" | "values";
+export function editorChange(prev: SetEntry, next: SetEntry, weighted: boolean): EditorChange {
+  const same = (a: SetEntry, b: SetEntry) =>
+    a.done === b.done && a.reps === b.reps && a.weight === b.weight && a.targetReps === b.targetReps && a.targetWeight === b.targetWeight;
+  if (same(prev, next)) return "none";
+  return !prev.done && same(logAtTargets(prev, weighted), next) ? "check" : "values";
 }
 
 /** The value a set currently shows: what was done once logged, else the target. */

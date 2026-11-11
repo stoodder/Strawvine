@@ -1,8 +1,10 @@
 /**
  * One set-row grammar on Train, by touch and with no hidden gesture: every set — main lift and
- * accessory — is a row whose check (right) logs / unlogs it and whose values (left) open the set
- * editor. Finish is within reach in the dock once a set is logged, and the exercise options list
- * their actions by how often they're used. Monday of week 1 (bench press, AMRAP last set).
+ * accessory — is a row whose check (right) logs / unlogs it (no toast: the check undoes itself;
+ * unlogging the set that started the rest stops the rest) and whose values (left) open the set
+ * editor. Finish joins the dock once every set is logged and the page's own button is off screen,
+ * and the exercise options list their actions by how often they're used. Monday of week 1 (bench
+ * press, AMRAP last set).
  */
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
@@ -69,12 +71,23 @@ test("the check logs and unlogs a set, the values edit it — main lift and acce
   await expect(check(page, "Bench press", 2)).toHaveAccessibleName("Bench press set 2: 165 × 8");
   await expect(check(page, "Bench press", 2)).toHaveAttribute("aria-pressed", "false");
 
-  // Accessory: the same two controls, compact.
+  // Accessory: the same two controls, compact. A check leaves no toast (it is its own undo):
+  // the dock holds the rest pill and nothing else.
   await expect(check(page, "Pull-up", 1)).toHaveAccessibleName("Pull-up set 1: 10 reps");
   await check(page, "Pull-up", 1).tap();
   await expect(check(page, "Pull-up", 1)).toHaveAttribute("aria-pressed", "true");
-  await expect(toastMessage(page, "Pull-up · set 1 logged")).toBeVisible();
+  await expect(page.getByRole("group", { name: "Rest timer" })).toBeVisible();
+  await expect(notifications(page).getByRole("button", { name: "Undo" })).toHaveCount(0);
+  await expect(toastMessage(page, /logged/)).toHaveCount(0);
   await expect(page.getByRole("dialog")).toHaveCount(0);
+  // Unlogging the set that started the rest stops it; logging it again starts a new one.
+  await check(page, "Pull-up", 1).tap();
+  await expect(check(page, "Pull-up", 1)).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("group", { name: "Rest timer" })).toHaveCount(0);
+  await expect(toastMessage(page, /unlogged/)).toHaveCount(0);
+  await check(page, "Pull-up", 1).tap();
+  await expect(check(page, "Pull-up", 1)).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Rest timer" })).toBeVisible();
 
   // Edit an open set through its values: 10 → 8 reps as the target (carried to the set after it).
   await values(page, "Pull-up", 2).tap();
@@ -82,6 +95,8 @@ test("the check logs and unlogs a set, the values edit it — main lift and acce
   for (let i = 0; i < 2; i++) await editor.getByRole("button", { name: "Decrease reps" }).tap();
   await editor.getByRole("button", { name: "Save target" }).tap();
   await expect(editor).toHaveCount(0);
+  // A changed value has no other undo: that save keeps its toast.
+  await expect(toastMessage(page, "Pull-up · set 2 updated")).toBeVisible();
   await expect(check(page, "Pull-up", 2)).toHaveAccessibleName("Pull-up set 2: 8 reps");
   await expect(check(page, "Pull-up", 3)).toHaveAccessibleName("Pull-up set 3: 8 reps");
   await expect(check(page, "Pull-up", 2)).toHaveAttribute("aria-pressed", "false");
@@ -137,6 +152,9 @@ test("rows of every kind keep their visible text in their names (axe), open and 
   await check(page, "Hang", 1).tap();
   const editor = page.getByRole("dialog", { name: "Hang · set 1" });
   await expect(check(page, "Hang", 1)).toHaveAttribute("aria-pressed", "false");
+  // The sheet says why it opened instead of logging.
+  await expect(editor.getByText("No load yet — set it to log this set")).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Log set" })).toHaveAccessibleDescription("No load yet — set it to log this set");
   for (let i = 0; i < 5; i++) await editor.getByRole("button", { name: "Increase load" }).tap();
   await editor.getByRole("button", { name: "Log set" }).tap();
   await expect(editor).toHaveCount(0);
@@ -151,45 +169,124 @@ test("rows of every kind keep their visible text in their names (axe), open and 
   await expect(values(page, "Pull-up", 1)).toHaveAccessibleName("Edit Pull-up set 1: 10 reps");
   await check(page, "Bench press", 1).tap();
   await expect(check(page, "Bench press", 1)).toHaveAttribute("aria-pressed", "true");
-  await expect(notifications(page).getByRole("button", { name: /^Finish · / })).toBeVisible();
+  // Sets are still open: Finish isn't in the dock.
+  await expect(notifications(page).getByRole("button", { name: /^Finish · / })).toHaveCount(0);
 
   await page.waitForTimeout(600); // entrances
   const results = await new AxeBuilder({ page }).withRules(["label-content-name-mismatch", "nested-interactive", "aria-allowed-attr", "list", "listitem"]).analyze();
   expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`)).toEqual([]);
 });
 
-test("the header says the week in plain words and links to the program", async ({ page }) => {
+test("the header says the week in plain words and links to the program — the short form beside the dates at 320 px", async ({ page }) => {
   const link = page.getByRole("link", { name: "Program: Week 1 of 5" });
   await expect(link).toBeVisible();
-  await expect(link).toHaveText("Week 1 of 5");
+  await expect(link).toHaveText("Week 1 of 5", { useInnerText: true });
   await expect(link).toHaveAttribute("href", "/program");
+
+  await page.setViewportSize({ width: 320, height: 568 });
+  await expect(link).toHaveText("Week 1", { useInnerText: true });
+  // One row: the link sits beside the date controls, not under them.
+  const sameRow = async () => {
+    const a = (await link.boundingBox())!;
+    const b = (await page.getByRole("button", { name: "Next day" }).boundingBox())!;
+    return Math.abs(a.y - b.y) < 2 && a.x >= b.x + b.width - 0.5;
+  };
+  expect(await sameRow()).toBe(true);
 });
 
-test("Finish from the dock asks about unlogged sets, then completes the session", async ({ page }) => {
+test("320 px: the AMRAP row keeps its values and pencil on one line, 16 px clear of the check; “+ set” stays beside the plates", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  const amrap = page.getByRole("button", { name: /^Edit Bench press set 4: .*AMRAP/ });
+  await expect(amrap).toBeVisible();
+  const geometry = await amrap.evaluate((el) => {
+    const pencil = el.querySelector("svg")!.getBoundingClientRect();
+    const row = el.closest("li")!;
+    const target = row.querySelector("button[aria-pressed]")!.getBoundingClientRect();
+    const others = [...row.parentElement!.children].map((li) => li.getBoundingClientRect().height);
+    return { pencil: pencil.width, gap: target.left - pencil.right, heights: others, target: [target.width, target.height] };
+  });
+  expect(geometry.pencil).toBe(14);
+  expect(geometry.gap, "pencil → check target").toBeGreaterThanOrEqual(16);
+  // No wrap: the AMRAP row is as tall as the others.
+  expect(new Set(geometry.heights).size, `row heights ${geometry.heights.join(", ")}`).toBe(1);
+  expect(Math.min(...geometry.target), "check target").toBeGreaterThanOrEqual(44);
+
+  // The main lift's footer: plates and "+ set" on one line.
+  const plates = (await page.getByRole("img", { name: /^Plates, Set 1, per side:/ }).boundingBox())!;
+  const add = (await page.getByRole("button", { name: "Add a back-off set of Bench press" }).boundingBox())!;
+  expect(add.y, "“+ set” starts above the plates' bottom edge").toBeLessThan(plates.y + plates.height);
+  expect(add.y + add.height, "“+ set” ends below the plates' top edge").toBeGreaterThan(plates.y);
+
+  // Accessory rows are 44 px with a 44 px check target; "+ set" follows as a 44 px target.
+  await addPullUp(page);
+  const row = await check(page, "Pull-up", 1).evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { row: el.closest("li")!.getBoundingClientRect().height, target: [r.width, r.height] };
+  });
+  expect(row.row).toBe(44);
+  expect(Math.min(...row.target)).toBeGreaterThanOrEqual(44);
+  const addSet = (await page.getByRole("button", { name: "Add Pull-up set" }).boundingBox())!;
+  expect(addSet.height).toBeGreaterThanOrEqual(44);
+  expect(addSet.width).toBeGreaterThanOrEqual(44);
+});
+
+test("Finish: asked from the page while sets are open; from the dock once every set is logged and the page's button is off screen", async ({ page }) => {
   const finish = notifications(page).getByRole("button", { name: /^Finish · / });
+  const inline = page.getByRole("button", { name: "Finish session" });
+  await addPullUp(page);
   await expect(finish).toHaveCount(0); // nothing logged yet
   await check(page, "Bench press", 1).tap();
-  await expect(finish).toHaveAccessibleName("Finish · 1/4 sets");
-  await expect(finish).toBeInViewport({ ratio: 1 });
-  // The page's own button is still at the end of the page.
-  await expect(page.getByRole("button", { name: "Finish session" })).toBeEnabled();
-
-  await finish.tap();
-  const question = page.getByRole("group", { name: /Finish with 3 sets unlogged\?/ });
+  await expect(check(page, "Bench press", 1)).toHaveAttribute("aria-pressed", "true");
+  // Sets are open: the dock is the workout's (the rest pill), Finish is at the end of the page.
+  await expect(page.getByRole("group", { name: "Rest timer" })).toBeVisible();
+  await expect(finish).toHaveCount(0);
+  await inline.scrollIntoViewIfNeeded();
+  await expect(inline).toBeEnabled();
+  await inline.tap();
+  const question = page.getByRole("group", { name: /Finish with 6 sets unlogged\?/ });
   await expect(question).toBeInViewport({ ratio: 1 });
-  await expect(finish).toHaveCount(0); // it steps aside while the question is asked
   await question.getByRole("button", { name: "Keep logging" }).tap();
+  await expect(inline).toBeVisible();
+  await expect(finish).toHaveCount(0);
+
+  // Log the rest: two more bench sets, the AMRAP through its counter, the pull-ups.
+  for (const n of [2, 3]) await check(page, "Bench press", n).tap();
+  await check(page, "Bench press", 4).tap();
+  const amrap = page.getByRole("dialog", { name: /AMRAP/ });
+  await amrap.getByRole("button", { name: /^Log \d+ reps$/ }).tap();
+  await expect(amrap).toHaveCount(0);
+  for (const n of [1, 2]) await check(page, "Pull-up", n).tap();
+  await expect(finish).toHaveCount(0); // one set to go
+  await check(page, "Pull-up", 3).tap();
+  await expect(check(page, "Pull-up", 3)).toHaveAttribute("aria-pressed", "true");
+
+  // Every set is logged. At the top of the page its own Finish button is off screen: the dock offers it, in the accent.
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect(finish).toHaveAccessibleName("Finish · 7/7 sets");
+  await expect(finish).toBeInViewport({ ratio: 1 });
+  await expect(inline).not.toBeInViewport();
+  expect(await finish.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(
+    await inline.evaluate((el) => getComputedStyle(el).backgroundColor),
+  );
+  // Scrolled to the end, the page's own button is there: the dock's steps aside (never both, never overlapping).
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(inline).toBeInViewport();
+  await expect(finish).toHaveCount(0);
+  await page.evaluate(() => window.scrollTo(0, 0));
   await expect(finish).toBeVisible();
 
+  // One press finishes — nothing is unlogged, so nothing is asked — and the recap comes into view.
   await finish.tap();
-  await page
-    .getByRole("group", { name: /unlogged\?/ })
-    .getByRole("button", { name: "Finish" })
-    .tap();
+  await expect(page.getByText(/unlogged\?/)).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Session complete" })).toBeInViewport();
   await expect(finish).toHaveCount(0);
+  await expect(page.getByRole("group", { name: "Rest timer" })).toHaveCount(0);
   await expectSynced(page);
   await expect.poll(async () => !!(await serverData(page)).sessions.find((s) => s.date === MONDAY_ISO)?.completedAt).toBe(true);
+
+  // The finished session is a record: its logged rows read a step brighter than mid-session.
+  const numeral = values(page, "Pull-up", 1).locator(".num").first();
+  await expect(numeral).toHaveClass(/text-fg-2/);
 });
 
 test("exercise options list actions by frequency: log, sets, superset, skip, edit exercise, remove", async ({ page }) => {

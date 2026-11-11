@@ -18,18 +18,22 @@ export function measureUnit(m: Measure): string {
 /**
  * The plates to load per side for `weight` (nothing for an empty bar or less). `label` leads the
  * row in place of "per side" — e.g. "Set 3 · per side" under a list of sets, to say which one.
+ * Such a label keeps only its first part ("Set 3") below 360 px, so the chips stay on its line
+ * (the accessible name says it all at any width).
  */
-export function Plates({ weight, label = "per side" }: { weight: number | null; label?: string }) {
+export function Plates({ weight, label = "per side", className }: { weight: number | null; label?: string; className?: string }) {
   if (!weight || weight <= 45) return null;
   const { plates, remainder } = platesPerSide(weight);
+  const [lead, ...rest] = label.split(" · ");
   return (
     <div
       role="img"
-      className="flex min-h-6 flex-wrap items-center gap-1.5"
+      className={clsx("flex min-h-6 flex-wrap items-center gap-1.5", className)}
       aria-label={`${label === "per side" ? "Plates per side" : `Plates, ${label.replace(" · ", ", ")}`}: ${plates.join(", ")}${remainder > 0 ? `, plus ${remainder} lb` : ""}`}
     >
       <span className="label mr-1 whitespace-nowrap" aria-hidden>
-        {label}
+        {lead}
+        {rest.length > 0 && <span className="max-[359px]:hidden"> · {rest.join(" · ")}</span>}
       </span>
       {plates.map((p, i) => (
         <span
@@ -77,6 +81,7 @@ export function SetEditSheet({
   measure,
   weighted,
   showPlates,
+  hint,
   onSave,
   onDelete,
 }: {
@@ -89,11 +94,17 @@ export function SetEditSheet({
   weighted: boolean;
   /** Barbell work only: plates make no sense for dumbbells or cables. */
   showPlates?: boolean;
+  /**
+   * One line on why the sheet opened when the press asked for something else ("No load yet — set
+   * it to log this set": the check opened it instead of logging). It describes Log set.
+   */
+  hint?: string;
   onSave: (s: SetEntry) => void;
   onDelete?: () => void;
 }) {
   const [reps, setReps] = useState(0);
   const [weight, setWeight] = useState(0);
+  const hintId = useId();
   const setId = set?.id;
   useEffect(() => {
     if (set) {
@@ -113,6 +124,12 @@ export function SetEditSheet({
   return (
     <Sheet open={open} onClose={onClose} title={title}>
       <div className="space-y-8 pb-2">
+        {hint && (
+          // Stays while the sheet is open (it doesn't go as the load is set): nothing moves under the thumb.
+          <p id={hintId} data-editor-hint="" className="mb-5 text-center text-sm text-fg-2">
+            {hint}
+          </p>
+        )}
         <div className="flex flex-col items-center gap-2">
           <div className="label">{repLabel}</div>
           <Stepper value={reps} onChange={setReps} step={repStep} max={10000} editable label={repLabel.toLowerCase()} />
@@ -158,6 +175,7 @@ export function SetEditSheet({
           <button
             type="button"
             className="btn-primary flex-1 whitespace-nowrap"
+            aria-describedby={hint ? hintId : undefined}
             onClick={() => {
               success();
               onSave({ ...set, reps, weight: load, done: true });

@@ -6,6 +6,7 @@
  */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { Measure, SetEntry } from "../../../shared/schemas";
 import { AccessorySetRow, accessorySetShown, accessorySetValues, MainSetRow, mainSetTag, mainSetValues } from "./SetControls";
@@ -133,11 +134,85 @@ describe("a set row's two controls", () => {
     expect(root().querySelector('[data-set="done"]')!.hasAttribute("data-open")).toBe(false);
   });
 
-  it("both controls are at least 44 px targets by class (the row is 48 px, the check 64 px wide)", () => {
+  it("both controls are at least 44 px targets by class (an accessory row is 44 px, the check 64 px wide and as tall as its row)", () => {
     accessory(set(), "reps", false);
     const { check, values } = controls("Pull-up set 1: 8 reps");
-    expect(values.className).toContain("min-h-12");
+    expect(values.className).toContain("min-h-11");
     expect(check.className).toContain("w-16");
+    // The row stretches both controls to its height: the check is as tall as the values.
+    expect(check.closest("li")!.className).toContain("items-stretch");
+  });
+
+  it("a main-lift row is 60 px", () => {
+    main(set({ targetWeight: 170, targetReps: 6 }));
+    expect(controls("Bench press set 1: 170 × 6").values.className).toContain("min-h-[3.75rem]");
+  });
+
+  it("the pencil reads as information (mute, 14 px), and the values keep 16 px clear of the check", () => {
+    accessory(set(), "reps", false);
+    const { values } = controls("Pull-up set 1: 8 reps");
+    const pencil = values.querySelector("svg")!;
+    expect(pencil.getAttribute("class")).toContain("text-mute");
+    expect(pencil.getAttribute("class")).not.toContain("text-faint");
+    expect(pencil.getAttribute("width")).toBe("14");
+    expect(pencil.getAttribute("aria-hidden")).toBe("true");
+    // The pencil ends the control's content; the padding after it is the gap to the check's target.
+    expect(values.lastElementChild).toBe(pencil);
+    expect(values.className.split(" ")).toContain("pr-4");
+  });
+});
+
+describe("tone: logged rows recede mid-session and are the content of a record", () => {
+  const numerals = (el: HTMLElement) => [...el.querySelectorAll(".num")].map((n) => n.className);
+  const row = (node: ReactNode) => render(<ul>{node}</ul>, { container: root() });
+
+  it("accessory: an open row is bright; a logged one mute mid-session, a step brighter on a record", () => {
+    const { rerender } = row(<AccessorySetRow exerciseName="Curl" index={0} set={set({ targetWeight: 25 })} measure="reps" weighted />);
+    const values = () => screen.getByRole("button", { name: /^Edit Curl set 1: / });
+    for (const c of numerals(values())) expect(c).toMatch(/text-fg(?!-)/);
+    rerender(
+      <ul>
+        <AccessorySetRow exerciseName="Curl" index={0} set={logged({ weight: 25 })} measure="reps" weighted />
+      </ul>,
+    );
+    expect(numerals(values())).toHaveLength(2);
+    for (const c of numerals(values())) expect(c).toContain("text-mute");
+    rerender(
+      <ul>
+        <AccessorySetRow exerciseName="Curl" index={0} set={logged({ weight: 25 })} measure="reps" weighted record />
+      </ul>,
+    );
+    for (const c of numerals(values())) {
+      expect(c).toContain("text-fg-2");
+      expect(c).not.toContain("text-mute");
+    }
+  });
+
+  it("a record doesn't dim a row that was left open", () => {
+    row(<AccessorySetRow exerciseName="Curl" index={0} set={set({ targetWeight: 25 })} measure="reps" weighted record />);
+    for (const c of numerals(screen.getByRole("button", { name: /^Edit Curl set 1: / }))) expect(c).toMatch(/text-fg(?!-)/);
+  });
+
+  it("main lift: the load and its reps both come up a step on a record", () => {
+    const done = set({ targetWeight: 170, targetReps: 6, done: true, weight: 170, reps: 6 });
+    const { rerender } = row(<MainSetRow exerciseName="Bench press" index={0} set={done} />);
+    const values = () => screen.getByRole("button", { name: /^Edit Bench press set 1: / });
+    const reps = () => [...values().querySelectorAll("span")].find((s) => s.textContent === "× 6")!;
+    expect(numerals(values())[0]).toContain("text-mute");
+    expect(reps().className).toContain("text-mute");
+    rerender(
+      <ul>
+        <MainSetRow exerciseName="Bench press" index={0} set={done} record />
+      </ul>,
+    );
+    expect(numerals(values())[0]).toContain("text-fg-2");
+    expect(reps().className).toContain("text-fg-2");
+    expect(reps().className).not.toContain("text-mute");
+  });
+
+  it("a preview is the plan: its tone doesn't change", () => {
+    row(<MainSetRow preview record exerciseName="Bench press" index={0} set={set({ targetWeight: 170, targetReps: 6 })} />);
+    expect(screen.getByRole("listitem").querySelector(".num")!.className).toContain("text-fg-2");
   });
 });
 

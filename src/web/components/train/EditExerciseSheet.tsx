@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Link } from "react-router";
+import { Link, useLocation } from "react-router";
 import { Archive, ArchiveRestore } from "lucide-react";
 import {
   exerciseDraft,
@@ -23,7 +23,7 @@ const MAX_OPTIONS: Array<["on" | "off", string]> = [
 ];
 
 /**
- * Edit an exercise from the library (Settings) or a session (Train): its name, category, measure,
+ * Edit an exercise from the library (Program) or a session (Train): its name, category, measure,
  * load and max tracking, or archive it — the create card's controls and rules (`ExerciseFields`).
  * Saving sends only what changed, as one patch (`exerciseEditPatch`); archiving sends only
  * `archived`. A lift the program calculates keeps its category, measure and max, and stays in the
@@ -40,6 +40,7 @@ export function EditExerciseSheet({
   onClose: (saved?: ExerciseEditPatch) => void;
 }) {
   const { data } = useData();
+  const location = useLocation();
   const editExercise = useEditExercise();
   const toast = useToast();
   const id = useId();
@@ -139,7 +140,13 @@ export function EditExerciseSheet({
           <p id={lockNoteId} className="mt-4 text-xs text-fg-2">
             {programDayList(locks.programDays)}&rsquo;s main lift: the program calculates it from its max, so its category, measure and max
             stay as they are and it can&rsquo;t be archived. Change the{" "}
-            <Link to="/program#layout" className="text-accent underline underline-offset-2" onClick={() => onClose()}>
+            {/* Program's back control returns to where the sheet was opened (a Train day). Following the link closes the sheet. */}
+            <Link
+              to="/program#layout"
+              state={{ from: location.pathname }}
+              className="text-accent underline underline-offset-2"
+              onClick={() => onClose()}
+            >
               weekly layout
             </Link>{" "}
             to free them.

@@ -21,7 +21,7 @@ import {
 import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { trainingPrefs } from "../../shared/defaults";
 import { amrapPrs } from "../../shared/gamify";
-import { currentMax, cycleLabel, cyclePosition, programDayFor, progressionGain } from "../../shared/program";
+import { currentMax, programDayFor, progressionGain } from "../../shared/program";
 import type { Block, BlockExercise, Exercise, Session, SetEntry } from "../../shared/schemas";
 import {
   accessoryHint,
@@ -71,9 +71,11 @@ import { useDismissedHints } from "../components/train/hintDismiss";
 import { afterLayout, useRevealAboveDock, whenReady } from "../components/train/reveal";
 import { AccessorySetRow, MainSetRow } from "../components/train/SetControls";
 import { AmrapSheet, measureUnit, Plates, SetEditSheet, type AmrapRepPr } from "../components/train/SetSheets";
+import { mainLiftNotice, programLinkLabel, programStartSentence } from "../components/train/programLink";
 import {
   checkAction,
   describeSet,
+  editorChange,
   findSet,
   mapBlock,
   mapExercise,
@@ -183,7 +185,7 @@ export function TrainScreen() {
   const saved = data.sessions.find((s) => s.date === date) ?? null;
   const program = data.settings.program;
   const prefs = trainingPrefs(data.settings);
-  /** Default rest after a set: longer after the main lift than after accessories (Settings). */
+  /** Default rest after a set: longer after the main lift than after accessories (Program → Rules). */
   const restFor = (kind: Block["kind"]) => (kind === "primary" ? prefs.restSecondsMain : prefs.restSecondsAccessory);
   const programDay = programDayFor(program, date);
   const weekday = weekdayName(date);
@@ -215,8 +217,15 @@ export function TrainScreen() {
    */
   const session = effectiveSession(stored, data.exercises);
   const isPlannedDay = !!programDay || !!saved;
-  /** The cycle week the header shows: a moved session's own program day's (it may be another week). */
-  const pos = cyclePosition(program, session.plannedFor ?? date);
+  /** The page is a record — a finished session, or a day that isn't today: its logged rows are its content. */
+  const isRecord = !!session.completedAt || !isToday;
+  /**
+   * The header's link to the program, always there: the cycle week of the day shown (a moved
+   * session's own program day's — it may be another week), or when the first cycle starts.
+   */
+  const programLink = programLinkLabel(program, session.plannedFor ?? date, today);
+  /** Program's back control returns to the day it was opened from. */
+  const toProgram = { from: location.pathname };
   /**
    * This day's plan was already done on another day ("Do this session today"): the day shows that
    * instead of the same plan again (and can still hold a session of its own).
@@ -229,6 +238,12 @@ export function TrainScreen() {
   // another device's edit (or a revalidation) can move or remove what a sheet points at. A ref
   // whose target is gone closes its sheet instead of pointing at a neighbour.
   const [editingHeld, setEditing] = useState<SetRef | null>(null);
+  /** The set whose check opened the editor because it has no load yet (the editor says so), until it closes. */
+  const [loadPrompt, setLoadPrompt] = useState<string | null>(null);
+  const closeEditor = () => {
+    setEditing(null);
+    setLoadPrompt(null);
+  };
   const [amrapHeld, setAmrap] = useState<SetRef | null>(null);
   /** "pair": opened from the superset sheet, which comes back once the exercise is added (or not). */
   const [adding, setAdding] = useState<{ mode: "new" } | { mode: "pair"; blockId: string } | null>(null);
@@ -398,19 +413,25 @@ export function TrainScreen() {
     // would be logged without one, so the set editor opens to set the load first.
     const action = checkAction(found.set, found.block.kind, weighted);
     if (action === "count") return setAmrap(ref);
-    if (action === "load") return setEditing(ref);
+    if (action === "load") {
+      // The editor says why it opened instead of logging.
+      setLoadPrompt(ref.setId);
+      return setEditing(ref);
+    }
     const logging = !found.set.done;
     const next = mapSet(session, ref, (x) => (x.done ? { ...x, done: false } : logAtTargets(x, weighted)));
     tick();
-    // A main-lift set gets no undo toast: its check unlogs it again, and the toast would sit in
-    // the dock right over the next set. Accessory rows are compact and close together, so a
-    // stray tap there keeps a short one.
-    if (found.block.kind === "primary") commit(next);
-    else commit(next, { message: `${setLabel(ref)} ${logging ? "logged" : "unlogged"}`, scope: ref, duration: 4000 });
+    // No undo toast for a check, main lift or accessory: the same check undoes it, and a toast
+    // would sit in the dock right over the next set (with the rest pill, half a small screen).
+    commit(next);
     if (logging) {
-      rest.start(restFor(found.block.kind));
+      rest.start(restFor(found.block.kind), ref.setId);
       setLastLogged(ref);
       revealNextOpen(ref.setId);
+    } else {
+      // Unlogged the set that started the current rest: that rest never happened.
+      rest.stopIfStartedBy(ref.setId);
+      if (lastLogged?.setId === ref.setId) setLastLogged(null);
     }
   };
 
@@ -445,6 +466,13 @@ export function TrainScreen() {
     [plannedFor, fresh],
   );
   const freshPrimary = planFresh.blocks.find((b) => b.kind === "primary");
+  /** In place of a main lift the day has no sets for: the program hasn't started, or the lift has no max. */
+  const mainNotice = mainLiftNotice({
+    program,
+    date: plannedFor ?? date,
+    maxEntries: data.maxEntries,
+    hasMainLift: !!primaryBlock || !!freshPrimary,
+  });
 
   const maxChanged = !!saved && !!primaryBlock && !!primaryMax && session.primaryMaxLb !== primaryMax.valueLb && !primaryStarted;
   // A saved session nothing has been logged in yet, whose program prescription changed since it
@@ -929,9 +957,12 @@ export function TrainScreen() {
 
   return (
     <div>
-      {/* The program link drops to a line of its own (still at the right) when the dates leave it no room. */}
-      <header className="flex flex-wrap items-center justify-between gap-x-2 pt-2">
-        <div className="flex min-w-0 items-center">
+      {/* The program link stays beside the dates down to 320 px (below 360 it shows its short form,
+          a size smaller); when even that has no room it drops to a line of its own, still at the right. */}
+      <header className="flex flex-wrap items-center justify-between gap-x-2 pt-2 max-[359px]:gap-x-0">
+        {/* Below 360 px the link may reach 8 px into the empty side of the next-day button
+            ("Cycle 2 · Week 3" then still fits on this row at 320). */}
+        <div className="flex min-w-0 items-center max-[359px]:-mr-2">
           <button
             type="button"
             aria-label="Previous day"
@@ -952,21 +983,31 @@ export function TrainScreen() {
             <ChevronRight size={18} />
           </button>
         </div>
-        {pos && (
-          // Where this session sits in the program, in plain words; the program itself is a tap away.
-          <Link
-            to="/program"
-            aria-label={`Program: ${cycleLabel(pos, program.weeks.length)}`}
-            // Plain small text rather than the wide mono label: "Cycle 2 · Week 1 of 5" still fits beside the dates on a 375 px phone.
-            className={clsx(
-              "tap -mr-2 ml-auto inline-flex min-h-11 items-center gap-1 px-2 text-xs whitespace-nowrap",
-              pos.week.deload ? "text-fg-2" : "text-mute",
-            )}
-          >
-            {cycleLabel(pos, program.weeks.length)}
-            <ChevronRight size={12} aria-hidden className="opacity-60" />
-          </Link>
-        )}
+        {/* Where this session sits in the program, in plain words — or, before the first cycle,
+            when it starts. Always here: the program itself is a tap away from any day. */}
+        <Link
+          to="/program"
+          state={toProgram}
+          aria-label={programLink.name}
+          data-program-link=""
+          // Plain small text rather than the wide mono label: "Cycle 2 · Week 1 of 5" still fits beside the dates on a 375 px phone.
+          className={clsx(
+            "tap -mr-2 ml-auto inline-flex min-h-11 items-center gap-1 px-2 text-xs whitespace-nowrap",
+            "max-[359px]:gap-0.5 max-[359px]:pl-0 max-[359px]:text-[0.6875rem]",
+            programLink.deload ? "text-fg-2" : "text-mute",
+          )}
+        >
+          {programLink.short === programLink.text ? (
+            programLink.text
+          ) : (
+            <>
+              {/* Below 360 px the short form ("Week 1", "Deload", "Cycle 2 · Week 1") keeps the link beside the dates. */}
+              <span className="max-[359px]:hidden">{programLink.text}</span>
+              <span className="min-[360px]:hidden">{programLink.short}</span>
+            </>
+          )}
+          <ChevronRight size={12} aria-hidden className="opacity-60" />
+        </Link>
       </header>
 
       <div className="mt-6">
@@ -1235,6 +1276,7 @@ export function TrainScreen() {
                           set={s}
                           extra={i >= plannedCount}
                           preview={isPreview}
+                          record={isRecord}
                           onCheck={() => toggleDone(ref)}
                           // An AMRAP is edited where it's counted (reps, load, the max bump).
                           onEdit={() => (s.amrap ? setAmrap(ref) : setEditing(ref))}
@@ -1243,8 +1285,11 @@ export function TrainScreen() {
                     })}
                   </ul>
                   <div className="mt-1 flex min-h-11 flex-wrap items-center justify-between gap-x-4 gap-y-1">
-                    {/* What to load for the next open set — named, so it's clear which row the plates are for. */}
+                    {/* What to load for the next open set — named, so it's clear which row the plates are for.
+                        The plates give way (down to 9rem, wrapping among themselves) before "+ set"
+                        is pushed onto a line of its own. */}
                     <Plates
+                      className="min-w-0 flex-1 basis-36"
                       weight={nextMain?.targetWeight ?? null}
                       label={nextMain && !isPreview ? `Set ${primaryEx.sets.indexOf(nextMain) + 1} · per side` : undefined}
                     />
@@ -1285,14 +1330,31 @@ export function TrainScreen() {
             </Section>
           )}
 
-          {!primaryBlock && programDay?.primaryExerciseId != null && !primaryMax && !freshPrimary && (
+          {mainNotice && (
             <Section label="Main lift">
               <Empty>
-                Set a max for {exById(programDay.primaryExerciseId)?.name ?? "this lift"} and the working sets calculate themselves.{" "}
-                {!isPreview && (
-                  <button type="button" className="text-accent" onClick={() => setMaxFor(exById(programDay.primaryExerciseId!) ?? null)}>
-                    Set max →
-                  </button>
+                {mainNotice.kind === "not-started" ? (
+                  // Before the first cycle nothing is calculated, whatever maxes exist: say when it starts.
+                  <>
+                    {programStartSentence(mainNotice.start, today)}{" "}
+                    <Link to="/program" state={toProgram} className="-mx-1 -my-3 inline-block px-1 py-3 whitespace-nowrap text-accent">
+                      Open the program →
+                    </Link>
+                  </>
+                ) : (
+                  <>
+                    Set a max for {exById(mainNotice.exerciseId)?.name ?? "this lift"} and the working sets calculate themselves.{" "}
+                    {!isPreview && exById(mainNotice.exerciseId) && (
+                      <button
+                        type="button"
+                        aria-haspopup="dialog"
+                        className="-mx-1 -my-3 px-1 py-3 whitespace-nowrap text-accent"
+                        onClick={() => setMaxFor(exById(mainNotice.exerciseId) ?? null)}
+                      >
+                        Set max →
+                      </button>
+                    )}
+                  </>
                 )}
               </Empty>
             </Section>
@@ -1323,8 +1385,9 @@ export function TrainScreen() {
               const superset = b.exercises.length > 1;
               const letter = letters.get(b.id) ?? "";
               return (
-                // Each exercise ends in its "+ set" row (or, in a preview, nothing): that row is most of the gap to the next block.
-                <div key={b.id} data-block={b.id} className={isPreview ? "mb-8" : "mb-3"}>
+                // Each exercise ends in its "+ set" row (or, in a preview, nothing): that 44 px row is
+                // the whole gap to the next exercise — a control where the separation would be anyway.
+                <div key={b.id} data-block={b.id} className={clsx(isPreview && "mb-8")}>
                   {superset &&
                     (isPreview ? (
                       <div className="mb-2 flex items-center gap-2 text-glow">
@@ -1355,7 +1418,8 @@ export function TrainScreen() {
                         return (
                           <div
                             key={exKey(e, exIdx, b.id)}
-                            className={clsx("flex min-h-11 flex-wrap items-center justify-between gap-x-3", exIdx > 0 && "mt-3")}
+                            // No "+ set" row ends a skipped exercise: its own margin is the gap to the next one.
+                            className="mb-3 flex min-h-11 flex-wrap items-center justify-between gap-x-3"
                           >
                             <div className="min-w-0 truncate text-[0.9375rem] text-mute">
                               {tagLabel}
@@ -1400,7 +1464,7 @@ export function TrainScreen() {
                             });
                       const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
                       return (
-                        <div key={exKey(e, exIdx, b.id)} className={clsx(exIdx > 0 && (isPreview ? "mt-5" : "mt-1"))}>
+                        <div key={exKey(e, exIdx, b.id)} className={clsx(exIdx > 0 && isPreview && "mt-5")}>
                           <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
                             <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
                               {tagLabel}
@@ -1475,25 +1539,29 @@ export function TrainScreen() {
                                   weighted={weighted}
                                   needsLoad={checkAction(s, "accessory", weighted) === "load"}
                                   preview={isPreview}
+                                  record={isRecord}
                                   onCheck={() => toggleDone(setRef)}
                                   onEdit={() => setEditing(setRef)}
                                 />
                               );
                             })}
                           </ul>
-                          {!isPreview && e.sets.length < MAX_SETS && (
-                            <div className="flex justify-end">
-                              <button
-                                type="button"
-                                aria-label={`Add ${name} set`}
-                                className="tap label -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                                onClick={() => {
-                                  addAccessorySet(ref);
-                                  tick();
-                                }}
-                              >
-                                <Plus size={12} aria-hidden /> set
-                              </button>
+                          {!isPreview && (
+                            // The row stays (empty) for an exercise that is full: it's the gap to the next one.
+                            <div className="flex min-h-11 justify-end">
+                              {e.sets.length < MAX_SETS && (
+                                <button
+                                  type="button"
+                                  aria-label={`Add ${name} set`}
+                                  className="tap label -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                                  onClick={() => {
+                                    addAccessorySet(ref);
+                                    tick();
+                                  }}
+                                >
+                                  <Plus size={12} aria-hidden /> set
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
@@ -1511,12 +1579,17 @@ export function TrainScreen() {
               </p>
             )}
             {isPreview ? (
-              <p className="text-xs leading-relaxed text-mute">
-                Carried over from your last {weekday}
-                {primaryBlock ? `; main-lift loads use today's max and move with any AMRAP before then` : ""}.
-              </p>
+              // Only what's true of this preview: nothing claims a carry-over when nothing was carried.
+              (accessories.length > 0 || primaryBlock) && (
+                <p className="text-xs leading-relaxed text-mute">
+                  {accessories.length > 0
+                    ? `Carried over from your last ${weekday}${primaryBlock ? "; main-lift loads use today's max and move with any AMRAP before then" : ""}.`
+                    : "Main-lift loads use today's max and move with any AMRAP before then."}
+                </p>
+              )
             ) : (
-              <div className={clsx("flex flex-wrap items-center gap-x-4 gap-y-2", accessories.length > 0 && "mt-6")}>
+              // The last exercise's "+ set" row already is the gap above.
+              <div className={clsx("flex flex-wrap items-center gap-x-4 gap-y-2", accessories.length > 0 && "mt-2")}>
                 <button
                   type="button"
                   className="btn-ghost"
@@ -1602,36 +1675,40 @@ export function TrainScreen() {
 
       <SetEditSheet
         open={!!editingFound}
-        onClose={() => setEditing(null)}
+        onClose={closeEditor}
         title={editingFound ? `${exName(editingFound.ex.exerciseId)} · set ${editingFound.index + 1}` : ""}
         set={editingFound?.set ?? null}
         measure={editingFound?.ex.measure ?? "reps"}
-        weighted={!!editingFound && (editingFound.block.kind === "primary" || exWeighted(editingFound.ex.exerciseId))}
+        weighted={!!editingFound && loadedIn(editingFound.block, editingFound.ex.exerciseId)}
         showPlates={
           !!editingFound &&
           editingFound.ex.measure === "reps" &&
           (editingFound.block.kind === "primary" || exById(editingFound.ex.exerciseId)?.category === "primary")
         }
+        hint={editingFound && loadPrompt === editingFound.set.id ? "No load yet — set it to log this set" : undefined}
         onSave={(s) => {
           if (!editing || !editingFound) return;
           const prev = editingFound.set;
           const logged = s.done && !prev.done;
+          const change = editorChange(prev, s, loadedIn(editingFound.block, editingFound.ex.exerciseId));
           commit(
             mapExercise(session, editing, (e) => replaceSetAndPropagate(e, prev, s)),
-            { message: `${setLabel(editing)} ${logged ? "logged" : "updated"}`, scope: editing, duration: 4000 },
+            // A save that changed a value has no other undo. One that only did what the row's
+            // check does (logged the set as it stood) — or changed nothing — needs none.
+            change === "values" ? { message: `${setLabel(editing)} ${logged ? "logged" : "updated"}`, scope: editing, duration: 4000 } : undefined,
           );
           if (logged) {
-            rest.start(restFor(editingFound.block.kind));
+            rest.start(restFor(editingFound.block.kind), editing.setId);
             setLastLogged(editing);
           }
-          setEditing(null);
+          closeEditor();
         }}
         onDelete={
           editingFound && canDelete(editingFound)
             ? () => {
                 if (!editing) return;
                 deleteSet(editing);
-                setEditing(null);
+                closeEditor();
               }
             : undefined
         }
@@ -1655,7 +1732,7 @@ export function TrainScreen() {
           const pr = amrapPrs([...data.sessions.filter((x) => x.date !== date), next], date).find((p) => p.key === key) ?? null;
           if (pr) markSeen([key]);
           commit(next);
-          rest.start(restFor("primary"));
+          rest.start(restFor("primary"), amrap.setId);
           setLastLogged(amrap);
           return pr && { reps: pr.reps, weightLb: pr.weightLb, previousReps: pr.previousReps };
         }}
