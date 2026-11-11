@@ -777,7 +777,7 @@ describe("Train and Program, together", () => {
     renderTrain("/train", { program: true });
     expect(screen.getByRole("list", { name: "Bench press sets" })).toBeTruthy();
     await user.click(screen.getByRole("link", { name: "Program: Week 1 of 5" }));
-    await user.click(screen.getByRole("button", { name: "Start a week later" }));
+    await user.click(screen.getByRole("button", { name: "Delay a week" }));
     expect(store.data.settings.program.cycleStartDate).toBe("2026-11-23");
     await user.click(screen.getByRole("link", { name: /Back/ }));
     expect(where()).toBe("/train");

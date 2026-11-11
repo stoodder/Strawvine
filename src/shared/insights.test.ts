@@ -385,7 +385,7 @@ describe("the week's rate against the plan (weeklyRate, weeklyVerdict)", () => {
     expect(weeklyVerdict(early.checkin).text).toBe("Not enough data yet · the trend is judged after 10 logged days (8 so far)");
   });
 
-  it("the verdict's wording never reaches the insights: faster than plan inside the limit is still 'on-rate'", () => {
+  it("faster than plan inside the limit: the verdict says so, and the on-rate insight says 'ahead of plan' as a note", () => {
     // A gentle cut (0.25%/week, about 0.5 lb) with the trend dropping ~1.2 lb a week: inside the 1% limit.
     const goal = { targetLb: 180, pacePctPerWeek: 0.25, setOn: addDays(today, -30), startLb: 205 };
     const model = buildModel(
@@ -397,7 +397,9 @@ describe("the week's rate against the plan (weeklyRate, weeklyVerdict)", () => {
     );
     expect(model.checkin.rate).toMatchObject({ kind: "on-plan", overLimit: null });
     expect(weeklyVerdict(model.checkin)).toMatchObject({ kind: "faster", tone: "info" });
-    expect(model.insights.find((i) => i.key === "on-rate")).toMatchObject({ tone: "good" });
+    const insight = model.insights.find((i) => i.key === "on-rate")!;
+    expect(insight.tone).toBe("info");
+    expect(insight.text).toMatch(/ahead of plan\.$/);
   });
 });
 

@@ -19,7 +19,7 @@ test("pushed back a week in week 1: Train keeps its Program link and says when t
   await expect(page.getByRole("button", { name: /^Bench press set \d+:/ })).toHaveCount(4);
   await page.getByRole("link", { name: "Program: Week 1 of 5" }).tap();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Program");
-  await page.getByRole("button", { name: "Start a week later" }).tap();
+  await page.getByRole("button", { name: "Delay a week" }).tap();
   await expect.poll(async () => (await serverData(page)).settings.program.cycleStartDate).toBe("2026-11-02");
   await expectSynced(page);
 

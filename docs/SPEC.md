@@ -248,7 +248,9 @@ e.g. "On plan · −1.3 lb this week against −1.5 lb", "Flat this week · +0.1
 
 - `weeklyRate` is the rule, shared with the rate-of-change insights in §7: on plan is at least 60 % of the planned
   change, the planned way, within the limit; past the limit that way is faster; against the plan by anything that
-  prints is the wrong way. The insights read it as is — "right on plan" covers everything `weeklyRate` has on plan.
+  prints is the wrong way. The insight reads it as is, with one refinement shared with the verdict: on plan by more
+  than 1.5× the plan (`FASTER_THAN_PLAN_SHARE`) reads "ahead of plan" as a note rather than "right on plan", so Today's
+  signal and the weekly verdict never disagree.
 - `weeklyVerdict` words it, and for the reader splits three of its cases further: against the plan by no more than
   0.2 lb as printed (or a week that prints as 0.0) is **flat**, not a warning; on plan by more than 1.5 × the plan is
   **faster**, as a note; holding past a limit is **drifting**, not a calm "Maintaining". These are read at the precision

@@ -389,12 +389,16 @@ export function insights(data: AppData, series: ReadonlyArray<EnergyDay>, today:
         tone: "warn",
         text: `Trend is climbing ${pct.toFixed(1)}%/week — above your ${overLimit.limitPct}% limit.`,
       });
-    else if (rate.kind === "on-plan")
+    else if (rate.kind === "on-plan") {
+      // Well ahead of the plan (inside the limit) is a note, not "right on plan": the same band the
+      // weekly verdict calls "Faster than plan", so Today's signal and Progress never disagree.
+      const ahead = Math.abs(change) > Math.abs(rate.planLb) * FASTER_THAN_PLAN_SHARE;
       out.push({
         key: "on-rate",
-        tone: "good",
-        text: `Trend moved ${change > 0 ? "+" : ""}${change.toFixed(1)} lb this week — right on plan.`,
+        tone: ahead ? "info" : "good",
+        text: `Trend moved ${change > 0 ? "+" : ""}${change.toFixed(1)} lb this week — ${ahead ? "ahead of plan" : "right on plan"}.`,
       });
+    }
   }
 
   // Sleep.
