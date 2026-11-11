@@ -11,6 +11,8 @@ import { severityClass, severityColor } from "../ui";
 
 /** Where the target sits in each column; above it is room for overs (up to 1/TARGET_AT × target). */
 const TARGET_AT = 0.7;
+/** Today's bar: an outline in the bar's own colour (`currentColor`) instead of a fill. */
+const HOLLOW = "shadow-[inset_0_0_0_1.5px_currentColor]";
 
 interface StripDay {
   date: string;
@@ -24,7 +26,8 @@ interface StripDay {
  * Today's calorie bar, `overTargetSeverity`) is neutral up to the target with the excess in the
  * same over-target colour as that bar (`severityColor`: caution yellow → warn red), so a day 6 %
  * over looks alike on both screens. A day without calories or a target is a dim stub. Today is
- * still in progress and says so.
+ * still in progress and looks it: its bar is hollow (an outline, like the Steps chart's "so far"
+ * point) and "so far" stands where a finished day shows its difference.
  */
 export const IntakeStrip = memo(function IntakeStrip({
   data,
@@ -47,7 +50,9 @@ export const IntakeStrip = memo(function IntakeStrip({
     if (d.target === null) return `${when}: ${fmt(d.eaten)} kcal, no target yet`;
     const diff = d.eaten - d.target;
     const over = overTargetSeverity(d.eaten, d.target) > 0;
-    return `${when}: ${fmt(d.eaten)} of ${fmt(d.target)} kcal, ${over ? `${fmt(diff)} over` : diff >= 0 ? "on target" : `${fmt(-diff)} under`}`;
+    // A finished day came in under; today still has that much left.
+    const short = `${fmt(-diff)} ${d.date === today ? "left" : "under"}`;
+    return `${when}: ${fmt(d.eaten)} of ${fmt(d.target)} kcal, ${over ? `${fmt(diff)} over` : diff >= 0 ? "on target" : short}`;
   };
 
   return (
@@ -68,7 +73,7 @@ export const IntakeStrip = memo(function IntakeStrip({
           const isToday = d.date === today;
           const diff = d.eaten !== null && d.target ? d.eaten - d.target : null;
           return (
-            <li key={d.date} className="min-w-0">
+            <li key={d.date} className="min-w-0" data-day={isToday ? "today" : "past"}>
               <span className="sr-only">{describe(d)}</span>
               <div aria-hidden className="relative h-14 overflow-hidden rounded-[4px] bg-white/[0.035]">
                 {ratio !== null ? (
@@ -76,19 +81,28 @@ export const IntakeStrip = memo(function IntakeStrip({
                     className={clsx(
                       "absolute inset-x-0 bottom-0 rounded-[4px]",
                       // Over: the part up to the target stays neutral, the excess above it carries the over-target colour.
-                      over ? "bg-fg-2/20" : "bg-accent",
-                      isToday && "opacity-60",
+                      // Today is hollow — an outline in the same colours over a faint tint, no glow.
+                      isToday ? (over ? "bg-fg-2/10 text-fg-2/50" : "bg-accent/15 text-accent") : over ? "bg-fg-2/20" : "bg-accent",
+                      isToday && HOLLOW,
                     )}
+                    data-partial={isToday ? "" : undefined}
                     initial={reduce ? false : { height: 0 }}
                     animate={{ height: `${fill * 100}%` }}
                     transition={{ duration: 0.6, delay: reduce ? 0 : i * 0.04, ease: [0.22, 1, 0.36, 1] }}
-                    style={{ boxShadow: over ? undefined : "0 0 10px -2px rgb(183 243 106 / 0.45)" }}
+                    style={{ boxShadow: over || isToday ? undefined : "0 0 10px -2px rgb(183 243 106 / 0.45)" }}
                   >
                     {over && (
                       <div
-                        className={clsx("absolute inset-x-0 top-0 rounded-t-[4px]", severityClass(severity, "bg"))}
+                        className={clsx(
+                          "absolute inset-x-0 top-0 rounded-t-[4px]",
+                          severityClass(severity, isToday ? "text" : "bg"),
+                          isToday && HOLLOW,
+                        )}
                         data-severity={Math.round(severity * 100) / 100}
-                        style={{ height: `${((fill - TARGET_AT) / fill) * 100}%`, backgroundColor: severityColor(severity) }}
+                        style={{
+                          height: `${((fill - TARGET_AT) / fill) * 100}%`,
+                          [isToday ? "color" : "backgroundColor"]: severityColor(severity),
+                        }}
                       />
                     )}
                   </motion.div>
@@ -103,12 +117,19 @@ export const IntakeStrip = memo(function IntakeStrip({
                   <span className="max-[16rem]:hidden">{weekdayName(d.date, true)}</span>
                   <span className="hidden max-[16rem]:inline">{weekdayName(d.date, true).slice(0, 1)}</span>
                 </div>
-                <div
-                  className={clsx("num mt-0.5 truncate text-2xs", over ? severityClass(severity, "text") : "text-mute")}
-                  style={over ? { color: severityColor(severity) } : undefined}
-                >
-                  {diff === null ? "—" : compactDiff(diff)}
-                </div>
+                {isToday && d.eaten !== null ? (
+                  // Not a difference: the day isn't over. Wraps ("so / far") where the column is too narrow for both words.
+                  <div className="mt-0.5 text-2xs text-fg-2" data-so-far="">
+                    so far
+                  </div>
+                ) : (
+                  <div
+                    className={clsx("num mt-0.5 truncate text-2xs", over ? severityClass(severity, "text") : "text-mute")}
+                    style={over ? { color: severityColor(severity) } : undefined}
+                  >
+                    {diff === null ? "—" : compactDiff(diff)}
+                  </div>
+                )}
               </div>
             </li>
           );

@@ -18,6 +18,31 @@ export function viewFromParam(value: string | null): ProgressView {
   return PROGRESS_VIEWS.find((v) => v.id === value)?.id ?? "week";
 }
 
+const LAST_VIEW_KEY = "strawvine:progress-view";
+
+/**
+ * The view last shown, for this browser session (sessionStorage: gone with the tab or the Home
+ * Screen app's process). Storage may be unavailable (private mode, blocked): then nothing is
+ * remembered, quietly.
+ */
+export function rememberProgressView(view: ProgressView): void {
+  try {
+    sessionStorage.setItem(LAST_VIEW_KEY, view);
+  } catch {
+    // Not remembered: Progress opens on Week.
+  }
+}
+
+/** The remembered view, or null when there is none (or it names no view any more). */
+export function recallProgressView(): ProgressView | null {
+  try {
+    const stored = sessionStorage.getItem(LAST_VIEW_KEY);
+    return PROGRESS_VIEWS.find((v) => v.id === stored)?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export const PROGRESS_PANEL_ID = "progress-panel";
 export const progressTabId = (view: ProgressView) => `progress-tab-${view}`;
 

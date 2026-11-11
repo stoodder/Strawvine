@@ -3,7 +3,17 @@ import { addDays, dateRange } from "./dates";
 import { defaultSettings } from "./defaults";
 import { computeEnergySeries } from "./energy";
 import { dayChecklist, type AppData } from "./gamify";
-import { buildModel, insights, targetsFor, weeklyCheckin, weeklyRate, weeklyVerdict } from "./insights";
+import {
+  buildModel,
+  FASTER_THAN_PLAN_SHARE,
+  FLAT_MAX_LB,
+  insights,
+  ON_PLAN_MIN_SHARE,
+  targetsFor,
+  weeklyCheckin,
+  weeklyRate,
+  weeklyVerdict,
+} from "./insights";
 import { overTarget } from "./nutrition";
 import { emptyDayLog, type DayLog, type Settings } from "./schemas";
 
@@ -169,52 +179,162 @@ describe("the week's rate against the plan (weeklyRate, weeklyVerdict)", () => {
       kind: "on-plan",
       tone: "good",
       title: "On plan",
-      detail: "−1.3 lb this week against −1.5",
-      text: "On plan · −1.3 lb this week against −1.5",
+      detail: "−1.3 lb this week against −1.5 lb",
+      text: "On plan · −1.3 lb this week against −1.5 lb",
     });
     expect(rate(-0.95).kind).toBe("on-plan");
-    // Quicker than planned but inside the safety limit is still on plan (the limit is the only ceiling).
+    // Quicker than planned but inside the safety limit is still on plan for the rule (the limit is its only ceiling).
     expect(rate(-1.9).kind).toBe("on-plan");
-    expect(verdict(0.7, build).text).toBe("On plan · +0.7 lb this week against +0.8");
+    expect(verdict(0.7, build).text).toBe("On plan · +0.7 lb this week against +0.8 lb");
   });
 
-  it("slower than plan: the planned way or flat, under 60%", () => {
-    expect(verdict(-0.4)).toMatchObject({ kind: "slower", tone: "info", text: "Slower than plan · −0.4 lb this week against −1.5" });
+  it("the 60% share is inclusive: exactly that much of the plan is on plan, a hair less is slower", () => {
+    // 60% of 2.5 lb is 1.5 lb (both exact in binary), at 0.75%/week: inside the 1% limit.
+    const plan = { direction: "lose", rateLbPerWeek: -2.5 } as const;
+    expect(ON_PLAN_MIN_SHARE).toBe(0.6);
+    expect(rate(-1.5, plan).kind).toBe("on-plan");
+    expect(rate(-1.49, plan).kind).toBe("slower");
+    expect(verdict(-1.5, plan)).toMatchObject({ kind: "on-plan", tone: "good" });
+    expect(verdict(-1.49, plan)).toMatchObject({ kind: "slower", tone: "info" });
+  });
+
+  it("slower than plan: the planned way, under 60%", () => {
+    expect(verdict(-0.4)).toMatchObject({ kind: "slower", tone: "info", text: "Slower than plan · −0.4 lb this week against −1.5 lb" });
     expect(rate(-0.85).kind).toBe("slower");
-    // A week that prints as 0.0 is slow, whichever side of zero it fell.
-    expect(verdict(0.04).text).toBe("Slower than plan · 0.0 lb this week against −1.5");
-    expect(rate(-0.04).kind).toBe("slower");
     expect(rate(0.3, build).kind).toBe("slower");
+    // The smallest change that prints, the planned way: slow, not flat.
+    expect(verdict(-0.06).text).toBe("Slower than plan · −0.1 lb this week against −1.5 lb");
+    // For the rule, a week that prints as 0.0 is slow, whichever side of zero it fell (the verdict calls it flat, below).
+    expect(rate(0.04).kind).toBe("slower");
+    expect(rate(-0.04).kind).toBe("slower");
   });
 
-  it("wrong direction: against the plan, a warning", () => {
-    expect(verdict(0.6)).toMatchObject({ kind: "wrong-way", tone: "warn", text: "Wrong direction · +0.6 lb this week against −1.5" });
+  it("flat this week: 0.0, or within 0.2 lb against the plan, is noise — a note, not a warning", () => {
+    expect(FLAT_MAX_LB).toBe(0.2);
+    expect(verdict(0.1)).toEqual({
+      kind: "flat",
+      tone: "info",
+      title: "Flat this week",
+      detail: "+0.1 lb against −1.5 lb",
+      text: "Flat this week · +0.1 lb against −1.5 lb",
+    });
+    // The rule itself still reads these as against the plan: only the verdict's wording softens.
     expect(rate(0.06).kind).toBe("wrong-way"); // prints as +0.1
-    expect(verdict(-0.5, build).text).toBe("Wrong direction · −0.5 lb this week against +0.8");
+    expect(verdict(0.06).text).toBe("Flat this week · +0.1 lb against −1.5 lb");
+    // Up to what prints as 0.2…
+    expect(verdict(0.2)).toMatchObject({ kind: "flat", tone: "info", text: "Flat this week · +0.2 lb against −1.5 lb" });
+    expect(verdict(0.24)).toMatchObject({ kind: "flat", text: "Flat this week · +0.2 lb against −1.5 lb" });
+    // …and a week that prints as 0.0, from either side.
+    expect(verdict(0.04)).toMatchObject({ kind: "flat", tone: "info", text: "Flat this week · 0.0 lb against −1.5 lb" });
+    expect(verdict(-0.04).text).toBe("Flat this week · 0.0 lb against −1.5 lb");
+    // A build, slipping a touch.
+    expect(verdict(-0.2, build)).toMatchObject({ kind: "flat", tone: "info", text: "Flat this week · −0.2 lb against +0.8 lb" });
+  });
+
+  it("wrong direction: against the plan by more than 0.2 lb, a warning", () => {
+    // 0.25 prints as +0.3: the first change past flat.
+    expect(verdict(0.25)).toMatchObject({ kind: "wrong-way", tone: "warn", text: "Wrong direction · +0.3 lb this week against −1.5 lb" });
+    expect(verdict(0.6)).toMatchObject({ kind: "wrong-way", tone: "warn", text: "Wrong direction · +0.6 lb this week against −1.5 lb" });
+    expect(verdict(-0.5, build).text).toBe("Wrong direction · −0.5 lb this week against +0.8 lb");
+    expect(verdict(-0.3, build)).toMatchObject({ kind: "wrong-way", tone: "warn" });
     // …and past the limit for that direction, it says so.
-    expect(verdict(1.2).text).toBe("Wrong direction · +1.2 lb this week against −1.5, past your 0.5% weekly limit");
+    expect(verdict(1.2).text).toBe("Wrong direction · +1.2 lb this week against −1.5 lb, past your 0.5% weekly limit");
     expect(rate(1.2).overLimit).toEqual({ direction: "gain", limitPct: 0.5 });
   });
 
-  it("faster than plan: the planned way, past the safety limit", () => {
+  it("a change past a limit is never flat, however small it prints", () => {
+    // A 0.05% gain limit: +0.2 lb at 200 lb is 0.1%/week, twice it.
+    const tight = weeklyRate({
+      trendWeight: 200.2,
+      weekAgoTrendWeight: 200,
+      loggedCount: 30,
+      plan: cut,
+      limits: { maxLossPctPerWeek: 1, maxGainPctPerWeek: 0.05 },
+    });
+    expect(weeklyVerdict({ rate: tight })).toMatchObject({
+      kind: "wrong-way",
+      tone: "warn",
+      text: "Wrong direction · +0.2 lb this week against −1.5 lb, past your 0.05% weekly limit",
+    });
+  });
+
+  it("faster than plan, within the limit: more than 1.5× the plan, a note", () => {
+    const gentle = { direction: "lose", rateLbPerWeek: -0.5 } as const;
+    expect(FASTER_THAN_PLAN_SHARE).toBe(1.5);
+    expect(verdict(-1.9, gentle)).toEqual({
+      kind: "faster",
+      tone: "info",
+      title: "Faster than plan",
+      detail: "−1.9 lb this week against −0.5 lb",
+      text: "Faster than plan · −1.9 lb this week against −0.5 lb",
+    });
+    // The rule (and the on-rate insight) still has it on plan.
+    expect(rate(-1.9, gentle)).toMatchObject({ kind: "on-plan", overLimit: null });
+    // Exactly 1.5× is still on plan; a hair more is faster.
+    expect(verdict(-0.75, gentle)).toMatchObject({ kind: "on-plan", tone: "good", text: "On plan · −0.8 lb this week against −0.5 lb" });
+    expect(verdict(-0.76, gentle)).toMatchObject({ kind: "faster", tone: "info" });
+    expect(verdict(-1.9)).toMatchObject({ kind: "on-plan", tone: "good" }); // 1.9 against 1.5: within 1.5×
+    // A build: +0.8 against +0.5 (the 0.5% limit is 1 lb here).
+    expect(verdict(0.8, { direction: "gain", rateLbPerWeek: 0.5 })).toMatchObject({
+      kind: "faster",
+      tone: "info",
+      text: "Faster than plan · +0.8 lb this week against +0.5 lb",
+    });
+  });
+
+  it("faster than plan, past the safety limit: a warning that names the limit", () => {
     expect(verdict(-2.4)).toMatchObject({
       kind: "faster",
       tone: "warn",
-      text: "Faster than plan · −2.4 lb this week against −1.5, past your 1% weekly limit",
+      text: "Faster than plan · −2.4 lb this week against −1.5 lb, past your 1% weekly limit",
     });
-    expect(rate(-2.4).overLimit).toEqual({ direction: "loss", limitPct: 1 });
-    expect(verdict(1.2, build).text).toBe("Faster than plan · +1.2 lb this week against +0.8, past your 0.5% weekly limit");
-    // Exactly at the limit is not past it.
-    expect(rate(-2).kind).toBe("on-plan");
+    expect(rate(-2.4)).toMatchObject({ kind: "faster", overLimit: { direction: "loss", limitPct: 1 } });
+    expect(verdict(1.2, build).text).toBe("Faster than plan · +1.2 lb this week against +0.8 lb, past your 0.5% weekly limit");
+    // The same week on a gentle plan: the band's note turns into the warning.
+    expect(verdict(-2.4, { direction: "lose", rateLbPerWeek: -0.5 })).toMatchObject({
+      kind: "faster",
+      tone: "warn",
+      text: "Faster than plan · −2.4 lb this week against −0.5 lb, past your 1% weekly limit",
+    });
+  });
+
+  it("the limits are exclusive: exactly at one is not past it", () => {
+    // Loss: 1% of 200 lb is 2 lb.
+    expect(rate(-2)).toMatchObject({ kind: "on-plan", overLimit: null });
+    expect(rate(-2.01)).toMatchObject({ kind: "faster", overLimit: { direction: "loss", limitPct: 1 } });
+    // Gain: 0.5% of 200 lb is 1 lb.
+    expect(rate(1, build)).toMatchObject({ kind: "on-plan", overLimit: null });
+    expect(rate(1.01, build)).toMatchObject({ kind: "faster", overLimit: { direction: "gain", limitPct: 0.5 } });
+    expect(rate(1, hold).overLimit).toBeNull();
+    expect(rate(1.01, hold).overLimit).toEqual({ direction: "gain", limitPct: 0.5 });
   });
 
   it("maintaining: no direction to judge, only the limits", () => {
     expect(verdict(0.2, hold)).toMatchObject({ kind: "maintaining", tone: "info", text: "Maintaining · trend +0.2 lb this week" });
     expect(verdict(-0.3, null).text).toBe("Maintaining · trend −0.3 lb this week");
-    expect(verdict(-2.4, hold)).toMatchObject({
-      kind: "maintaining",
+    // Exactly at the limit is still calm.
+    expect(verdict(-2, hold)).toMatchObject({ kind: "maintaining", tone: "info", text: "Maintaining · trend −2.0 lb this week" });
+    // A maintenance plan plans no change, whatever rate it carries.
+    const odd = { direction: "maintain", rateLbPerWeek: -0.7 } as const;
+    expect(rate(-0.7, odd)).toMatchObject({ kind: "maintaining", planLb: 0 });
+    expect(rate(0.7, odd).kind).toBe("maintaining");
+    expect(verdict(0.7, odd).text).toBe("Maintaining · trend +0.7 lb this week");
+  });
+
+  it("drifting: holding, with the trend past a safety limit — never a calm 'Maintaining'", () => {
+    expect(verdict(-2.4, hold)).toEqual({
+      kind: "drifting",
       tone: "warn",
-      text: "Maintaining · trend −2.4 lb this week, past your 1% weekly limit",
+      title: "Drifting",
+      detail: "trend −2.4 lb this week, past your 1% weekly limit",
+      text: "Drifting · trend −2.4 lb this week, past your 1% weekly limit",
+    });
+    // The rule's kind is unchanged: the insights read `overLimit`, not the verdict.
+    expect(rate(-2.4, hold)).toMatchObject({ kind: "maintaining", overLimit: { direction: "loss", limitPct: 1 } });
+    expect(verdict(1.2, null)).toMatchObject({
+      kind: "drifting",
+      tone: "warn",
+      text: "Drifting · trend +1.2 lb this week, past your 0.5% weekly limit",
     });
   });
 
@@ -228,6 +348,9 @@ describe("the week's rate against the plan (weeklyRate, weeklyVerdict)", () => {
     expect(rate(-3, cut, 9)).toMatchObject({ kind: "no-data", overLimit: null });
     expect(rate(-3, cut, 9).changeLb).toBeCloseTo(-3);
     expect(rate(-1.3, cut, 10).kind).toBe("on-plan");
+    // Nor softened or sharpened: a flat or a drifting week under 10 days only says it's early.
+    expect(verdict(0.1, cut, 9).kind).toBe("no-data");
+    expect(verdict(-3, hold, 9)).toMatchObject({ kind: "no-data", tone: "info" });
     const noTrend = weeklyRate({ trendWeight: 200, weekAgoTrendWeight: null, loggedCount: 30, plan: cut, limits });
     expect(noTrend).toMatchObject({ kind: "no-data", changeLb: null, pctPerWeek: null });
     expect(weeklyVerdict({ rate: noTrend }).text).toBe("Not enough data yet · it takes trend weights a week apart");
@@ -247,19 +370,34 @@ describe("the week's rate against the plan (weeklyRate, weeklyVerdict)", () => {
     expect(onPlan.checkin.rate.planLb).toBe(onPlan.checkin.targetRateLbPerWeek);
     expect(onPlan.insights.map((i) => i.key)).toContain("on-rate");
     expect(weeklyVerdict(onPlan.checkin)).toMatchObject({ kind: "on-plan", tone: "good" });
-    expect(weeklyVerdict(onPlan.checkin).text).toMatch(/^On plan · −1\.\d lb this week against −\d\.\d$/);
+    expect(weeklyVerdict(onPlan.checkin).text).toMatch(/^On plan · −1\.\d lb this week against −\d\.\d lb$/);
 
-    // No goal, dropping a pound a day: maintaining on paper, past the loss limit.
+    // No goal, dropping a pound a day: maintaining on paper, past the loss limit — the verdict says drifting.
     const fast = buildModel(data(daysBefore(21, (i) => ({ weightLb: 230 - i, calories: 2500 }))), today);
     expect(fast.checkin.rate).toMatchObject({ kind: "maintaining", overLimit: { direction: "loss", limitPct: 1 } });
     expect(fast.insights.map((i) => i.key)).toContain("loss-fast");
-    expect(weeklyVerdict(fast.checkin).tone).toBe("warn");
+    expect(weeklyVerdict(fast.checkin)).toMatchObject({ kind: "drifting", tone: "warn" });
 
     // Eight logged days: neither speaks.
     const early = buildModel(data(daysBefore(8, (i) => ({ weightLb: 230 - i, calories: 2500 }))), today);
     expect(early.checkin.rate.kind).toBe("no-data");
     expect(early.insights.map((i) => i.key)).not.toContain("loss-fast");
     expect(weeklyVerdict(early.checkin).text).toBe("Not enough data yet · the trend is judged after 10 logged days (8 so far)");
+  });
+
+  it("the verdict's wording never reaches the insights: faster than plan inside the limit is still 'on-rate'", () => {
+    // A gentle cut (0.25%/week, about 0.5 lb) with the trend dropping ~1.2 lb a week: inside the 1% limit.
+    const goal = { targetLb: 180, pacePctPerWeek: 0.25, setOn: addDays(today, -30), startLb: 205 };
+    const model = buildModel(
+      data(
+        daysBefore(21, (i) => ({ weightLb: 205 - i * 0.17, calories: 2500 })),
+        { settings: { ...settings, weightGoal: goal } },
+      ),
+      today,
+    );
+    expect(model.checkin.rate).toMatchObject({ kind: "on-plan", overLimit: null });
+    expect(weeklyVerdict(model.checkin)).toMatchObject({ kind: "faster", tone: "info" });
+    expect(model.insights.find((i) => i.key === "on-rate")).toMatchObject({ tone: "good" });
   });
 });
 

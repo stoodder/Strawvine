@@ -42,66 +42,69 @@ export function MorningEditor({ day, patch }: EditorProps) {
       </div>
       {/* Sleep, score and HRV in thirds; the optional resting HR and VO2 max (never part of closing the day) in
           halves below, so "Resting HR" fits its column on a 320 px phone. Readings out of range are refused, not
-          clamped: a clamped "5" would save a believable 20 bpm. */}
-      <div className="grid grid-cols-6 gap-4">
-        <div className="col-span-2">
-          <div className="label mb-2">Sleep</div>
-          <SleepField value={day.sleepMinutes} onCommit={(v) => patch({ sleepMinutes: v })} />
-        </div>
-        <div className="col-span-2">
-          <div className="label mb-2">Score</div>
-          <BoxNumber
-            ariaLabel="Sleep score"
-            value={day.sleepScore}
-            onCommit={(v) => patch({ sleepScore: v })}
-            min={0}
-            max={100}
-            outOfRange="reject"
-            className="w-full"
-            align="left"
-          />
-        </div>
-        <div className="col-span-2">
-          <div className="label mb-2">HRV</div>
-          <BoxNumber
-            ariaLabel="HRV"
-            value={day.hrvMs}
-            onCommit={(v) => patch({ hrvMs: v })}
-            unit="ms"
-            min={0}
-            max={500}
-            outOfRange="reject"
-            className="w-full"
-            align="left"
-          />
-        </div>
-        <div className="col-span-3">
-          <div className="label mb-2">Resting HR</div>
-          <BoxNumber
-            ariaLabel="Resting HR"
-            value={day.restingHrBpm ?? null}
-            onCommit={(v) => patch({ restingHrBpm: v })}
-            unit="bpm"
-            min={20}
-            max={220}
-            outOfRange="reject"
-            className="w-full"
-            align="left"
-          />
-        </div>
-        <div className="col-span-3">
-          <div className="label mb-2">VO2 max</div>
-          <BoxNumber
-            ariaLabel="VO2 max"
-            value={day.vo2Max ?? null}
-            onCommit={(v) => patch({ vo2Max: v })}
-            decimals={1}
-            min={10}
-            max={100}
-            outOfRange="reject"
-            className="w-full"
-            align="left"
-          />
+          clamped: a clamped "5" would save a believable 20 bpm. Where the thirds are narrow (that 320 px phone) the
+          columns sit closer and the HRV box pads less, so three digits fit beside its "ms". */}
+      <div className="@container">
+        <div className="grid grid-cols-6 gap-4 @max-[17rem]:gap-x-3">
+          <div className="col-span-2">
+            <div className="label mb-2">Sleep</div>
+            <SleepField value={day.sleepMinutes} onCommit={(v) => patch({ sleepMinutes: v })} />
+          </div>
+          <div className="col-span-2">
+            <div className="label mb-2">Score</div>
+            <BoxNumber
+              ariaLabel="Sleep score"
+              value={day.sleepScore}
+              onCommit={(v) => patch({ sleepScore: v })}
+              min={0}
+              max={100}
+              outOfRange="reject"
+              className="w-full"
+              align="left"
+            />
+          </div>
+          <div className="col-span-2">
+            <div className="label mb-2">HRV</div>
+            <BoxNumber
+              ariaLabel="HRV"
+              value={day.hrvMs}
+              onCommit={(v) => patch({ hrvMs: v })}
+              unit="ms"
+              min={0}
+              max={500}
+              outOfRange="reject"
+              className="w-full @max-[17rem]:px-2"
+              align="left"
+            />
+          </div>
+          <div className="col-span-3">
+            <div className="label mb-2">Resting HR</div>
+            <BoxNumber
+              ariaLabel="Resting HR"
+              value={day.restingHrBpm ?? null}
+              onCommit={(v) => patch({ restingHrBpm: v })}
+              unit="bpm"
+              min={20}
+              max={220}
+              outOfRange="reject"
+              className="w-full"
+              align="left"
+            />
+          </div>
+          <div className="col-span-3">
+            <div className="label mb-2">VO2 max</div>
+            <BoxNumber
+              ariaLabel="VO2 max"
+              value={day.vo2Max ?? null}
+              onCommit={(v) => patch({ vo2Max: v })}
+              decimals={1}
+              min={10}
+              max={100}
+              outOfRange="reject"
+              className="w-full"
+              align="left"
+            />
+          </div>
         </div>
       </div>
       <div className="flex flex-wrap gap-x-8 gap-y-4">

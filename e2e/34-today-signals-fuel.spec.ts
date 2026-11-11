@@ -56,6 +56,36 @@ test("Signals sit under the header: the most important first, the rest open in p
   await expect(page.locator("[data-signals]")).toHaveCount(0);
 });
 
+test("the header's two lines under the title never wrap into a third, from a 320 px phone up", async ({ page }) => {
+  // Monday 2026-11-30: the second cycle's first week — the longest label ("Cycle 2 · Week 1 of 5").
+  await onboardedOn(page, new Date(2026, 10, 30, 10, 0, 0));
+  const sub = page.locator("[data-day-sub]");
+  const lines = sub.locator("> span");
+  await expect(lines).toHaveCount(2);
+  // To a screen reader it is one sentence, whatever is on screen.
+  await expect(sub).toHaveText(/^\d left to close the day · Cycle 2 · Week 1 of 5$/, { useInnerText: false });
+  const lineHeight = await sub.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+  for (const width of [320, 340, 360, 375, 390, 412]) {
+    await page.setViewportSize({ width, height: 700 });
+    // Each line is one line tall, and what it shows starts a line of its own (no "day ·" left dangling).
+    for (const line of await lines.all()) expect((await line.boundingBox())!.height, `${width}px`).toBeLessThanOrEqual(lineHeight + 1);
+    expect((await sub.boundingBox())!.height, `${width}px`).toBeLessThanOrEqual(2 * lineHeight + 1);
+    const shown = (await sub.innerText()).split("\n").filter((l) => l.trim() && l.trim() !== "·");
+    expect(shown, `${width}px`).toHaveLength(2);
+    expect(shown[0]).toMatch(/^\d left to close( the day)?$/);
+    expect(shown[1]).toMatch(/^Cycle 2 · Week 1( of 5)?$/);
+    expect(await pageOverflow(page), `${width}px`).toBeNull();
+  }
+  // The narrow form at 320 px, the full one at 390 px.
+  await page.setViewportSize({ width: 320, height: 568 });
+  // (The second line starts with the screen reader's separator, which takes no room.)
+  await expect(lines.nth(0)).toHaveText(/^\d left to close$/, { useInnerText: true });
+  await expect(lines.nth(1)).toHaveText(/^(·\s+)?Cycle 2 · Week 1$/, { useInnerText: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(lines.nth(0)).toHaveText(/^\d left to close the day$/, { useInnerText: true });
+  await expect(lines.nth(1)).toHaveText(/^(·\s+)?Cycle 2 · Week 1 of 5$/, { useInnerText: true });
+});
+
 test("no signals yet: nothing is rendered in their place", async ({ page }) => {
   await onboardedOn(page);
   await expect(page.getByRole("heading", { name: "Fuel", exact: true })).toBeVisible();

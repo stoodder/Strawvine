@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
-import { useSearchParams } from "react-router";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigationType, useSearchParams } from "react-router";
 import { addDays } from "../../shared/dates";
 import { displayPrefs } from "../../shared/defaults";
 import { computeEnergySeries, energyBalanceSeries } from "../../shared/energy";
@@ -12,7 +12,15 @@ import { Section } from "../components/ui";
 import { IntakeStrip } from "../components/progress/IntakeStrip";
 import { RangeControl } from "../components/progress/RangeControl";
 import { StrengthView } from "../components/progress/StrengthView";
-import { PROGRESS_PANEL_ID, progressTabId, viewFromParam, ViewTabs, type ProgressView } from "../components/progress/ViewTabs";
+import {
+  PROGRESS_PANEL_ID,
+  progressTabId,
+  recallProgressView,
+  rememberProgressView,
+  viewFromParam,
+  ViewTabs,
+  type ProgressView,
+} from "../components/progress/ViewTabs";
 import { WeekView } from "../components/progress/WeekView";
 import { useTitle } from "../components/useTitle";
 import { fmt } from "../lib/format";
@@ -21,13 +29,27 @@ import { useData } from "../lib/store";
 /**
  * Progress: five views behind one segmented control — Week (the check-in), Body, Fuel, Activity,
  * Strength. The view lives in the URL (`/progress?view=body`; Week is the bare path), so a reload,
- * Back from another screen and deep links land on it. Body, Fuel and Activity share one chart
+ * Back from another screen and deep links land on it; the last one shown is remembered for the
+ * session, so the tab bar's Progress comes back to it. Body, Fuel and Activity share one chart
  * range.
  */
 export function ProgressScreen() {
   const { data, today, model } = useData();
   const [params, setParams] = useSearchParams();
-  const view = viewFromParam(params.get("view"));
+  const param = params.get("view");
+  // Coming back to Progress from another screen (the tab bar links to the bare path) opens the view
+  // last shown this session rather than the week again. Decided once, when the screen mounts, and
+  // only when it was reached by a link: an explicit `?view=` always wins, and a fresh load of the
+  // bare path or Back / Forward to it (both "POP") show what that entry is — the week. Tapping
+  // Progress while on Progress is no mount, so it goes to the week too.
+  const arrivedBy = useNavigationType();
+  const [restoring, setRestoring] = useState<ProgressView | null>(() => {
+    if (param !== null || arrivedBy === "POP") return null;
+    const last = recallProgressView();
+    return last === "week" ? null : last;
+  });
+  // The restored view shows from the first render; the URL catches up in the effect below.
+  const view = param === null && restoring ? restoring : viewFromParam(param);
   const setView = useCallback(
     (next: ProgressView) =>
       setParams(
@@ -38,11 +60,20 @@ export function ProgressScreen() {
           return p;
         },
         // Views are facets of one screen, not steps: Back leaves Progress rather than replaying
-        // taps. The control keeps its place on the page (ViewTabs brings the new view's top up).
+        // taps, and the restore below leaves no bare entry behind. The control keeps its place on
+        // the page (ViewTabs brings the new view's top up).
         { replace: true, preventScrollReset: true },
       ),
     [setParams],
   );
+  useEffect(() => {
+    // Put the restored view in the URL; once the URL names a view the restore is over (so a later
+    // bare path — Progress tapped while on Progress — is the week).
+    if (!restoring) return;
+    if (param === null) setView(restoring);
+    else setRestoring(null);
+  }, [restoring, param, setView]);
+  useEffect(() => rememberProgressView(view), [view]);
   const [range, setRange] = useState<number>(30);
   const [maxFor, setMaxFor] = useState<Exercise | null>(null);
   useTitle("Progress");

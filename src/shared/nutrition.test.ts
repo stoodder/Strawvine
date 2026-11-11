@@ -254,4 +254,12 @@ describe("remainingKcal (Today's Fuel)", () => {
     for (const target of [null, undefined, 0, -100, Number.NaN])
       expect(remainingKcal(1200, target)).toEqual({ left: 0, over: 0, severity: 0 });
   });
+
+  it("calories that aren't a number count as nothing eaten: the whole target is left, never NaN", () => {
+    for (const eaten of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const r = remainingKcal(eaten, 2390);
+      expect(r).toEqual({ left: 2390, over: 0, severity: 0 });
+      expect(Number.isNaN(r.left)).toBe(false);
+    }
+  });
 });

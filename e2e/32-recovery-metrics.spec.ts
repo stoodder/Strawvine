@@ -52,7 +52,41 @@ test("resting HR and VO2 max from the morning editor show on Today and in the ch
   await expect(vo2Input).toHaveValue("51.5");
   // Units sit in the boxes.
   await expect(rhrInput.locator("xpath=..")).toContainText("bpm");
-  await expect(page.getByRole("textbox", { name: "HRV", exact: true }).locator("xpath=..")).toContainText("ms");
+  const hrvInput = page.getByRole("textbox", { name: "HRV", exact: true });
+  await expect(hrvInput.locator("xpath=..")).toContainText("ms");
+  // A three-digit HRV (and the widest sleep and score) fit their thirds at 320 px: the digits aren't clipped
+  // by the box or run under the unit.
+  await fillNumber(page, "HRV", "105");
+  await fillNumber(page, "Sleep score", "100");
+  await fillNumber(page, /^Sleep duration/, "10:30");
+  for (const input of [
+    hrvInput,
+    page.getByRole("textbox", { name: "Sleep score", exact: true }),
+    page.getByRole("textbox", { name: /^Sleep duration/ }),
+  ]) {
+    const name = await input.getAttribute("aria-label");
+    const fit = await input.evaluate((el: HTMLInputElement) => {
+      // The text's own width, measured in the field's font.
+      const probe = document.createElement("span");
+      const style = getComputedStyle(el);
+      probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font:${style.font};font-feature-settings:${style.fontFeatureSettings};font-variant-numeric:${style.fontVariantNumeric};letter-spacing:${style.letterSpacing}`;
+      probe.textContent = el.value;
+      document.body.append(probe);
+      const text = probe.getBoundingClientRect().width;
+      probe.remove();
+      const room = el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const box = el.getBoundingClientRect();
+      const unit = el.nextElementSibling?.getBoundingClientRect();
+      const wrap = (el.closest("label") ?? el).getBoundingClientRect();
+      return { text, room, unitGap: unit ? unit.left - box.right : null, unitInside: unit ? wrap.right - unit.right : null };
+    });
+    expect(fit.text, `${name}: "${await input.inputValue()}" fits its field`).toBeLessThanOrEqual(fit.room + 0.5);
+    if (fit.unitGap !== null) {
+      expect(fit.unitGap, `${name}: the unit sits after the digits`).toBeGreaterThanOrEqual(0);
+      expect(fit.unitInside, `${name}: the unit sits inside the box`).toBeGreaterThanOrEqual(4);
+    }
+  }
+  expect(await pageOverflow(page)).toBeNull();
   // Out of range: refused (not clamped to a believable 20 bpm), the range said under the field.
   await fillNumber(page, "Resting HR", "5");
   await expect(rhrInput).toHaveValue("49");
@@ -82,7 +116,9 @@ test("resting HR and VO2 max from the morning editor show on Today and in the ch
   await expect(morningRow(page)).toContainText("VO2 51.5");
   await expect(page.getByRole("button", { name: /resting heart rate 49/ })).toHaveCount(1);
   await expect(morningRow(page)).toContainText("not done");
-  expect(await morningRow(page).evaluate((row) => [...row.querySelectorAll(".truncate")].some((l) => l.scrollWidth > l.clientWidth + 0.5))).toBe(false);
+  expect(
+    await morningRow(page).evaluate((row) => [...row.querySelectorAll(".truncate")].some((l) => l.scrollWidth > l.clientWidth + 0.5)),
+  ).toBe(false);
   expect(await pageOverflow(page)).toBeNull();
   // A past day shows them the same way.
   await page.goto("/day/2026-10-29");

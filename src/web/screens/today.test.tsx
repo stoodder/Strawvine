@@ -12,8 +12,9 @@ import { defaultSettings } from "../../shared/defaults";
 import { emptyDayLog } from "../../shared/empty";
 import { streaks, type AppData } from "../../shared/gamify";
 import { buildModel } from "../../shared/insights";
+import { cycleLabel, type CyclePosition } from "../../shared/program";
 import type { DayLog } from "../../shared/schemas";
-import { TodayScreen } from "./Today";
+import { cycleParts, TodayScreen } from "./Today";
 
 const TODAY = "2026-11-03";
 const store = vi.hoisted(() => ({ data: null as unknown as AppData }));
@@ -203,7 +204,9 @@ describe("Today's Signals", () => {
     let rows = within(signals).getAllByRole("listitem");
     expect(rows).toHaveLength(1);
     expect(rows[0]!.dataset.tone).toBe(insights[0]!.tone);
-    const toggle = within(signals).getByRole("button", { name: `+${insights.length - 1} more ${insights.length === 2 ? "signal" : "signals"}` });
+    const toggle = within(signals).getByRole("button", {
+      name: `+${insights.length - 1} more ${insights.length === 2 ? "signal" : "signals"}`,
+    });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toBe(within(signals).getByRole("list"));
 
@@ -246,5 +249,86 @@ describe("Today's header", () => {
     const earlier = { ...settings, program: { ...settings.program, cycleStartDate: addDays(settings.program.cycleStartDate, -35) } };
     renderDay({ ...history(), settings: earlier });
     expect(screen.getByRole("heading", { level: 1 }).nextElementSibling!.textContent).toMatch(/ · Cycle 2 · Deload week$/);
+  });
+
+  /** The subtitle's lines (each a block of its own), and in each the tail a narrow header drops. */
+  const subtitle = () => {
+    const p = document.querySelector<HTMLElement>("[data-day-sub]")!;
+    const lines = [...p.children] as HTMLElement[];
+    return {
+      p,
+      lines,
+      // What a sighted reader sees: the screen-reader separator left out.
+      text: lines.map((l) =>
+        [...l.childNodes]
+          .filter((n) => !(n instanceof HTMLElement && n.classList.contains("sr-only")))
+          .map((n) => n.textContent)
+          .join(""),
+      ),
+      tails: lines.map((l) => [...l.querySelectorAll<HTMLElement>("[class*='@max-[10.5rem]:hidden']")].map((t) => t.textContent)),
+    };
+  };
+
+  it("is two lines that break at the separator: what is left of the day, then the place in the program", () => {
+    // Cycle 2, week 1 of 5: the longest label ("6 left to close the day · Cycle 2 · Week 1 of 5" wrapped into three lines at 320 px).
+    const cycle2 = { ...settings, program: { ...settings.program, cycleStartDate: addDays(TODAY, -36) } };
+    renderDay({ ...history(), settings: cycle2 });
+    const sub = subtitle();
+    expect(sub.p).toBe(screen.getByRole("heading", { level: 1 }).nextElementSibling);
+    expect(sub.lines).toHaveLength(2);
+    for (const line of sub.lines) expect(line.classList.contains("block")).toBe(true);
+    expect(sub.text[0]).toMatch(/^\d left to close the day$/);
+    expect(sub.text[1]).toBe("Cycle 2 · Week 1 of 5");
+    // No separator dangles at the end of the first line; a screen reader still gets one between the two.
+    expect(sub.text[0]).not.toMatch(/·/);
+    expect(sub.lines[1]!.firstElementChild!.className).toContain("sr-only");
+    expect(sub.lines[1]!.firstElementChild!.textContent).toBe(" · ");
+    expect(sub.p.textContent).toMatch(/^\d left to close the day · Cycle 2 · Week 1 of 5$/);
+    // Where the column is narrow, each line drops its tail instead of wrapping: "6 left to close" / "Cycle 2 · Week 1".
+    expect(sub.tails).toEqual([[" the day"], [" of 5"]]);
+    // The header's text column is the container those tails answer to.
+    expect(sub.p.parentElement!.className).toContain("@container");
+  });
+
+  it("a closed day: 'Day closed.' on its own line, 'Nicely done.' where there is room", () => {
+    const closed: Partial<DayLog> = { weightLb: 200, calories: 2800, steps: 20000, zone2Done: true, metconDone: true };
+    const restDay = { ...settings, program: { ...settings.program, days: {} } };
+    renderDay({ ...history(closed), settings: restDay });
+    const sub = subtitle();
+    expect(sub.text[0]).toBe("Day closed. Nicely done.");
+    expect(sub.tails[0]).toEqual([" Nicely done."]);
+    expect(sub.lines[0]!.querySelector(".text-accent")!.textContent).toBe("Day closed. Nicely done.");
+    expect(sub.text[1]).toBe("Deload week");
+    expect(sub.tails[1]).toEqual([" week"]);
+  });
+
+  it("before the first cycle there is no second line", () => {
+    const later = { ...settings, program: { ...settings.program, cycleStartDate: addDays(TODAY, 6) } };
+    renderDay({ ...history(), settings: later });
+    const sub = subtitle();
+    expect(sub.lines).toHaveLength(1);
+    expect(sub.p.textContent).toMatch(/^\d left to close the day$/);
+  });
+});
+
+describe("cycleParts: the short label, and the tail of the full one", () => {
+  const week = (deload = false) => ({ deload }) as CyclePosition["week"];
+  const pos = (cycle: number, weekIndex: number, deload = false) => ({ cycle, weekIndex, week: week(deload) }) as CyclePosition;
+
+  it("splits every shape of label so that short + rest is the full one", () => {
+    expect(cycleParts(pos(1, 1), 5)).toEqual({ short: "Week 2", rest: " of 5" });
+    expect(cycleParts(pos(1, 4, true), 5)).toEqual({ short: "Deload", rest: " week" });
+    expect(cycleParts(pos(2, 0), 5)).toEqual({ short: "Cycle 2 · Week 1", rest: " of 5" });
+    expect(cycleParts(pos(12, 4, true), 5)).toEqual({ short: "Cycle 12 · Deload", rest: " week" });
+    for (const p of [pos(1, 0), pos(3, 2), pos(2, 4, true)]) {
+      const { short, rest } = cycleParts(p, 5);
+      expect(short + rest).toBe(cycleLabel(p, 5));
+      expect(short).toBe(cycleLabel(p, 5, { short: true }));
+    }
+  });
+
+  it("has no tail when the full label is already the short one", () => {
+    // A week past the cycle's length is just "Week 7".
+    expect(cycleParts(pos(1, 6), 5)).toEqual({ short: "Week 7", rest: "" });
   });
 });
