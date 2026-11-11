@@ -9,6 +9,25 @@ if (typeof document !== "undefined") {
 }
 
 /**
+ * Make a text area as tall as its text (never shorter than its `rows`), without the page ever
+ * being shorter than it is: the content height can only be read from the element at its natural
+ * height (`height: auto`, where it falls back to `rows`), and for that instant everything after
+ * it would move up. A page scrolled near its end — where it is when a keyboard is up and the
+ * field is the last thing on it — is then too short for its scroll position, the browser pulls
+ * the scroll back, and the restored height doesn't return it: every keystroke moved the page by
+ * the lines past `rows`. So the wrapper keeps its height while the element is measured, and
+ * nothing outside it moves.
+ */
+export function fitToContent(el: HTMLTextAreaElement) {
+  const box = el.parentElement;
+  const held = box?.style.minHeight ?? "";
+  if (box) box.style.minHeight = `${box.offsetHeight}px`;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+  if (box) box.style.minHeight = held;
+}
+
+/**
  * Auto-growing, auto-saving text area that reads like writing, not a form field.
  * Saves after a pause in typing, on blur, when the app is hidden and on unmount.
  */
@@ -47,11 +66,9 @@ export function JournalText({
     }
   }, [value]);
 
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
+  // Before paint, and before the browser brings the caret into view for the keystroke.
+  useLayoutEffect(() => {
+    if (ref.current) fitToContent(ref.current);
   }, [text]);
 
   const flush = useCallback(() => {

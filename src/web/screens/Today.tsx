@@ -263,18 +263,23 @@ export function TodayScreen() {
                 )}
               </div>
             ) : (
-              kcalSeverity > 0 && (
-                <div className={clsx("num mt-1.5 text-right text-xs", overStyle.className)} style={overStyle.style}>
-                  +{fmt(overKcal)} <span className="text-mute">kcal over</span>
-                </div>
-              )
+              // The line is there (empty) when the day isn't over, as Today's "eaten" line always is: editing the
+              // day's calories must not move what is under the bar — the field being typed in included.
+              <div className="num mt-1.5 min-h-4 text-right text-xs" data-fuel-over="">
+                {kcalSeverity > 0 && (
+                  <span className={overStyle.className} style={overStyle.style}>
+                    +{fmt(overKcal)} <span className="text-mute">kcal over</span>
+                  </span>
+                )}
+              </div>
             )}
             <div className="mt-5 grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
               <Macro label="Protein" eaten={day.proteinG} target={rec.macros.proteinG} scale={PROTEIN_OVER_TARGET_SCALE} />
               <Macro label="Carbs" eaten={day.carbsG} target={rec.macros.carbsG} />
               <Macro label="Fat" eaten={day.fatG} target={rec.macros.fatG} />
             </div>
-            <div className="mt-6 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-mute">
+            {/* mt-3 after the macros' note line (always there): about the gap there was under the bars. */}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-mute">
               <span className="whitespace-nowrap">
                 TDEE <span className="num text-fg-2">{fmt(targets.tdee?.value)}</span>
                 {targets.tdee?.measured != null && targets.tdee.provisional && (
@@ -372,12 +377,18 @@ export function Macro({
         <span className="text-xs text-mute"> / {hasTarget ? `${fmt(target)}g` : "—"}</span>
       </div>
       <Bar className="mt-2" value={hasTarget && eaten ? eaten / target : 0} severity={severity} />
-      {/* Not colour alone: the text says "over". */}
-      {over > 0 && (
-        <div className={clsx("num mt-1 text-[0.6875rem]", severityClass(severity, "text"))} style={{ color: severityColor(severity) }}>
-          +{fmt(over)}g over
-        </div>
-      )}
+      {/* Not colour alone: the text says "over". Its line is always there: a macro saved from the editor below
+          (the field left for the next one, the keyboard still up) must not push that editor down a line. */}
+      <div className="mt-1 min-h-4" data-macro-over="">
+        {over > 0 && (
+          <div
+            className={clsx("num text-[0.6875rem] leading-4", severityClass(severity, "text"))}
+            style={{ color: severityColor(severity) }}
+          >
+            +{fmt(over)}g over
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -113,6 +113,20 @@ describe("Macro", () => {
     expect(severityAt(4.6, 4)).toEqual({ sev: 0.5, over: "+1g over" });
   });
 
+  it("keeps the note's line whether or not there is a note: going over moves nothing under the bar", () => {
+    const { container, rerender } = render(<Macro label="Carbs" eaten={180} target={200} />);
+    const line = container.querySelector<HTMLElement>("[data-macro-over]")!;
+    // The line holds its height by itself (min-h-4 is the note's leading-4)…
+    expect(line.className).toContain("min-h-4");
+    expect(line.textContent).toBe("");
+    rerender(<Macro label="Carbs" eaten={250} target={200} />);
+    // …and the note goes into that same line.
+    expect(container.querySelector("[data-macro-over]")).toBe(line);
+    expect(line.textContent).toBe("+50g over");
+    expect(line.firstElementChild!.className).toContain("leading-4");
+    expect(container.firstElementChild!.lastElementChild).toBe(line);
+  });
+
   it("is lenient with protein", () => {
     expect(severityAt(240, 200, PROTEIN_OVER_TARGET_SCALE)).toEqual({ sev: 0, over: null });
     expect(severityAt(300, 200, PROTEIN_OVER_TARGET_SCALE).sev).toBe(0.5);

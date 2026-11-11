@@ -253,7 +253,9 @@ function RowText({ item, summary, srState, saved = false }: { item: ChecklistIte
   return (
     <span className="block min-w-0 flex-1">
       {/* The value sits beside the label, so the lines under them have the row's whole width. */}
-      <span className="flex items-baseline gap-4">
+      {/* As tall with a value as without (the value's larger type would add ~2px): a row that gains its value
+          while its editor is open doesn't nudge the editor. */}
+      <span className="flex min-h-[1.5625rem] items-baseline gap-4">
         <span className={clsx("block min-w-0 flex-1 text-[0.9375rem]", item.done ? "text-fg" : "text-fg-2")}>
           {item.label}
           {srState && <span className="sr-only">{item.done ? ", done" : ", not done"}</span>}

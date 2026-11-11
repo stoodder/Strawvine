@@ -277,11 +277,6 @@ export function FuelEditor({ day, patch }: EditorProps) {
           onClose={closePaste}
         />
       )}
-      {!paste && fromMacros !== null && fromMacros !== day.calories && (
-        <button type="button" className="chip bg-white/[0.05] text-fg-2" onClick={() => patch({ calories: fromMacros })}>
-          Use {fmt(fromMacros)} from macros
-        </button>
-      )}
       <div className="grid grid-cols-3 gap-4">
         {(
           [
@@ -304,6 +299,14 @@ export function FuelEditor({ day, patch }: EditorProps) {
           </div>
         ))}
       </div>
+      {/* Under the numbers it comes from, never above them: it appears and goes as a macro or the calories are
+          saved — when the field leaves focus, often for the next one — and anything above a field would move that
+          field, under a thumb or out from over the keyboard. */}
+      {!paste && fromMacros !== null && fromMacros !== day.calories && (
+        <button type="button" className="chip bg-white/[0.05] text-fg-2" onClick={() => patch({ calories: fromMacros })}>
+          Use {fmt(fromMacros)} from macros
+        </button>
+      )}
       <AlsoToday day={day} patch={patch} />
       {showMicros ? (
         <Micros micros={day.micros} onChange={(m) => patch({ micros: m })} />
