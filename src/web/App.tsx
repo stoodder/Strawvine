@@ -119,7 +119,7 @@ const router = createBrowserRouter([
       { path: "/train/:date", element: <TrainScreen /> },
       { path: "/progress", element: <ProgressScreen /> },
       { path: "/goals", element: <GoalsScreen /> },
-      // The training plan, reached from Train (whose tab stays lit on it: BottomNav).
+      // The training program, reached from Train (whose tab stays lit on it: BottomNav) and from Settings.
       { path: "/program", element: <ProgramScreen /> },
       // Old anchors of sections that moved to Program redirect there (/settings#program → /program).
       { path: "/settings", element: <SettingsScreen /> },

@@ -18,4 +18,7 @@
   (`node scripts/check-style.mjs --update-baseline` after fixing some).
 - Transient bottom UI (toasts, sync pill, rest timer) renders into the dock: `<DockItem id priority>` from
   `components/Dock.tsx`, never its own `fixed bottom-…` layer. Inline renames use `components/InlineText.tsx`.
+- Screens that aren't a day take their header from `components/ScreenHeader.tsx` (one h1 size and top rhythm).
+- An Undo of a settings change goes through `components/settings/undo.ts`: a toast outlives its screen, so Undo patches
+  the settings as they are when it is tapped (`liveSettings`), only its own fields — never a remembered document.
 - Schema change: edit `src/server/db/schema.ts`, run `npm run db:generate`, commit the migration.

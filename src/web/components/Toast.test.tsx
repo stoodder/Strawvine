@@ -62,4 +62,71 @@ describe("Toast", () => {
     act(() => vi.advanceTimersByTime(7100));
     expect(live()).toBe("");
   });
+
+  describe("onClose", () => {
+    /** Raises toasts with an `onClose` that records the toast's name; `api` reaches show/dismiss. */
+    const closed: string[] = [];
+    let api: ReturnType<typeof useToast>;
+    function Grab() {
+      api = useToast();
+      return null;
+    }
+    const raise = (name: string, action = false) =>
+      api.show({
+        message: name,
+        onClose: () => void closed.push(name),
+        ...(action ? { action: { label: "Undo", onAction: () => {} } } : {}),
+      });
+    /** Lets the queued notifications run (they are deferred: never in the middle of a render). */
+    const settle = () => act(async () => void (await Promise.resolve()));
+    beforeEach(() => {
+      closed.length = 0;
+      render(
+        <DockProvider>
+          <ToastProvider>
+            <Grab />
+          </ToastProvider>
+        </DockProvider>,
+      );
+    });
+
+    it("tells the owner when the toast times out — once", async () => {
+      act(() => void raise("a"));
+      act(() => vi.advanceTimersByTime(4900));
+      await settle();
+      expect(closed).toEqual([]);
+      act(() => vi.advanceTimersByTime(200));
+      await settle();
+      expect(closed).toEqual(["a"]);
+      act(() => vi.advanceTimersByTime(60_000));
+      await settle();
+      expect(closed).toEqual(["a"]);
+    });
+
+    it("tells it after the action ran, and when the toast is dismissed", async () => {
+      act(() => void raise("undoable", true));
+      act(() => screen.getByRole("button", { name: "Undo" }).click());
+      await settle();
+      expect(closed).toEqual(["undoable"]);
+      let id = 0;
+      act(() => void (id = raise("b")));
+      act(() => api.dismiss(id));
+      act(() => api.dismiss(id));
+      await settle();
+      expect(closed).toEqual(["undoable", "b"]);
+    });
+
+    it("tells it when newer toasts push it out (two stay)", async () => {
+      act(() => void raise("first"));
+      act(() => void raise("second"));
+      await settle();
+      expect(closed).toEqual([]);
+      act(() => void raise("third"));
+      await settle();
+      expect(closed).toEqual(["first"]);
+      act(() => vi.advanceTimersByTime(5100));
+      await settle();
+      expect(closed).toEqual(["first", "second", "third"]);
+    });
+  });
 });

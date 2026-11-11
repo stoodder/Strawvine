@@ -5,7 +5,7 @@ import { computeEnergySeries } from "./energy";
 import { dateRange } from "./dates";
 import { achievements, checklist, closedDates, dayChecklist, isClosed, streaks, type AppData } from "./gamify";
 import { buildModel } from "./insights";
-import { currentMax, cyclePosition, programDayFor, scheduledProgramDay } from "./program";
+import { currentMax, cyclePosition, programDayFor, scheduledProgramDay, shiftCycleStart } from "./program";
 import { emptyDayLog, type DayLog, type Exercise, type MaxEntry, type Session, type Settings } from "./schemas";
 import { buildSessionFrom, sessionDoneEarly } from "./session";
 
@@ -403,6 +403,23 @@ describe("moved sessions (do this session today)", () => {
     const keys = (today: string) => achievements(appData({ sessions: [s] }), today).map((a) => a.key);
     expect(keys("2026-12-31")).not.toContain("cycle-1");
     expect(keys("2027-01-10")).toContain("cycle-2");
+  });
+
+  it("a cycle's completion follows the program: skipping ahead a week makes it appear, dated the new last day; moving back takes it away", () => {
+    // Cycle 1 runs Oct 5 – Nov 8; Thursday Nov 5 is in its last week, with work done earlier in it.
+    const program = { ...settings.program, cycleStartDate: "2026-10-05" };
+    const s = { ...buildSessionFrom("2026-10-26", "2026-10-26", ctx), completedAt: "2026-10-26T18:00:00.000Z" };
+    const cycles = (p: typeof program, on: string) =>
+      achievements(appData({ settings: { ...settings, program: p }, sessions: [s] }), on)
+        .filter((a) => a.key.startsWith("cycle-"))
+        .map((a) => `${a.key}@${a.date}`);
+    expect(cycles(program, "2026-11-05")).toEqual([]);
+    // A week earlier: the cycle ended last Sunday — the same key the real completion will have.
+    const ahead = shiftCycleStart(program, -1);
+    expect(cycles(ahead, "2026-11-05")).toEqual(["cycle-1@2026-11-01"]);
+    // Undone: gone again; and on the real last day it is there, under that key.
+    expect(cycles(shiftCycleStart(ahead, 1), "2026-11-05")).toEqual([]);
+    expect(cycles(program, "2026-11-08")).toEqual(["cycle-1@2026-11-08"]);
   });
 
   it("memoizes each day's checklist on the day log, the sessions and the settings", () => {

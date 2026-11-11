@@ -9,7 +9,7 @@ import { trainingPrefs } from "../../../shared/defaults";
 import { settingsSchema, type Program, type Settings } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
 import { useData, useSaveSettings } from "../../lib/store";
-import { useToast } from "../Toast";
+import { liveSettings, useSettingsUndo, type SettingsUndo } from "./undo";
 
 /** Human names for settings paths, so a rejected save reads "Steps target …", not "targets.steps: …". */
 const PATH_NAMES: Array<[RegExp, string]> = [
@@ -57,17 +57,26 @@ export function readableIssue(issue: { path: PropertyKey[]; code: string; messag
 
 export type TrainingPrefs = ReturnType<typeof trainingPrefs>;
 
+/** An Undo for a program change (see `SettingsUndo`), in the program's own terms. */
+export interface ProgramUndo<T = undefined> extends Omit<SettingsUndo<T>, "undo" | "holdsCycleCelebrations"> {
+  /**
+   * The program's fields to put back, from the program as it is when Undo is tapped; null when
+   * the change can't be undone any more.
+   */
+  undo: (now: Program, from: T) => Partial<Program> | null;
+}
+
 export function useSettingsEditor() {
   const { data } = useData();
   const saveSettings = useSaveSettings();
-  const toast = useToast();
   const settings = data.settings;
   /** The last rejected save, as a sentence for the screen's alert (null once a save goes through). */
   const [error, setError] = useState<string | null>(null);
-  // Patches apply to the settings as they are when the patch runs — an Undo runs from a toast,
-  // later, and must not put back everything else as it was when the toast was raised.
-  const latest = useRef(settings);
-  latest.current = settings;
+  // A patch applies to the settings as they are when it runs (`liveSettings`): two edits in one
+  // tick, or one arriving from another device, must not be undone by a copy from the last render.
+  const rendered = useRef(settings);
+  rendered.current = settings;
+  const live = () => liveSettings(rendered.current);
 
   /** Saves the whole document; false (with `error` set) when the schema refuses it. */
   const save = (next: Settings): boolean => {
@@ -81,16 +90,32 @@ export function useSettingsEditor() {
     saveSettings(next).catch((e: unknown) => setError(e instanceof Error ? e.message : "Couldn't save."));
     return true;
   };
-  const setProgram = (p: Partial<Program>) => save({ ...latest.current, program: { ...latest.current.program, ...p } });
-  const setTraining = (t: Partial<TrainingPrefs>) =>
-    save({ ...latest.current, training: { ...trainingPrefs(latest.current), ...t } });
+  const setProgram = (p: Partial<Program>) => {
+    const now = live();
+    return save({ ...now, program: { ...now.program, ...p } });
+  };
+  const setTraining = (t: Partial<TrainingPrefs>) => {
+    const now = live();
+    return save({ ...now, training: { ...trainingPrefs(now), ...t } });
+  };
+  const raiseUndo = useSettingsUndo(save, () => rendered.current);
   /**
-   * A program change with an Undo toast. `undo` gets the program as it is when Undo is tapped and
-   * returns what to put back; the toast only shows when the change was saved.
+   * A program change with an Undo toast; false when the change wasn't saved (no toast then). The
+   * Undo runs later, perhaps from another screen: it gets the program as it is at that moment and
+   * returns only what to put back (see components/settings/undo.ts).
    */
-  const undoableProgram = (p: Partial<Program>, message: string, undo: (now: Program) => Partial<Program>) => {
-    if (!setProgram(p)) return;
-    toast.show({ message, action: { label: "Undo", onAction: () => void setProgram(undo(latest.current.program)) } });
+  const undoableProgram = <T = undefined>(p: Partial<Program>, u: ProgramUndo<T>): boolean => {
+    if (!setProgram(p)) return false;
+    raiseUndo<T>({
+      ...u,
+      // Every program change with an Undo may move the cycles (start date, number of weeks).
+      holdsCycleCelebrations: true,
+      undo: (now, from) => {
+        const back = u.undo(now.program, from);
+        return back && { ...now, program: { ...now.program, ...back } };
+      },
+    });
+    return true;
   };
 
   return { settings, training: trainingPrefs(settings), error, save, setProgram, setTraining, undoableProgram };

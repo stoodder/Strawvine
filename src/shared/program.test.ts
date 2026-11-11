@@ -168,6 +168,42 @@ describe("previewCycleShift", () => {
     expect(previewCycleShift(tueOnly, 1, "2026-11-04").next!.date).toBe("2026-11-10");
     expect(previewCycleShift({ ...program, days: {} }, 1, "2026-11-04").next).toBeNull();
   });
+  it("before the shifted start it looks from the start on, not from the date", () => {
+    // Monday of week 1, a week later: nothing is scheduled in the seven days from today —
+    // the next lifting day is the new start, a week on.
+    const p = previewCycleShift(program, 1, "2026-11-02");
+    expect(p.position).toBeNull();
+    expect([p.next!.date, p.next!.day.label, p.next!.position.weekIndex]).toEqual(["2026-11-09", "Push", 0]);
+  });
+  it("scans a whole week for the next lifting day", () => {
+    // One lifting day (Tuesday), seen the day after: the next one is six days out.
+    const tueOnly = { ...program, days: { "2": program.days["2"]! } };
+    const p = previewCycleShift(tueOnly, -1, "2026-11-04");
+    expect([p.next!.date, p.next!.day.label]).toEqual(["2026-11-10", "Pull"]);
+    // …and the week after today's has that same Tuesday as its first lifting day.
+    expect(p.nextWeek).toMatchObject({ start: "2026-11-09", first: { date: "2026-11-10" } });
+  });
+  it("says where the date sat before, and what the calendar week after it becomes", () => {
+    // Wednesday of week 3, delayed: this week is week 2 again, next Monday week 3.
+    const later = previewCycleShift(program, 1, "2026-11-18");
+    expect(later.before!.weekIndex).toBe(2);
+    expect(later.position!.weekIndex).toBe(1);
+    expect([later.nextWeek.start, later.nextWeek.position!.weekIndex, later.nextWeek.first!.date, later.nextWeek.first!.day.label]).toEqual(
+      ["2026-11-23", 2, "2026-11-23", "Push"],
+    );
+    // The last week, skipping ahead: this week becomes cycle 2's first, next Monday its second.
+    const ahead = previewCycleShift(program, -1, "2026-12-02");
+    expect([ahead.before!.cycle, ahead.before!.weekIndex]).toEqual([1, 4]);
+    expect([ahead.position!.cycle, ahead.position!.weekIndex]).toEqual([2, 0]);
+    expect([ahead.nextWeek.position!.cycle, ahead.nextWeek.position!.weekIndex]).toEqual([2, 1]);
+    // Before the first cycle: no position before; a start still more than a week off leaves next week without one.
+    const early = previewCycleShift(program, 1, "2026-10-21");
+    expect(early.before).toBeNull();
+    expect(early.nextWeek).toEqual({ start: "2026-10-26", position: null, first: null });
+    // No lifting days: the week after still has its place in the cycle.
+    const none = previewCycleShift({ ...program, days: {} }, -1, "2026-11-04");
+    expect([none.nextWeek.position!.weekIndex, none.nextWeek.first]).toEqual([2, null]);
+  });
 });
 
 describe("cycleLabel", () => {

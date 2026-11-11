@@ -7,6 +7,7 @@ import { computeStepsSeries } from "../../shared/steps";
 import type { Exercise } from "../../shared/schemas";
 import { LineChart, type Series } from "../components/charts";
 import { MaxSheet } from "../components/MaxSheet";
+import { ScreenHeader } from "../components/ScreenHeader";
 import { Section } from "../components/ui";
 import { IntakeStrip } from "../components/progress/IntakeStrip";
 import { RangeControl } from "../components/progress/RangeControl";
@@ -140,10 +141,7 @@ export function ProgressScreen() {
 
   return (
     <div>
-      <header className="pt-2 pb-5">
-        <div className="label text-fg-2">The trend</div>
-        <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">Progress</h1>
-      </header>
+      <ScreenHeader eyebrow="The trend" title="Progress" className="pb-5" />
 
       <ViewTabs view={view} onChange={setView} />
 

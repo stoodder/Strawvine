@@ -2,14 +2,15 @@
  * Goals: a pace change saves once per gesture and can be undone (the pace sets calorie targets),
  * the consistency heatmap explains its shades, and the header is named after the tab.
  */
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { addDays, dateRange } from "../../shared/dates";
 import { defaultSettings } from "../../shared/defaults";
 import { emptyDayLog } from "../../shared/empty";
 import type { AppData } from "../../shared/gamify";
 import type { Settings } from "../../shared/schemas";
+import { UNDO_MS } from "../components/settings/undo";
 import type { ToastInput } from "../components/Toast";
 import { GoalsScreen } from "./Goals";
 
@@ -46,6 +47,8 @@ vi.mock("../lib/store", async () => {
     useSaveSettings: () => store.save,
   };
 });
+// The data layer's current copy: what an Undo reads when it is tapped (components/settings/undo.ts).
+vi.mock("../lib/sync", () => ({ currentData: () => store.data }));
 vi.mock("../components/Toast", () => ({
   useToast: () => ({
     show: (toast: ToastInput) => {
@@ -100,6 +103,9 @@ describe("Goals header", () => {
     const h1 = screen.getByRole("heading", { level: 1 });
     expect(h1.textContent).toBe("Goals");
     expect(h1.previousElementSibling!.textContent).toBe("The why");
+    // The shared screen header: the title size that shrinks on a narrow phone, like Today's and Train's.
+    expect(h1.closest("header")).not.toBeNull();
+    expect(h1.className).toContain("text-[clamp(1.75rem,11vw,2.75rem)]");
   });
 });
 
@@ -168,6 +174,98 @@ describe("Goals pace", () => {
     act(() => toasts.shown[0]!.toast.action!.onAction());
     expect(store.saves).toHaveLength(saves);
     expect(store.data.settings.weightGoal).toBeNull();
+  });
+
+  describe("Undo, later", () => {
+    let clock = 0;
+    beforeEach(() => {
+      clock = Date.parse("2026-11-03T10:00:00Z");
+      vi.spyOn(Date, "now").mockImplementation(() => clock);
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    it("after leaving Goals, puts back only the pace: what changed since stays", () => {
+      const view = show();
+      drag(0.5);
+      view.unmount();
+      // On another screen (or another device) the steps target changes.
+      const edited = { ...store.data.settings, targets: { ...store.data.settings.targets, steps: 12_000 } };
+      act(() => void store.save(edited));
+      act(() => toasts.shown[0]!.toast.action!.onAction());
+      expect(store.data.settings).toEqual({ ...edited, weightGoal: cutting.weightGoal });
+      expect(store.data.settings.targets.steps).toBe(12_000);
+    });
+
+    it("Goal cleared and target removed undo the same way after leaving", () => {
+      const target = { id: "t1", exerciseId: 1, targetLb: 300, setOn: TODAY };
+      store.data = {
+        ...store.data,
+        settings: { ...cutting, strengthTargets: [target] },
+        exercises: [{ id: 1, name: "Bench press", category: "primary", tracksMax: true, measure: "reps", weighted: true, archived: false }],
+      } as AppData;
+      const view = show();
+      fireEvent.click(screen.getByRole("button", { name: "Remove Bench press target" }));
+      fireEvent.click(screen.getByRole("button", { name: "Clear goal" }));
+      expect(toasts.shown.map((t) => t.toast.message)).toEqual(["Bench press target removed", "Goal cleared"]);
+      expect(store.data.settings).toMatchObject({ weightGoal: null, strengthTargets: [] });
+      view.unmount();
+      const edited = { ...store.data.settings, targets: { ...store.data.settings.targets, steps: 12_000 } };
+      act(() => void store.save(edited));
+      act(() => toasts.shown[1]!.toast.action!.onAction());
+      act(() => toasts.shown[0]!.toast.action!.onAction());
+      expect(store.data.settings).toEqual({ ...edited, weightGoal: cutting.weightGoal, strengthTargets: [target] });
+    });
+
+    it("Undo of Goal cleared leaves a goal alone that was set since", () => {
+      show();
+      fireEvent.click(screen.getByRole("button", { name: "Clear goal" }));
+      const newer = { ...cutting.weightGoal!, targetLb: 185 };
+      act(() => void store.save({ ...store.data.settings, weightGoal: newer }));
+      const saves = store.saves.length;
+      act(() => toasts.shown[0]!.toast.action!.onAction());
+      expect(store.saves).toHaveLength(saves);
+      expect(store.data.settings.weightGoal).toEqual(newer);
+      expect(toasts.shown.at(-1)!.toast).toMatchObject({ tone: "warn" });
+      expect(toasts.shown.at(-1)!.toast.action).toBeUndefined();
+    });
+
+    it("a goal cleared meanwhile: the pace Undo says it can't, and saves nothing", () => {
+      show();
+      drag(0.5);
+      act(() => void store.save({ ...store.data.settings, weightGoal: null }));
+      act(() => toasts.shown[0]!.toast.action!.onAction());
+      expect(toasts.shown.at(-1)!.toast).toMatchObject({ message: "Can't undo: the goal was cleared since.", tone: "warn" });
+    });
+
+    it("nudges fold only while the first Undo is on offer: after that, Undo goes back to the pace before the later nudge", () => {
+      show();
+      drag(0.7);
+      // Just inside the window: folded (the first toast is replaced, Undo would go back to 0.75).
+      clock += UNDO_MS - 1;
+      drag(0.65);
+      expect(toasts.dismissed).toEqual([1]);
+      // A full window later: a nudge of its own.
+      clock += UNDO_MS;
+      drag(0.6);
+      expect(toasts.dismissed).toEqual([1]);
+      expect(toasts.shown).toHaveLength(3);
+      act(() => toasts.shown[2]!.toast.action!.onAction());
+      expect(pace()).toBe(0.65);
+    });
+
+    it("the toast stays as long as the folding lasts", () => {
+      show();
+      drag(0.7);
+      expect(toasts.shown[0]!.toast.duration).toBe(UNDO_MS);
+    });
+
+    it("returns focus to the pace slider after Undo", async () => {
+      show();
+      drag(0.5);
+      expect(document.activeElement).not.toBe(slider());
+      act(() => toasts.shown[0]!.toast.action!.onAction());
+      await waitFor(() => expect(document.activeElement).toBe(slider()));
+    });
   });
 
   it("a build names its pace with a plus", () => {

@@ -19,6 +19,11 @@ export interface ToastInput {
   action?: { label: string; onAction: () => void };
   /** ms before auto-dismiss; default 5000 (7000 with an action). */
   duration?: number;
+  /**
+   * Called once when the toast leaves, however it goes: timed out, dismissed, pushed out by newer
+   * ones, or after its action ran. For whoever needs to know that an Undo is no longer on offer.
+   */
+  onClose?: () => void;
 }
 
 interface ToastItem extends ToastInput {
@@ -50,13 +55,25 @@ interface Timer {
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const timers = useRef(new Map<number, Timer>());
-
-  const dismiss = useCallback((id: number) => {
-    const t = timers.current.get(id);
-    if (t?.handle != null) window.clearTimeout(t.handle);
-    timers.current.delete(id);
-    setItems((xs) => xs.filter((x) => x.id !== id));
+  const closers = useRef(new Map<number, () => void>());
+  /** Tells a toast's owner it has gone — once, and never in the middle of a render. */
+  const closed = useCallback((id: number) => {
+    const onClose = closers.current.get(id);
+    if (!onClose) return;
+    closers.current.delete(id);
+    queueMicrotask(onClose);
   }, []);
+
+  const dismiss = useCallback(
+    (id: number) => {
+      const t = timers.current.get(id);
+      if (t?.handle != null) window.clearTimeout(t.handle);
+      timers.current.delete(id);
+      setItems((xs) => xs.filter((x) => x.id !== id));
+      closed(id);
+    },
+    [closed],
+  );
 
   const start = useCallback(
     (id: number) => {
@@ -83,14 +100,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       // Keep at most 2 on screen; newest wins.
       setItems((xs) => {
         const kept = xs.slice(-1);
-        for (const x of xs) if (!kept.includes(x)) dismissTimer(timers.current, x.id);
+        for (const x of xs)
+          if (!kept.includes(x)) {
+            dismissTimer(timers.current, x.id);
+            closed(x.id);
+          }
         return [...kept, { ...t, id }];
       });
+      if (t.onClose) closers.current.set(id, t.onClose);
       timers.current.set(id, { left: t.duration ?? (t.action ? 7000 : 5000), startedAt: Date.now(), handle: null });
       start(id);
       return id;
     },
-    [start],
+    [start, closed],
   );
 
   const api = useMemo(() => ({ show, dismiss }), [show, dismiss]);
