@@ -84,7 +84,7 @@ export const ALLOW = {
   "mute-on-tint": {
     // Unselected weekday chips on the page background (ink-950 + white/0.04 ≈ 4.8:1 — passes there,
     // but would not on a sheet). A candidate for text-fg-2.
-    "src/web/screens/Settings.tsx": 1,
+    "src/web/components/settings/fields.tsx": 1,
   },
   "type-scale": {},
 };

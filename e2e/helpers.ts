@@ -226,9 +226,9 @@ export async function serverData(page: Page): Promise<Bootstrap> {
   return res.json();
 }
 
-/** Open Settings and an exercise's Edit exercise sheet from the exercise library; returns the sheet. */
+/** Open Program and an exercise's Edit exercise sheet from the exercise library; returns the sheet. */
 export async function openExerciseEditor(page: Page, name: string) {
-  await page.goto("/settings");
+  await page.goto("/program");
   await page.getByRole("button", { name: `Edit ${name}`, exact: true }).click();
   const sheet = page.getByRole("dialog", { name: `Edit ${name}` });
   await expect(sheet.getByRole("textbox", { name: "Name" })).toHaveValue(name);

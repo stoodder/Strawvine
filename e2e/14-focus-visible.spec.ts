@@ -112,4 +112,12 @@ test.describe("Tab never lands under the bottom nav or the dock", () => {
     expect(stops.length, "Tab stops on Settings").toBeGreaterThan(30);
     expect(problems).toEqual([]);
   });
+
+  test("Program", async ({ page }) => {
+    await page.goto("/program");
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    const { stops, problems } = await tabWalk(page);
+    expect(stops.length, "Tab stops on Program").toBeGreaterThan(60);
+    expect(problems).toEqual([]);
+  });
 });

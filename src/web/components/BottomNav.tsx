@@ -1,14 +1,15 @@
 import clsx from "clsx";
 import { motion } from "motion/react";
 import { useRef } from "react";
-import { NavLink, useLocation } from "react-router";
+import { Link, useLocation } from "react-router";
 import { Activity, Dumbbell, Sun, Target } from "lucide-react";
 import { tick } from "../lib/haptics";
 import { useDockAnchor } from "./Dock";
 
 const TABS = [
   { to: "/", label: "Today", icon: Sun, match: (p: string) => p === "/" || p.startsWith("/day") },
-  { to: "/train", label: "Train", icon: Dumbbell, match: (p: string) => p.startsWith("/train") },
+  // Program is Train's plan (reached from Train's header): Train stays the active tab on it.
+  { to: "/train", label: "Train", icon: Dumbbell, match: (p: string) => p.startsWith("/train") || p.startsWith("/program") },
   { to: "/progress", label: "Progress", icon: Activity, match: (p: string) => p.startsWith("/progress") },
   { to: "/goals", label: "Goals", icon: Target, match: (p: string) => p.startsWith("/goals") },
 ];
@@ -29,7 +30,9 @@ export function BottomNav() {
           const active = t.match(pathname);
           const Icon = t.icon;
           return (
-            <NavLink
+            // A Link, not a NavLink: a NavLink sets aria-current from its own URL match, which misses
+            // the screens a tab also covers (Today on /day/…, Train on /program).
+            <Link
               key={t.to}
               to={t.to}
               onClick={tick}
@@ -49,7 +52,7 @@ export function BottomNav() {
               <Icon size={18} aria-hidden strokeWidth={active ? 2.2 : 1.8} className={clsx("relative shrink-0", active && "text-accent")} />
               {/* rem so it follows the user's font size; truncates (or hides, when very narrow) instead of overflowing. */}
               <span className="relative max-w-full truncate px-0.5 text-2xs font-medium tracking-wide max-[16rem]:sr-only">{t.label}</span>
-            </NavLink>
+            </Link>
           );
         })}
       </div>

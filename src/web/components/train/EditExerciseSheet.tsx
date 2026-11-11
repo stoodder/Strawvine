@@ -139,7 +139,7 @@ export function EditExerciseSheet({
           <p id={lockNoteId} className="mt-4 text-xs text-fg-2">
             {programDayList(locks.programDays)}&rsquo;s main lift: the program calculates it from its max, so its category, measure and max
             stay as they are and it can&rsquo;t be archived. Change the{" "}
-            <Link to="/settings#program" className="text-accent underline underline-offset-2" onClick={() => onClose()}>
+            <Link to="/program#layout" className="text-accent underline underline-offset-2" onClick={() => onClose()}>
               weekly layout
             </Link>{" "}
             to free them.

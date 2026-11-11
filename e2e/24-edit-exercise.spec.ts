@@ -179,7 +179,7 @@ test("today's unlogged exercise shows a new measure; logging writes it; changing
 test("a program's main lift keeps its category, measure and max", async ({ page }) => {
   const sheet = await openExerciseEditor(page, "Bench press");
   await expect(sheet.getByText(/^Mon’s main lift.*can’t be archived/)).toBeVisible();
-  await expect(sheet.getByRole("link", { name: "weekly layout" })).toHaveAttribute("href", "/settings#program");
+  await expect(sheet.getByRole("link", { name: "weekly layout" })).toHaveAttribute("href", "/program#layout");
   // Locked, but reachable: Tab lands on them (and their note is announced); a press does nothing.
   for (const group of ["Category", "Measured in", "Max"])
     for (const b of await sheet.getByRole("group", { name: group }).getByRole("button").all()) {

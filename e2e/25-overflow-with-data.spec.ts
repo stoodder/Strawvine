@@ -125,7 +125,7 @@ for (const width of [195, 320, 375]) {
 
     test("every screen, and Today's editors", async ({ page }) => {
       const progressViews = ["body", "fuel", "activity", "strength"].map((view) => `/progress?view=${view}`);
-      for (const path of ["/", "/train", "/progress", ...progressViews, "/goals", "/settings", "/train/2026-10-19"]) {
+      for (const path of ["/", "/train", "/progress", ...progressViews, "/goals", "/settings", "/program", "/train/2026-10-19"]) {
         await page.goto(path);
         await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
         await page.waitForTimeout(500);

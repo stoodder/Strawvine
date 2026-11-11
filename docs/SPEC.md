@@ -386,7 +386,7 @@ optional note.
     targeted), which opens the set editor instead, so a weighted set is never logged without a load by accident.
   - Volume counts weight × reps of rep-measured sets only; time and distance never count. A set's load is the one it
     was logged with (never a target it still holds), so a set logged without a load adds 0.
-- **Edit exercise:** every exercise can be edited — from its row in Settings → Exercise library, or from its options in a
+- **Edit exercise:** every exercise can be edited — from its row in Program → Exercise library, or from its options in a
   session — with the create card's controls: name, category, measure ("Measured in"), load (not offered on a main lift,
   which is always weighted; making an exercise a main lift turns its load on) and max tracking; it can also be
   archived (with Undo; archiving sends only that, so Undo fully reverts it) or restored. Saving sends only the fields
@@ -444,6 +444,25 @@ optional note.
   duration …", "Short on distance …"). A performance logged without any load (while the exercise was unweighted) is
   passed over for the one before it; one where only some sets had a load gives no hint. Unweighted exercises get no hint.
 - Rest timer (targets editable: **180 s** after main-lift sets, **90 s** after accessories); plate calculator.
+
+### 6.6 Program screen
+
+The plan has its own screen, **Program** (`/program`), reached from Train's header (Train's tab stays active on it; a
+back control returns to Train). The eyebrow is the program's name. Its sections, in order — every one edits the same
+settings document as Settings, through the same save path:
+
+- **Now** — where the plan is today ("Cycle 1 · Week 1 of 5", the week's own name and "Deload week" when it is one, the
+  week's dates and the cycle's last day; before the first cycle: when it starts), the **cycle start date** (snaps to that
+  week's Monday), and two one-tap moves: **Start a week later** / **Start a week earlier** shift the cycle start by ±7
+  days (`shiftCycleStart`, on a Monday) — the whole plan moves with it. Each says what it would do before it is tapped
+  ("Pushes the whole plan back a week: next Monday becomes Week 1 · Push", from `previewCycleShift`) and leaves an Undo
+  toast that restores the previous start. The program name is edited here too.
+- **Weekly layout** (§6.4), **Cycle weeks** (§6.2), **Rules** (working weight %, rounding, AMRAP last set, auto
+  progression and lb per extra rep, deload accessory load, accessory increment, rest timers), **Rep-max table** (§6.2)
+  and the **Exercise library** (§6.5).
+
+Settings keeps the preferences (daily targets, schedule, nutrition, display, sync, data) and a link to Program. Old
+links to the sections that moved (`/settings#program`, `/settings#training`) redirect to Program (`#training` → `#rules`).
 
 ## 7. Gamification & feedback
 

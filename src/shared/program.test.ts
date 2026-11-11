@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
-import { cyclePosition, currentMax, mainLiftSets, platesPerSide, progressionGain, repMaxPct } from "./program";
+import {
+  cyclePosition,
+  currentMax,
+  mainLiftSets,
+  platesPerSide,
+  previewCycleShift,
+  progressionGain,
+  repMaxPct,
+  shiftCycleStart,
+  snapCycleStart,
+} from "./program";
 import type { MaxEntry } from "./schemas";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -69,6 +79,93 @@ describe("cyclePosition", () => {
     const p = cyclePosition(program, "2026-12-07")!;
     expect([p.cycle, p.weekIndex]).toEqual([2, 0]);
     expect(cyclePosition(program, "2026-11-10")!.cycleEnd).toBe("2026-12-06");
+  });
+});
+
+describe("shiftCycleStart", () => {
+  it("moves the cycle start by whole weeks, later or earlier", () => {
+    expect(shiftCycleStart(program, 1).cycleStartDate).toBe("2026-11-09");
+    expect(shiftCycleStart(program, -1).cycleStartDate).toBe("2026-10-26");
+    expect(shiftCycleStart(program, 3).cycleStartDate).toBe("2026-11-23");
+    expect(shiftCycleStart(program, 0)).toEqual(program);
+    // Across a year boundary.
+    expect(shiftCycleStart({ ...program, cycleStartDate: "2026-12-28" }, 1).cycleStartDate).toBe("2027-01-04");
+  });
+  it("changes nothing else, and leaves the program it was given alone", () => {
+    const before = structuredClone(program);
+    const { cycleStartDate, ...rest } = shiftCycleStart(program, 1);
+    const { cycleStartDate: was, ...restBefore } = program;
+    expect(rest).toEqual(restBefore);
+    expect(cycleStartDate).not.toBe(was);
+    expect(program).toEqual(before);
+  });
+  it("lands on a Monday even when the stored start isn't one (the snap-to-Monday rule)", () => {
+    // 2026-11-05 is a Thursday: its week's Monday is Nov 2.
+    expect(snapCycleStart("2026-11-05")).toBe("2026-11-02");
+    expect(snapCycleStart("2026-11-08")).toBe("2026-11-02"); // Sunday belongs to the week before
+    expect(snapCycleStart("2026-11-02")).toBe("2026-11-02");
+    const midweek = { ...program, cycleStartDate: "2026-11-05" };
+    expect(shiftCycleStart(midweek, 1).cycleStartDate).toBe("2026-11-09");
+    expect(shiftCycleStart(midweek, -1).cycleStartDate).toBe("2026-10-26");
+    expect(shiftCycleStart(midweek, 0).cycleStartDate).toBe("2026-11-02");
+  });
+  it("a week later and a week earlier undo each other", () => {
+    expect(shiftCycleStart(shiftCycleStart(program, 1), -1)).toEqual(program);
+    expect(shiftCycleStart(shiftCycleStart(program, -2), 2)).toEqual(program);
+  });
+  it("only moves by whole weeks, and stays on the calendar", () => {
+    expect(shiftCycleStart(program, 1.9).cycleStartDate).toBe("2026-11-09");
+    const last = { ...program, cycleStartDate: "2999-12-30" };
+    expect(shiftCycleStart(last, 1)).toBe(last);
+  });
+  it("a week later, this week becomes the week before it; in week 1, the plan hasn't started", () => {
+    const at = (p: typeof program, date: string) => {
+      const pos = cyclePosition(p, date);
+      return pos && [pos.cycle, pos.weekIndex, pos.weekStart];
+    };
+    // Wednesday of week 2 (cycle 1).
+    expect(at(program, "2026-11-11")).toEqual([1, 1, "2026-11-09"]);
+    expect(at(shiftCycleStart(program, 1), "2026-11-11")).toEqual([1, 0, "2026-11-09"]);
+    expect(at(shiftCycleStart(program, -1), "2026-11-11")).toEqual([1, 2, "2026-11-09"]);
+    // Week 1: a week later it hasn't begun; next Monday is week 1.
+    expect(at(shiftCycleStart(program, 1), "2026-11-04")).toBeNull();
+    expect(at(shiftCycleStart(program, 1), "2026-11-09")).toEqual([1, 0, "2026-11-09"]);
+    // First week of cycle 2: a week later it is cycle 1's deload again.
+    expect(at(program, "2026-12-07")).toEqual([2, 0, "2026-12-07"]);
+    const back = cyclePosition(shiftCycleStart(program, 1), "2026-12-07")!;
+    expect([back.cycle, back.weekIndex, back.week.deload]).toEqual([1, 4, true]);
+    // Last week of a cycle: a week earlier it is the next cycle's week 1.
+    expect(at(shiftCycleStart(program, -1), "2026-11-30")).toEqual([2, 0, "2026-11-30"]);
+  });
+});
+
+describe("previewCycleShift", () => {
+  it("in week 1, a week later: nothing this week, next Monday is week 1's first lifting day", () => {
+    const p = previewCycleShift(program, 1, "2026-11-04");
+    expect(p.program).toEqual(shiftCycleStart(program, 1));
+    expect(p.position).toBeNull();
+    expect([p.next!.date, p.next!.day.label, p.next!.position.weekIndex, p.next!.position.cycle]).toEqual(["2026-11-09", "Push", 0, 1]);
+  });
+  it("mid-cycle: says which week this one becomes, and the next lifting day", () => {
+    // Saturday of week 2 (no lifting at the weekend): the next lifting day is Monday.
+    const later = previewCycleShift(program, 1, "2026-11-14");
+    expect([later.position!.weekIndex, later.position!.week.label]).toEqual([0, "Week 1"]);
+    expect([later.next!.date, later.next!.position.weekIndex]).toEqual(["2026-11-16", 1]);
+    const earlier = previewCycleShift(program, -1, "2026-11-11");
+    expect(earlier.position!.weekIndex).toBe(2);
+    // A lifting day itself is "the next one".
+    expect([earlier.next!.date, earlier.next!.day.label]).toEqual(["2026-11-11", "Legs"]);
+  });
+  it("before the start, a week earlier can make this week week 1", () => {
+    const p = previewCycleShift(program, -1, "2026-10-28");
+    expect([p.position!.cycle, p.position!.weekIndex]).toEqual([1, 0]);
+    expect(previewCycleShift(program, -1, "2026-10-20").position).toBeNull();
+    expect(previewCycleShift(program, -1, "2026-10-20").next!.date).toBe("2026-10-26");
+  });
+  it("starts from the first lifting weekday, and copes with a program without any", () => {
+    const tueOnly = { ...program, days: { "2": program.days["2"]! } };
+    expect(previewCycleShift(tueOnly, 1, "2026-11-04").next!.date).toBe("2026-11-10");
+    expect(previewCycleShift({ ...program, days: {} }, 1, "2026-11-04").next).toBeNull();
   });
 });
 

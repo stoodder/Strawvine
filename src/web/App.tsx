@@ -29,15 +29,17 @@ const loadOnboarding = () => import("./screens/Onboarding");
 const loadProgress = () => import("./screens/Progress");
 const loadGoals = () => import("./screens/Goals");
 const loadSettings = () => import("./screens/Settings");
+const loadProgram = () => import("./screens/Program");
 const Onboarding = lazy(() => loadOnboarding().then((m) => ({ default: m.Onboarding })));
 const ProgressScreen = lazy(() => loadProgress().then((m) => ({ default: m.ProgressScreen })));
 const GoalsScreen = lazy(() => loadGoals().then((m) => ({ default: m.GoalsScreen })));
 const SettingsScreen = lazy(() => loadSettings().then((m) => ({ default: m.SettingsScreen })));
+const ProgramScreen = lazy(() => loadProgram().then((m) => ({ default: m.ProgramScreen })));
 
 /** Warm the lazy screens once the app is idle, so the first tap on a tab doesn't wait. */
 function usePrefetchScreens() {
   useEffect(() => {
-    const run = () => void Promise.all([loadProgress(), loadGoals(), loadSettings()]).catch(() => {});
+    const run = () => void Promise.all([loadProgress(), loadGoals(), loadSettings(), loadProgram()]).catch(() => {});
     if ("requestIdleCallback" in window) {
       const id = window.requestIdleCallback(run, { timeout: 4000 });
       return () => window.cancelIdleCallback(id);
@@ -117,6 +119,9 @@ const router = createBrowserRouter([
       { path: "/train/:date", element: <TrainScreen /> },
       { path: "/progress", element: <ProgressScreen /> },
       { path: "/goals", element: <GoalsScreen /> },
+      // The training plan, reached from Train (whose tab stays lit on it: BottomNav).
+      { path: "/program", element: <ProgramScreen /> },
+      // Old anchors of sections that moved to Program redirect there (/settings#program → /program).
       { path: "/settings", element: <SettingsScreen /> },
       { path: "*", element: <TodayScreen /> },
     ],
