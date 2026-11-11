@@ -21,4 +21,8 @@
 - Screens that aren't a day take their header from `components/ScreenHeader.tsx` (one h1 size and top rhythm).
 - An Undo of a settings change goes through `components/settings/undo.ts`: a toast outlives its screen, so Undo patches
   the settings as they are when it is tapped (`liveSettings`), only its own fields — never a remembered document.
+- `limits.minCalories` (the floor under the daily target, SPEC §4.4) is optional in stored settings: read it through
+  `minCalories()` in `src/shared/defaults.ts`, never directly.
+- Train: which finished exercises show folded is view state (`components/train/folds.ts`), never saved; nothing folds or
+  moves while the page is in use, and no tap is ever intercepted.
 - Schema change: edit `src/server/db/schema.ts`, run `npm run db:generate`, commit the migration.
