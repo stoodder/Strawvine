@@ -26,8 +26,10 @@
 - Train: which finished exercises show folded is view state (`components/train/folds.ts`), never saved; nothing folds or
   moves while the page is in use, and no tap is ever intercepted.
 - The field being typed in stays put (e2e/40): a keystroke never changes the page's height except by the field's own
-  growth (`fitToContent` in `components/TextArea.tsx` measures inside a wrapper that keeps its height), and what
-  appears or goes when a value is saved — a chip, a note line — must not sit above a field the person may be moving
-  to: put it under the fields, or keep its line there empty. (Still open on Today: a Signals line that changes with
-  the morning's HRV / resting HR, and the Morning row's second summary line.)
+  growth (`fitToContent` in `components/TextArea.tsx` measures inside a wrapper that keeps its height), and what a
+  saved value changes must not move a field the person may be moving to. Inside an editor: put what appears (a chip,
+  a note line) under the fields, or keep its line there empty. Around the editors on Today: show derived things
+  (signals, targets, a row's summary) from `useHeldWhileTyping` (`components/useHeldWhileTyping.ts`), which holds them
+  while any field has focus and catches up when none has — view state only; saves are never delayed for it, and
+  nothing writes scroll to compensate.
 - Schema change: edit `src/server/db/schema.ts`, run `npm run db:generate`, commit the migration.

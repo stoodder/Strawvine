@@ -49,6 +49,14 @@ All fields are optional and can be edited at any time during the day (or later).
 - Raw entries are the source of truth; **all derived numbers are recomputed** from them, so editing
   any past day ripples forward correctly.
 - Today is shown live, marked _in progress_.
+- **A field being typed in stays where it is.** A value is saved the moment its field is left — often for the next
+  field, the keyboard still up. While any field of the day has focus, what the app makes of the day _around_ the fields
+  holds at what it showed when typing began: Signals, the target / TDEE / trend and calibration, and each checklist
+  row's text (its value, the lines under its label, the steps bar). It catches up when no field has focus any more
+  (the keyboard goes down, or focus moves to something that isn't a field — then only after that tap has landed), on
+  coming back to the app, and at once for another day. What is typed, the editors themselves, what was eaten against
+  the target, the ring and the dots stay live (they move nothing). Nothing is saved later or differently for it: it is
+  view state only.
 
 ### 3.1 Fuel bars (Today)
 

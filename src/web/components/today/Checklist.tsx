@@ -48,6 +48,7 @@ export function DayChecklist({
   stepTarget,
   zone2Minutes,
   lift,
+  shown,
   saved,
 }: {
   items: ChecklistItem[];
@@ -56,6 +57,12 @@ export function DayChecklist({
   stepTarget: number;
   zone2Minutes: number;
   lift: LiftSummary;
+  /**
+   * What the rows' text shows — label, value, the lines under it, the steps bar — when that is not
+   * the day as it is right now: the day as it was when typing began (`useHeldWhileTyping`), so a
+   * summary can't gain a line above a field in use. The dots and the editors are always of `day`.
+   */
+  shown?: { items: ChecklistItem[]; day: DayLog; lift: LiftSummary };
   /** Shows a brief "saved" on the row whose edit the server just acknowledged. */
   saved?: SavedFlash;
 }) {
@@ -68,8 +75,10 @@ export function DayChecklist({
         {saved?.shown ? "Saved" : ""}
       </span>
       {items.map((item) => {
-        const summary = summaryFor(item, day, stepTarget, lift);
-        if (item.key === "lift") return <LiftRow key={item.key} item={item} summary={summary} href={lift.href} />;
+        // A row the held day doesn't have (it arrived meanwhile) shows as it is.
+        const text = shown?.items.find((i) => i.key === item.key) ?? item;
+        const summary = summaryFor(text, shown?.day ?? day, stepTarget, shown?.lift ?? lift);
+        if (item.key === "lift") return <LiftRow key={item.key} item={item} text={text} summary={summary} href={lift.href} />;
         const rowPatch = (p: DayLogPatch) => {
           saved?.mark(item.key);
           patch(p);
@@ -88,6 +97,7 @@ export function DayChecklist({
           <ChecklistRow
             key={item.key}
             item={item}
+            text={text}
             open={open === item.key}
             onToggleOpen={() => toggle(item.key)}
             onCheck={onCheck}
@@ -252,9 +262,9 @@ function StatusDot({ done, onActivate }: { done: boolean; onActivate?: () => voi
 function RowText({ item, summary, srState, saved = false }: { item: ChecklistItem; summary: Summary; srState: boolean; saved?: boolean }) {
   return (
     <span className="block min-w-0 flex-1">
-      {/* The value sits beside the label, so the lines under them have the row's whole width. */}
-      {/* As tall with a value as without (the value's larger type would add ~2px): a row that gains its value
-          while its editor is open doesn't nudge the editor. */}
+      {/* The value sits beside the label, so the lines under them have the row's whole width. The line has the
+          height of its tallest content from the start: the "saved" tick comes and goes while the row's editor is
+          in use (it is live — the answer to what was just typed), and by itself would make the line a pixel taller. */}
       <span className="flex min-h-[1.5625rem] items-baseline gap-4">
         <span className={clsx("block min-w-0 flex-1 text-[0.9375rem]", item.done ? "text-fg" : "text-fg-2")}>
           {item.label}
@@ -273,6 +283,7 @@ function RowText({ item, summary, srState, saved = false }: { item: ChecklistIte
 
 function ChecklistRow({
   item,
+  text,
   open,
   onToggleOpen,
   onCheck,
@@ -281,6 +292,8 @@ function ChecklistRow({
   children,
 }: {
   item: ChecklistItem;
+  /** The item its text is written from (see DayChecklist's `shown`). */
+  text: ChecklistItem;
   open: boolean;
   onToggleOpen: () => void;
   /** A real done/not-done toggle (metcon, zone 2); `null` for items done by entering a value. */
@@ -311,7 +324,7 @@ function ChecklistRow({
           onClick={onToggleOpen}
           className="flex min-w-0 flex-1 items-center gap-4 rounded-lg py-3.5 text-left"
         >
-          <RowText item={item} summary={summary} srState={!onCheck} saved={saved} />
+          <RowText item={text} summary={summary} srState={!onCheck} saved={saved} />
         </button>
       </div>
       <AnimatePresence initial={false}>
@@ -335,13 +348,13 @@ function ChecklistRow({
 }
 
 /** The lift is logged on Train: the whole row is a link there; the dot shows completion. */
-function LiftRow({ item, summary, href }: { item: ChecklistItem; summary: Summary; href: string }) {
+function LiftRow({ item, text, summary, href }: { item: ChecklistItem; text: ChecklistItem; summary: Summary; href: string }) {
   const navigate = useNavigate();
   return (
     <div className="flex items-center gap-4 px-1">
       <StatusDot done={item.done} onActivate={() => navigate(href)} />
       <Link to={href} className="flex min-w-0 flex-1 items-center gap-4 rounded-lg py-3.5">
-        <RowText item={item} summary={summary} srState />
+        <RowText item={text} summary={summary} srState />
       </Link>
     </div>
   );

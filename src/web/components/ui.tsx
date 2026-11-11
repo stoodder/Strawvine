@@ -810,7 +810,7 @@ function unlockPage() {
 
 /** A control that raises a phone's keyboard: a text-like input, a textarea, contenteditable. */
 const NOT_TYPED = new Set(["button", "checkbox", "radio", "range", "submit", "reset", "file", "color", "image", "hidden"]);
-function isEditable(el: Element | null): el is HTMLElement {
+export function isEditable(el: Element | null): el is HTMLElement {
   if (!(el instanceof HTMLElement)) return false;
   if (el instanceof HTMLTextAreaElement) return !el.readOnly && !el.disabled;
   if (el instanceof HTMLInputElement) return !NOT_TYPED.has(el.type) && !el.readOnly && !el.disabled;

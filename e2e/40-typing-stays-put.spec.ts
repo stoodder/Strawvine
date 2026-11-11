@@ -2,7 +2,8 @@
  * The field being typed in stays where it is: nothing the app does for a keystroke, for a value
  * saved as its field is left for the next one, for a save or a sync landing mid-typing, or for a
  * phone keyboard changing size may move it — only the field's own growth moves anything, and the
- * browser then keeps the caret in view by itself.
+ * browser then keeps the caret in view by itself. On Today, what the app makes of a saved value
+ * above the fields (a signal, a row's summary, the steps bar) waits until no field has focus.
  *
  * Chromium has no iOS keyboard, so each cause is played the way it reaches the page:
  * - a page scrolled to its end (where it is when the keyboard is up and the field is the last
@@ -409,6 +410,166 @@ for (const viewport of [
       expect([saved.calories, saved.proteinG, saved.carbsG, saved.fatG]).toEqual([2270, 260, 150, 70]);
     });
 
+    test("Today: the morning check-in field to field — what the readings change above waits for the keyboard to go", async ({ page }) => {
+      await onboardedOn(page, MONDAY);
+      // Three weeks of readings: an HRV of 20 against them is a warning that takes the first line
+      // of Signals (two lines of text where one was), and VO2 max and the ratings give the Morning
+      // row its second summary line.
+      await seedHistory(page);
+      await page.reload();
+      await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+      await withoutScrollAnchoring(page);
+      const signal = page.locator("[data-signals] li").first();
+      const signalBefore = await signal.textContent();
+      expect(signalBefore).toBeTruthy();
+      const morning = page.getByRole("button", { name: /^Morning check-in/ });
+      await morning.tap();
+      // The row near the top of the screen: its whole editor is clear of the nav at both sizes.
+      await morning.evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 72));
+      const editor = page.getByRole("group", { name: "Morning check-in details" });
+      const field = (name: string) => editor.getByRole("textbox", { name, exact: true });
+      const SLEEP = "Sleep duration, hours and minutes";
+      const names = ["Morning weight", SLEEP, "Sleep score", "HRV", "Resting HR", "VO2 max"];
+      // Opening the editor on a day without a weight puts the caret in it.
+      await expect(field("Morning weight")).toBeFocused();
+      await expect.poll(async () => (await place(field("VO2 max"))).top, { intervals: [150] }).toBe((await place(field("VO2 max"))).top);
+      await page.waitForTimeout(400);
+      await watchInput(page);
+      /** What the Morning row says of the day: its value and the lines under its label (not the passing "saved" tick). */
+      const rowSays = () => morning.evaluate((el) => [...el.querySelectorAll(".num, .truncate")].map((e) => e.textContent).join(" | "));
+      const rowBefore = await rowSays();
+      expect(rowBefore).toBe("Weight · sleep · recovery");
+
+      /** Where every field of the editor is in the page, and on screen. */
+      const all = async () => {
+        const out: Record<string, { top: number; docTop: number }> = {};
+        for (const name of names) {
+          const p = await place(field(name));
+          out[name] = { top: p.top, docTop: p.docTop };
+        }
+        return out;
+      };
+      /** Type into the focused field key by key: no keystroke moves it or the page. */
+      const type = async (name: string, value: string) => {
+        await expect(field(name)).toBeFocused();
+        await takeInputs(page);
+        const before = await place(field(name));
+        for (const ch of value) {
+          await press(page, ch);
+          const [at] = await takeInputs(page);
+          expect(at!.scrollY, `${name}: scroll position in the input event of "${ch}"`).toBe(before.scrollY);
+          await settled(page);
+          const after = await place(field(name));
+          expect(after.scrollY, `${name}: scroll position after "${ch}"`).toBe(before.scrollY);
+          expect(Math.abs(after.top - before.top), `${name}: the field's top after "${ch}"`).toBeLessThanOrEqual(0.5);
+        }
+      };
+      /** Leave the focused field for `name` by a tap: its value is saved, and no field of the editor moves. */
+      const moveTo = async (name: string, from: string) => {
+        await field(name).scrollIntoViewIfNeeded();
+        await settled(page);
+        const before = await all();
+        const y = await page.evaluate(() => window.scrollY);
+        await field(name).tap();
+        await expect(field(name)).toBeFocused();
+        // The save has reached the page (a task later) and the server.
+        await expectSynced(page);
+        await settled(page);
+        expect(await page.evaluate(() => window.scrollY), `nothing scrolled as ${from} was saved`).toBe(y);
+        const after = await all();
+        for (const n of names) {
+          expect(Math.abs(after[n]!.top - before[n]!.top), `${n} moved on screen when ${from} was saved`).toBeLessThanOrEqual(0.5);
+          expect(Math.abs(after[n]!.docTop - before[n]!.docTop), `${n} moved in the page when ${from} was saved`).toBeLessThanOrEqual(0.5);
+        }
+        // What is above the editor is as it was when typing began.
+        expect(await signal.textContent(), `the first signal after ${from} was saved`).toBe(signalBefore);
+        expect(await rowSays(), `the Morning row after ${from} was saved`).toBe(rowBefore);
+      };
+
+      await type("Morning weight", "199.4");
+      await moveTo(SLEEP, "the weight");
+      await type(SLEEP, "730");
+      await moveTo("Sleep score", "the sleep");
+      await type("Sleep score", "55");
+      await moveTo("HRV", "the sleep score");
+      await type("HRV", "20");
+      await moveTo("Resting HR", "the HRV");
+      await type("Resting HR", "80");
+      await moveTo("VO2 max", "the resting HR");
+      await type("VO2 max", "50.1");
+
+      // Everything left so far is saved, though nothing above shows it yet.
+      const saved = (await serverData(page)).days.find((d) => d.date === MONDAY_ISO)!;
+      expect([saved.weightLb, saved.sleepMinutes, saved.sleepScore, saved.hrvMs, saved.restingHrBpm]).toEqual([199.4, 450, 55, 20, 80]);
+
+      // A rating tapped with the keyboard still up — on an iPhone the tap leaves focus in the field
+      // (played here by a click that moves no focus): saved, shown on the scale, and nothing moves.
+      const energy = editor.getByRole("radio", { name: "Energy 4 of 5" });
+      const beforeRating = await all();
+      await energy.evaluate((el: HTMLElement) => el.click());
+      await expect(energy).toHaveAttribute("aria-checked", "true");
+      await expect(field("VO2 max")).toBeFocused();
+      await expectSynced(page);
+      await settled(page);
+      const afterRating = await all();
+      for (const n of names)
+        expect(Math.abs(afterRating[n]!.top - beforeRating[n]!.top), `${n} moved when Energy was rated`).toBeLessThanOrEqual(0.5);
+      expect(await rowSays(), "the Morning row while the field has focus").toBe(rowBefore);
+
+      // A rating by a real tap: here (Android, desktop) it takes focus from the field. The tap lands
+      // on the disc it was aimed at — nothing moved under it — and then, no field having focus, the
+      // page catches up with everything typed.
+      const soreness = editor.getByRole("radio", { name: "Soreness 2 of 5" });
+      await soreness.tap();
+      await expect(soreness).toHaveAttribute("aria-checked", "true");
+      await expect(morning).toContainText("199.4");
+      await expect(morning).toContainText("7h 30m · sleep score 55 · HRV 20");
+      await expect(morning).toContainText("VO2 50.1 · energy 4/5 · soreness 2/5");
+      await expect(signal).not.toHaveText(signalBefore!);
+      await expect(signal).toContainText(/HRV|resting HR/i);
+      await expectSynced(page);
+      const end = (await serverData(page)).days.find((d) => d.date === MONDAY_ISO)!;
+      expect([end.vo2Max, end.energy, end.soreness]).toEqual([50.1, 4, 2]);
+    });
+
+    test("Today: steps typed, then on to the journal — the steps bar waits until no field has focus", async ({ page }) => {
+      await onboardedOn(page, MONDAY);
+      await withoutScrollAnchoring(page);
+      const row = page.getByRole("button", { name: /^Steps/ });
+      await row.tap();
+      const steps = page.getByRole("group", { name: "Steps details" }).getByRole("textbox", { name: "Steps", exact: true });
+      const journal = page.getByRole("textbox", { name: "Journal" });
+      await expect(steps).toBeVisible();
+      await page.waitForTimeout(600);
+      await steps.tap();
+      await expect(steps).toBeFocused();
+      for (const ch of "9000") await press(page, ch);
+      const bar = row.locator(".w-32");
+      await expect(bar).toHaveCount(0);
+
+      // Straight on to the journal, under the checklist: the steps are saved, and the journal is where it was.
+      await journal.scrollIntoViewIfNeeded();
+      await settled(page);
+      const before = await place(journal);
+      await journal.tap();
+      await expect(journal).toBeFocused();
+      await expectSynced(page);
+      expect((await serverData(page)).days.find((d) => d.date === MONDAY_ISO)!.steps).toBe(9000);
+      await settled(page);
+      const after = await place(journal);
+      expect(Math.abs(after.docTop - before.docTop), "the journal moved in the page when the steps were saved").toBeLessThanOrEqual(0.5);
+      expect(Math.abs(after.top - before.top), "the journal moved on screen when the steps were saved").toBeLessThanOrEqual(0.5);
+      await expect(bar).toHaveCount(0);
+      await expect(row).not.toContainText("9,000");
+      for (const ch of "ok") await press(page, ch);
+      expect(Math.abs((await place(journal)).top - before.top)).toBeLessThanOrEqual(0.5);
+
+      // The keyboard goes: the row shows the steps and their bar.
+      await journal.blur();
+      await expect(row).toContainText("9,000");
+      await expect(bar).toBeVisible();
+    });
+
     test("Train: a set editor's number field and the exercise search ride the keyboard", async ({ page }) => {
       await onboardedOn(page, MONDAY);
       await page.goto("/train");
@@ -489,6 +650,10 @@ for (const viewport of [
 
     test("Today: a sync landing mid-typing takes neither focus, caret nor text", async ({ page }) => {
       await onboardedOn(page, MONDAY);
+      // A weight for the day, so that Fuel has a target to count what was eaten against.
+      expect((await page.request.put(`/api/days/${MONDAY_ISO}`, { data: { weightLb: 199 } })).ok()).toBe(true);
+      await page.reload();
+      await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
       const journal = page.getByRole("textbox", { name: "Journal" });
       await expect(journal).toBeVisible();
       await withoutScrollAnchoring(page);
@@ -503,25 +668,39 @@ for (const viewport of [
       expect(before.focused).toBe(true);
 
       // Another device saves the same day — a journal of its own and the calories — and this one
-      // reads the server again (as it does coming back to the foreground) while the field has focus.
+      // reads the server again, as it does coming back to the foreground. The answer takes a
+      // moment, and the typing goes on meanwhile: it lands with the field in use.
       const put = await page.request.put(`/api/days/${MONDAY_ISO}`, { data: { journal: "Written on the laptop", calories: 1800 } });
       expect(put.ok()).toBe(true);
+      await page.route("**/api/bootstrap", async (route) => {
+        await new Promise((r) => setTimeout(r, 700));
+        await route.continue();
+      });
       const read = page.waitForResponse((r) => r.url().includes("/api/bootstrap") && r.request().method() === "GET");
       await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await press(page, "!");
       await read;
-      // The other device's calories are on the page: the sync landed.
-      await expect(page.getByRole("button", { name: /^Nutrition/ })).toContainText("1,800");
+      const nutrition = page.getByRole("button", { name: /^Nutrition/ });
+      const eaten = page.locator("[data-fuel-eaten]");
+      // The other device's calories are on the page — what was eaten is live (it moves nothing)…
+      await expect(eaten).toHaveText("1,800 eaten");
+      // …while the Nutrition row, above the field, keeps what it showed: its value would make it taller.
+      await expect(nutrition).not.toContainText("1,800");
 
       const after = await place(journal);
       expect(after.focused, "focus after the sync").toBe(true);
-      expect(after.value, "the text being typed").toBe("Slept well");
-      expect(after.caret, "the caret").toBe(5);
+      expect(after.value, "the text being typed").toBe("Slept! well");
+      expect(after.caret, "the caret").toBe(6);
       expect(Math.abs(after.top - before.top), "the field's place").toBeLessThanOrEqual(0.5);
       expect(after.scrollY).toBe(before.scrollY);
       // Typing goes on where the caret was.
-      await press(page, "!");
-      await expect(journal).toHaveValue("Slept! well");
-      expect((await place(journal)).caret).toBe(6);
+      await press(page, "?");
+      await expect(journal).toHaveValue("Slept!? well");
+      expect((await place(journal)).caret).toBe(7);
+      // Focus leaves the field: the row catches up, and nothing of the sync was lost.
+      await journal.blur();
+      await expect(nutrition).toContainText("1,800");
+      await page.unroute("**/api/bootstrap");
     });
   });
 }

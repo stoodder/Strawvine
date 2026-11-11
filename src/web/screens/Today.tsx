@@ -15,7 +15,7 @@ import { Bar, Section, severityClass, severityColor, Stat } from "../components/
 import { Calibration } from "../components/Calibration";
 import { FloorNote } from "../components/FloorNote";
 import { JournalText } from "../components/TextArea";
-import { DayChecklist } from "../components/today/Checklist";
+import { DayChecklist, type LiftSummary } from "../components/today/Checklist";
 import { DateJump } from "../components/today/DateJump";
 import { DayRing } from "../components/today/DayRing";
 import { NextSession } from "../components/today/NextSession";
@@ -25,6 +25,7 @@ import { Signals } from "../components/today/Signals";
 import { fmt, signed } from "../lib/format";
 import { success } from "../lib/haptics";
 import { useData, usePendingDates, useSaveDay } from "../lib/store";
+import { useHeldWhileTyping } from "../components/useHeldWhileTyping";
 import { useTitle } from "../components/useTitle";
 
 /** Shown only where the header's text column has room for the long form (about 168 px at the default text size). */
@@ -65,9 +66,6 @@ export function TodayScreen() {
   const liftItem = items.find((i) => i.key === "lift");
   const closed = isClosed(items);
   const targets = isToday ? model.targets : targetsFor(date, model.series, data);
-  const energy = model.series.find((d) => d.date === date) ?? null;
-  const prevEnergy = model.series.find((d) => d.date === addDays(date, -1)) ?? null;
-  const rec = targets.recommendation;
 
   const patch = (p: DayLogPatch) => {
     const before = isClosed(items);
@@ -93,11 +91,48 @@ export function TodayScreen() {
   // Only on today: what's coming up next on the program (links to its preview on Train).
   const upcoming = useMemo(() => (isToday ? nextSession(today, data) : null), [isToday, today, data]);
 
+  const lift: LiftSummary = {
+    href: isToday ? "/train" : `/train/${date}`,
+    label: sess?.label,
+    primaryName,
+    setsDone,
+    setsTotal,
+    // The checklist's own reading: the plan this day holds (movedFrom), or where this day's plan went.
+    plannedFor: liftItem?.movedFrom ?? null,
+    completed: !!sess?.completedAt,
+    mainSkipped: !!(primaryBlock?.skipped || primaryEx?.skipped),
+    elsewhere: liftItem?.doneOn ?? doneEarly?.date ?? null,
+    date,
+    today,
+  };
+
+  // What the app makes of the day — signals, targets and trend, calibration, the checklist rows' summaries —
+  // holds still while a field is being typed in, and catches up when no field has focus (useHeldWhileTyping):
+  // a value saved as its field is left for the next one must not move that next field. What is saved is as
+  // live as ever, and so is what was eaten against the target (it moves nothing), the ring and the dots.
+  const still = useHeldWhileTyping(
+    {
+      insights: model.insights,
+      targets,
+      energy: model.series.find((d) => d.date === date) ?? null,
+      prevEnergy: model.series.find((d) => d.date === addDays(date, -1)) ?? null,
+      items,
+      day,
+      lift,
+    },
+    date,
+  );
+  const { energy, prevEnergy } = still;
+  const rec = still.targets.recommendation;
   const loggedCount = energy?.loggedCount ?? 0;
   const calibrating = loggedCount < CALIBRATION_DAYS;
   // A day only counts once it has both a weight and calories; say which half is missing.
   const missing =
-    day.weightLb !== null && day.calories === null ? "calories" : day.calories !== null && day.weightLb === null ? "weight" : null;
+    still.day.weightLb !== null && still.day.calories === null
+      ? "calories"
+      : still.day.calories !== null && still.day.weightLb === null
+        ? "weight"
+        : null;
   const trendDelta = energy?.avgWeight != null && prevEnergy?.avgWeight != null ? energy.avgWeight - prevEnergy.avgWeight : null;
   // 0 within 5 % of the target, then lime → caution yellow → warn as the day runs further over (SPEC §3.1).
   // Today counts down what's left; `over` and `severity` are `overTarget`'s, so a past day reads them the same.
@@ -196,10 +231,10 @@ export function TodayScreen() {
       </div>
 
       {/* What the app makes of the last days: first, where it can still change today. */}
-      {isToday && <Signals insights={model.insights} />}
+      {isToday && <Signals insights={still.insights} />}
 
       {/* Fuel */}
-      <Section label="Fuel" right={targets.tdee?.provisional ? <span className="label text-mute">provisional</span> : null}>
+      <Section label="Fuel" right={still.targets.tdee?.provisional ? <span className="label text-mute">provisional</span> : null}>
         {rec ? (
           <>
             {/* Wraps (the right-hand number under the target) when zoomed in or very narrow. */}
@@ -281,9 +316,9 @@ export function TodayScreen() {
             {/* mt-3 after the macros' note line (always there): about the gap there was under the bars. */}
             <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-mute">
               <span className="whitespace-nowrap">
-                TDEE <span className="num text-fg-2">{fmt(targets.tdee?.value)}</span>
-                {targets.tdee?.measured != null && targets.tdee.provisional && (
-                  <span className="text-mute"> · measured {fmt(targets.tdee.measured)}</span>
+                TDEE <span className="num text-fg-2">{fmt(still.targets.tdee?.value)}</span>
+                {still.targets.tdee?.measured != null && still.targets.tdee.provisional && (
+                  <span className="text-mute"> · measured {fmt(still.targets.tdee.measured)}</span>
                 )}
               </span>
               {energy?.avgWeight != null && (
@@ -315,20 +350,9 @@ export function TodayScreen() {
           patch={patch}
           stepTarget={data.settings.targets.steps}
           zone2Minutes={data.settings.targets.zone2Minutes}
-          lift={{
-            href: isToday ? "/train" : `/train/${date}`,
-            label: sess?.label,
-            primaryName,
-            setsDone,
-            setsTotal,
-            // The checklist's own reading: the plan this day holds (movedFrom), or where this day's plan went.
-            plannedFor: liftItem?.movedFrom ?? null,
-            completed: !!sess?.completedAt,
-            mainSkipped: !!(primaryBlock?.skipped || primaryEx?.skipped),
-            elsewhere: liftItem?.doneOn ?? doneEarly?.date ?? null,
-            date,
-            today,
-          }}
+          lift={lift}
+          // The rows' summaries (and the steps bar) are of the day as held; the dots and the editors are live.
+          shown={{ items: still.items, day: still.day, lift: still.lift }}
           saved={saved}
         />
         {upcoming && <NextSession next={upcoming} today={today} />}
