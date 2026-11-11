@@ -474,22 +474,44 @@ optional note.
 
 ### 6.6 Program screen
 
-The plan has its own screen, **Program** (`/program`), reached from Train's header (Train's tab stays active on it; a
-back control returns to Train). The eyebrow is the program's name. Its sections, in order — every one edits the same
-settings document as Settings, through the same save path:
+The program has its own screen, **Program** (`/program`), reached from Train's header (Train's tab stays active on
+it) and from Settings' "Training program" row. Its back control returns to where it was opened from — a Train day or
+Settings, and nothing else (`state.from`; without one, Train) — and is named after it ("Back to Train", "Back to
+Settings"). The eyebrow is the program's name. Its sections, in order — every one edits the same settings document as
+Settings, through the same save path:
 
-- **Now** — where the plan is today ("Cycle 1 · Week 1 of 5", the week's own name and "Deload week" when it is one, the
-  week's dates and the cycle's last day; before the first cycle: when it starts), the **cycle start date** (snaps to that
-  week's Monday), and two one-tap moves: **Start a week later** / **Start a week earlier** shift the cycle start by ±7
-  days (`shiftCycleStart`, on a Monday) — the whole plan moves with it. Each says what it would do before it is tapped
-  ("Pushes the whole plan back a week: next Monday becomes Week 1 · Push", from `previewCycleShift`) and leaves an Undo
-  toast that restores the previous start. The program name is edited here too.
-- **Weekly layout** (§6.4), **Cycle weeks** (§6.2), **Rules** (working weight %, rounding, AMRAP last set, auto
-  progression and lb per extra rep, deload accessory load, accessory increment, rest timers), **Rep-max table** (§6.2)
-  and the **Exercise library** (§6.5).
+- **Now** — where the program is today ("Cycle 1 · Week 1 of 5", the week's own name and "Deload week" when it is one,
+  the week's dates and the cycle's last day; before the first cycle: when it starts), the **cycle start date** (snaps
+  to that week's Monday), and two one-tap moves: **Delay a week** (start +7 days) and **Skip ahead a week** (−7 days;
+  `shiftCycleStart`, on a Monday) — every week of every cycle moves with it. Each says what it would do, to this week
+  and the next, before it is tapped (from `previewCycleShift`): "This week repeats Week 2; next Monday is Week 3 ·
+  Push." / "This week becomes Week 3; next Monday is Week 4 · Push."; when the first cycle would start later, "Starts
+  Mon Nov 9 instead of Nov 2: this week is before the program; next Monday is Week 1 · Push." (just "Starts … instead
+  of …" when that is more than a week away); a deload week whose name doesn't say so is "Easy (deload)", a week of
+  another cycle "Week 1 (cycle 2)"; a one-week program only changes its cycle count. The program name is edited here
+  too.
+  - A move of the start — by either button or the date field — leaves **one Undo toast** ("Program delayed a week",
+    "Program moved ahead 2 weeks", "Program starts Mon Nov 9"). Moves made while it is on offer fold into it: its
+    Undo goes back to the start before the first of them (a move back there leaves nothing to undo). A double-tap is
+    one move (taps within 0.6 s). Undo is relative: it only puts the start back while it is still where the move put
+    it; otherwise it says it can't be undone and changes nothing.
+- **Weekly layout** (§6.4) — per weekday a **Lift** switch (is it a lifting day), the session's name, its main lift
+  and an **AMRAP** switch. The stored program has no entry for a day that is off, so switching one off is made
+  harmless another way: it leaves an Undo toast, and while the screen stays open switching it back on restores its
+  name, main lift and AMRAP setting.
+- **Cycle weeks** (§6.2; at least 1, at most 16; removing a week leaves an Undo), **Rules** (working weight %,
+  rounding, AMRAP last set, auto progression and lb per extra rep, deload accessory load, accessory increment, rest
+  timers), **Rep-max table** (§6.2) and the **Exercise library** (§6.5).
 
 Settings keeps the preferences (daily targets, schedule, nutrition, display, sync, data) and a link to Program. Old
 links to the sections that moved (`/settings#program`, `/settings#training`) redirect to Program (`#training` → `#rules`).
+
+**Undo of a settings change** (Program's, and Goals' pace / cleared goal / removed target) works on the settings as
+they are when Undo is tapped — the toast outlives the screen, and another device may have saved meanwhile — and puts
+back only its own fields; focus then returns to the control that was undone.
+
+Program, Settings, Goals and Progress share one header (`ScreenHeader`): an eyebrow row (with the back control where
+there is one), the title in the same size and at the same height as Today's and Train's, an optional tagline.
 
 ## 7. Gamification & feedback
 
@@ -501,6 +523,11 @@ links to the sections that moved (`/settings#program`, `/settings#training`) red
 - Each achievement is celebrated once. A max gain the screen already showed (applying an AMRAP bump) is filed as seen
   in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or
   only after the device comes back online.
+- Achievements older than three days are filed as seen without a celebration — except **cycle completions**, whose
+  date moves with the program (the cycle start, the number of weeks): a cycle is only marked seen by a celebration
+  that was shown and dismissed, and while a program change's Undo is on offer cycle completions are neither shown nor
+  marked. So a cycle that was "complete" only until a shift was undone or reverted still gets its celebration when
+  it really ends.
 - Rule-based insights (protein adherence, sleep, recovery trend from HRV and resting HR — one insight at most, §3.3 —
   steps, rate-of-change safety). Today's Signals list warnings first, then notes, then good news (in that order within
   each). They sit directly under Today's header, above Fuel: the first one on its own, the rest behind a quiet

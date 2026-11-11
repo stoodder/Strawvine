@@ -58,8 +58,8 @@ export const TYPE_SCALE = new Map([
   ["0.8125rem", "small numerals: the rest pill's next-set line"],
   ["0.9375rem", "row title: list and target names"],
   ["1.75rem", "stat value, medium (`Stat size=\"md\"`)"],
-  ["2.75rem", "screen title (h1) on Progress / Goals / Settings"],
-  ["clamp(1.75rem,11vw,2.75rem)", "screen title (h1) that shrinks on narrow phones and at 200% zoom (Today, Train)"],
+  // The one screen title: no fixed-size h1 (it overflowed narrow phones on some screens and not others).
+  ["clamp(1.75rem,11vw,2.75rem)", "screen title (h1): shrinks on narrow phones and at 200% zoom (Today, Train, `ScreenHeader`)"],
   ["max(0.45em,0.6875rem)", "a stat's unit, relative to its value but never below a caption"],
 ]);
 

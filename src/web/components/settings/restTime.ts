@@ -1,5 +1,5 @@
 /**
- * Rest times in Settings are shown as m:ss ("3:00") and typed in whatever way the keyboard allows
+ * Rest times (Program › Rules) are shown as m:ss ("3:00") and typed in whatever way the keyboard allows
  * (the iOS numeric pad has no ":" key — the same idea as the sleep field):
  *
  *   "3:00" "3.00" "3,30"   → m:ss (two digits after the separator are seconds)

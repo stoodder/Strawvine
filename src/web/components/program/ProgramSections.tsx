@@ -2,18 +2,19 @@
  * The Program screen's sections (see screens/Program.tsx): where the cycle is now, the weekly
  * layout, the cycle's weeks, the rules and the rep-max table. Each edits the program (or the
  * training preferences) through the setters of `useSettingsEditor`; nothing here calculates —
- * positions, shifts and percentages come from src/shared/program.ts.
+ * positions, shifts and percentages come from src/shared/program.ts. Changes that are easy to make
+ * by accident (moving the cycle, switching a lifting day off, removing a week) leave an Undo.
  */
 import clsx from "clsx";
-import { useId, useState } from "react";
+import { useId, useRef, useState, type RefObject } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { daysBetween, formatShortDate, isISODate, startOfWeek, weekdayName, WEEKDAY_SHORT, type ISODate } from "../../../shared/dates";
 import { cyclePosition, previewCycleShift, repMaxPct, snapCycleStart, type CyclePosition } from "../../../shared/program";
-import type { Program, ProgramWeek } from "../../../shared/schemas";
+import type { Program, ProgramDay, ProgramWeek } from "../../../shared/schemas";
 import { useData } from "../../lib/store";
 import { InlineText } from "../InlineText";
 import { NumSetting, RestSetting, WEEK_ORDER } from "../settings/fields";
-import type { TrainingPrefs } from "../settings/useSettingsEditor";
+import type { ProgramUndo, TrainingPrefs } from "../settings/useSettingsEditor";
 import { useToast } from "../Toast";
 import { BoxNumber, Field, Section, Toggle } from "../ui";
 
@@ -23,7 +24,8 @@ interface ProgramEdit {
   /** Section id (jump target). */
   id?: string;
 }
-type UndoableProgram = (p: Partial<Program>, message: string, undo: (now: Program) => Partial<Program>) => void;
+/** A program change with an Undo toast (`useSettingsEditor().undoableProgram`); false when it wasn't saved. */
+type UndoableProgram = <T = undefined>(p: Partial<Program>, undo: ProgramUndo<T>) => boolean;
 
 // ---------------------------------------------------------------------------
 // Now
@@ -40,22 +42,64 @@ function dayFromToday(date: ISODate, today: ISODate): string {
   return `${weekdayName(date, true)} ${formatShortDate(date)}`;
 }
 
-/** The week's own name, with its cycle when that differs from the one today is in. */
-const weekName = (pos: CyclePosition, nowCycle: number) => (pos.cycle === nowCycle ? pos.week.label : `${pos.week.label} (cycle ${pos.cycle})`);
+/**
+ * A week by its own name, for a sentence: "Week 3", "Heavy", "Easy (deload)" when the name doesn't
+ * say it is one, and "Week 1 (cycle 2)" when its cycle isn't the one the sentence is already in.
+ */
+function weekName(pos: CyclePosition, inCycle: number): string {
+  const notes = [pos.week.deload && !/deload/i.test(pos.week.label) && "deload", pos.cycle !== inCycle && `cycle ${pos.cycle}`].filter(Boolean);
+  return notes.length ? `${pos.week.label} (${notes.join(", ")})` : pos.week.label;
+}
+
+const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
 /**
- * What moving the plan by `weeks` would do, in one line, before tapping:
- * "Pushes the whole plan back a week: next Monday becomes Week 1 · Push."
+ * What delaying the program a week (`weeks` 1) or skipping ahead a week (−1) would do, in one
+ * line, before it is tapped — this week and the next, from `previewCycleShift`:
+ *
+ *   "This week repeats Week 2; next Monday is Week 3 · Push."        (delay, mid-cycle)
+ *   "This week becomes Week 3; next Monday is Week 4 · Push."        (skip ahead)
+ *   "Starts Mon Nov 9 instead of Nov 2: this week is before the program; next Monday is Week 1 · Push."
+ *   "Starts Mon Nov 23 instead of Nov 16."                           (still more than a week away)
  */
-export function shiftEffect(program: Program, weeks: number, today: ISODate): string {
-  const lead = weeks > 0 ? "Pushes the whole plan back a week" : "Pulls the whole plan forward a week";
-  const { program: shifted, position, next } = previewCycleShift(program, weeks, today);
-  const nowCycle = cyclePosition(program, today)?.cycle ?? 1;
-  // Today falls in the plan afterwards: say which week this one turns into.
-  if (position) return `${lead}: this week becomes ${weekName(position, nowCycle)}.`;
-  // It doesn't (the first cycle starts later): say when it starts, and with what.
-  if (next) return `${lead}: ${dayFromToday(next.date, today)} becomes ${weekName(next.position, nowCycle)} · ${next.day.label}.`;
-  return `${lead}: the first cycle starts ${dayFromToday(shifted.cycleStartDate, today)}.`;
+export function shiftEffect(program: Program, weeks: 1 | -1, today: ISODate): string {
+  const { program: shifted, before, position: after, nextWeek } = previewCycleShift(program, weeks, today);
+  const to = shifted.cycleStartDate;
+  if (to === program.cycleStartDate) return "The program can't move any further.";
+  const starts = `Starts ${weekdayName(to, true)} ${formatShortDate(to)} instead of ${formatShortDate(program.cycleStartDate)}`;
+  /** "next Monday is Week 3 · Push", or from its first lifting day when that isn't the Monday. */
+  const nextWeekIs = (inCycle: number): string | null => {
+    if (!nextWeek.position) return null;
+    const name = weekName(nextWeek.position, inCycle);
+    const first = nextWeek.first;
+    if (!first) return `next week is ${name}`;
+    return first.date === nextWeek.start
+      ? `next ${weekdayName(first.date)} is ${name} · ${first.day.label}`
+      : `next week is ${name}, from ${weekdayName(first.date)} · ${first.day.label}`;
+  };
+  const sentence = (thisWeek: string, next: string | null) => (next ? `${thisWeek}; ${next}.` : `${thisWeek}.`);
+
+  // Afterwards the first cycle hasn't started yet: say when it does — and, when that is next
+  // week, what this week and the next turn into.
+  if (!after) return nextWeek.position ? `${starts}: ${sentence("this week is before the program", nextWeekIs(1))}` : `${starts}.`;
+  // A one-week program has one week to be in: only the count of cycles moves.
+  if (before && program.weeks.length === 1)
+    return `Every week is ${weekName(after, after.cycle)}, so only the cycle count changes: this week is cycle ${after.cycle} instead of ${before.cycle}.`;
+  // Delayed, this week is last week's over again; skipping ahead, it turns into next week's.
+  const thisWeek = `This week ${weeks > 0 ? "repeats" : "becomes"} ${weekName(after, before?.cycle ?? after.cycle)}`;
+  const text = sentence(thisWeek, nextWeekIs(after.cycle));
+  // Skipping ahead brought the start to this week: lead with the new start.
+  return before ? text : `${starts}: ${lowerFirst(text)}`;
+}
+
+/** Taps on the shift buttons closer together than this are one tap (a double-tap moves one week, not two). */
+export const SHIFT_GUARD_MS = 600;
+
+const weeksText = (n: number) => (n === 1 ? "a week" : `${n} weeks`);
+/** The toast for a start moved from `from` to `to` by the shift buttons: the net move, however many taps it took. */
+function shiftedMessage(from: ISODate, to: ISODate): string {
+  const weeks = Math.round(daysBetween(from, to) / 7);
+  return weeks > 0 ? `Program delayed ${weeksText(weeks)}` : `Program moved ahead ${weeksText(-weeks)}`;
 }
 
 function ShiftAction({
@@ -63,29 +107,26 @@ function ShiftAction({
   weeks,
   program,
   today,
-  undoable,
+  onShift,
 }: {
   label: string;
   weeks: 1 | -1;
   program: Program;
   today: ISODate;
-  undoable: UndoableProgram;
+  onShift: (to: ISODate, button: RefObject<HTMLButtonElement | null>) => void;
 }) {
   const effectId = useId();
-  const shifted = previewCycleShift(program, weeks, today).program;
-  const was = program.cycleStartDate;
+  const button = useRef<HTMLButtonElement>(null);
+  const to = previewCycleShift(program, weeks, today).program.cycleStartDate;
   return (
     <div className="py-3">
       <button
+        ref={button}
         type="button"
         className="btn-ghost"
         aria-describedby={effectId}
-        disabled={shifted.cycleStartDate === was}
-        onClick={() =>
-          undoable({ cycleStartDate: shifted.cycleStartDate }, `Plan moved a week ${weeks > 0 ? "later" : "earlier"}`, () => ({
-            cycleStartDate: was,
-          }))
-        }
+        disabled={to === program.cycleStartDate}
+        onClick={() => onShift(to, button)}
       >
         {label}
       </button>
@@ -97,8 +138,10 @@ function ShiftAction({
 }
 
 /**
- * Where the plan is today — cycle, week, the week's dates — and the controls that move it: the
- * cycle start date, and a week later / earlier in one tap (with Undo).
+ * Where the program is today — cycle, week, the week's dates — and the controls that move it:
+ * the cycle start date, and delaying it / skipping ahead a week in one tap. Every move of the
+ * start leaves one Undo toast: moves made while it is up fold into it (its Undo goes back to
+ * where the start was before the first), and it only undoes a start that is still where it put it.
  */
 export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEdit & { undoable: UndoableProgram; today: ISODate }) {
   const pos = cyclePosition(program, today);
@@ -107,6 +150,36 @@ export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEd
   // "Week 2" as a week's name adds nothing next to "Week 2 of 5"; a name of its own ("Heavy") does.
   const ownLabel = pos && pos.week.label.trim().toLowerCase() !== `week ${pos.weekIndex + 1}` ? pos.week.label : null;
   const deloadNote = pos?.week.deload && !/deload/i.test(ownLabel ?? "") ? "Deload week" : null;
+  const dateField = useRef<HTMLInputElement>(null);
+  const lastShift = useRef(0);
+
+  const moveStart = (to: ISODate, message: (from: ISODate) => string, control: RefObject<HTMLElement | null>) => {
+    const was = program.cycleStartDate;
+    if (to === was) return;
+    undoable<ISODate>(
+      { cycleStartDate: to },
+      {
+        fold: { key: "cycle-start", before: was, after: to },
+        message,
+        undo: (now, from) => {
+          // A tap after an Undo is a new decision, however soon it comes.
+          lastShift.current = 0;
+          // Relative: only a start that is still where this put it goes back.
+          return now.cycleStartDate === to ? { cycleStartDate: from } : null;
+        },
+        cantUndo: "Can't undo: the cycle start was changed again since.",
+        focus: () => control.current,
+      },
+    );
+  };
+  const shift = (to: ISODate, button: RefObject<HTMLButtonElement | null>) => {
+    // One move per tap: a double-tap (or a tap landing while the first is still being saved) is one.
+    const now = Date.now();
+    if (now - lastShift.current < SHIFT_GUARD_MS) return;
+    lastShift.current = now;
+    moveStart(to, (from) => shiftedMessage(from, to), button);
+  };
+
   return (
     <Section label="Now" id={id}>
       <div data-cycle-now="">
@@ -133,14 +206,19 @@ export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEd
       <div className="mt-3 divide-y divide-white/[0.04]">
         <Field label="Cycle start date" hint="Snaps to that week's Monday">
           <input
+            ref={dateField}
             type="date"
             value={program.cycleStartDate}
-            onChange={(e) => isISODate(e.target.value) && setProgram({ cycleStartDate: snapCycleStart(e.target.value) })}
+            onChange={(e) => {
+              if (!isISODate(e.target.value)) return;
+              const to = snapCycleStart(e.target.value);
+              moveStart(to, () => `Program starts ${weekdayName(to, true)} ${formatShortDate(to)}`, dateField);
+            }}
             className="field num rounded-xl bg-white/[0.05] px-3 py-2 text-base [color-scheme:dark]"
           />
         </Field>
-        <ShiftAction label="Start a week later" weeks={1} program={program} today={today} undoable={undoable} />
-        <ShiftAction label="Start a week earlier" weeks={-1} program={program} today={today} undoable={undoable} />
+        <ShiftAction label="Delay a week" weeks={1} program={program} today={today} onShift={shift} />
+        <ShiftAction label="Skip ahead a week" weeks={-1} program={program} today={today} onShift={shift} />
         {/* Long names need the full width: label above, the name below. */}
         <div className="py-3">
           <div className="text-sm text-fg-2">Program name</div>
@@ -164,24 +242,54 @@ export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEd
 // Weekly layout
 // ---------------------------------------------------------------------------
 
-export function WeeklyLayout({ program, setProgram, id }: ProgramEdit) {
+const WEEKDAY_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
+
+export function WeeklyLayout({ program, setProgram, undoable, id }: ProgramEdit & { undoable: UndoableProgram }) {
   const { data } = useData();
   const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
+  // The stored program has no place for a day that is off (days are keyed by weekday; a day
+  // without an entry isn't a lifting day), so what a day was when it was switched off is kept
+  // here for as long as the screen is open: switching it back on brings it back as it was.
+  const switchedOff = useRef<Record<string, ProgramDay>>({});
   return (
     <Section label="Weekly layout" id={id}>
       <div className="space-y-1">
         {WEEK_ORDER.map((wd) => {
-          const day = program.days[String(wd)];
+          const key = String(wd);
+          const day = program.days[key];
           const name = WEEKDAY_SHORT[wd]!;
-          const setDay = (patch: Partial<NonNullable<typeof day>> | null) => {
-            const days = { ...program.days };
-            if (patch === null) delete days[String(wd)];
-            else days[String(wd)] = { label: "Training", primaryExerciseId: null, progression: true, ...day, ...patch };
-            setProgram({ days });
+          const setDay = (patch: Partial<ProgramDay>) => day && setProgram({ days: { ...program.days, [key]: { ...day, ...patch } } });
+          const DAY_DEFAULT: ProgramDay = { label: "Training", primaryExerciseId: null, progression: true };
+          const setLifting = (on: boolean) => {
+            const fold = { key: `lifting-${key}`, before: true, after: on };
+            if (on) {
+              // Back on, as it was. That is what the "switched off" toast's Undo would do: the fold
+              // ends where it began, so a toast still on offer goes (and none is raised).
+              undoable<boolean>(
+                { days: { ...program.days, [key]: switchedOff.current[key] ?? DAY_DEFAULT } },
+                { fold, message: "", undo: () => null },
+              );
+              return;
+            }
+            if (!day) return;
+            switchedOff.current[key] = day;
+            const { [key]: _off, ...days } = program.days;
+            undoable<boolean>(
+              { days },
+              {
+                fold,
+                message: `${WEEKDAY_LONG[wd]} lifting switched off`,
+                // Its name, main lift and AMRAP setting go back — unless the day is a lifting day again by then.
+                undo: (now) => (now.days[key] ? null : { days: { ...now.days, [key]: day } }),
+                cantUndo: `Can't undo: ${WEEKDAY_LONG[wd]} is a lifting day again.`,
+                focus: () => document.querySelector<HTMLElement>(`[role="switch"][aria-label="${name} lifting day"]`),
+              },
+            );
           };
           return (
             <div key={wd} className="py-3">
-              <div className="flex items-center justify-between gap-3">
+              {/* At 200% zoom the switch (with its caption) drops under the name, right-aligned. */}
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
                 <span className={clsx("w-10 shrink-0 text-sm", day ? "text-fg" : "text-mute")}>{name}</span>
                 {day ? (
                   <InlineText
@@ -191,13 +299,19 @@ export function WeeklyLayout({ program, setProgram, id }: ProgramEdit) {
                     required
                     requiredMessage="Name the session."
                     onCommit={(label) => setDay({ label })}
-                    className="flex-1"
+                    className="min-w-[4.5rem] flex-1"
                     inputClassName="text-sm text-fg-2"
                   />
                 ) : (
-                  <span className="flex-1 text-sm text-mute">No lifting</span>
+                  <span className="min-w-[4.5rem] flex-1 text-sm text-mute">No lifting</span>
                 )}
-                <Toggle label={`${name} lifting day`} on={!!day} onChange={(v) => setDay(v ? {} : null)} />
+                {/* Two switches per day: each says what it switches. */}
+                <span className="ml-auto flex shrink-0 items-center gap-3">
+                  <span className="text-xs text-mute" aria-hidden>
+                    Lift
+                  </span>
+                  <Toggle label={`${name} lifting day`} on={!!day} onChange={setLifting} />
+                </span>
               </div>
               {day && (
                 <div className="mt-2 flex flex-wrap items-center gap-3 min-[25rem]:pl-[3.25rem]">
@@ -313,12 +427,19 @@ export function CycleWeeks({ program, setProgram, undoable, id }: ProgramEdit & 
                     aria-label={`Remove week ${i + 1}`}
                     className="tap -my-2 -mr-3 grid h-11 w-11 place-items-center text-mute"
                     onClick={() =>
-                      // Undo runs from a toast, later: the week goes back into the weeks as they are then.
-                      undoable({ weeks: program.weeks.filter((_, j) => j !== i) }, `Week ${i + 1} removed`, (now) => {
-                        const weeks = [...now.weeks];
-                        weeks.splice(Math.min(i, weeks.length), 0, w);
-                        return { weeks };
-                      })
+                      undoable(
+                        { weeks: program.weeks.filter((_, j) => j !== i) },
+                        {
+                          message: `Week ${i + 1} removed`,
+                          // Undo runs from a toast, later: the week goes back into the weeks as they are then.
+                          undo: (now) => {
+                            const weeks = [...now.weeks];
+                            weeks.splice(Math.min(i, weeks.length), 0, w);
+                            return { weeks };
+                          },
+                          focus: () => document.querySelector<HTMLElement>(`button[aria-label="Remove week ${i + 1}"]`),
+                        },
+                      )
                     }
                   >
                     <Trash2 size={14} />

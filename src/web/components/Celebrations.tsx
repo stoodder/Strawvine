@@ -1,10 +1,11 @@
 import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { addDays } from "../../shared/dates";
 import type { Achievement } from "../../shared/gamify";
 import { celebrate } from "../lib/haptics";
+import { cycleCelebrationsHeld, isCycleAchievement, subscribeCelebrationHold } from "./celebrationHold";
 import { useData, useMarkSeen } from "../lib/store";
 
 const TIER_LABEL: Record<Achievement["tier"], string> = {
@@ -36,6 +37,13 @@ function isBusy(): boolean {
 /**
  * Watches derived achievements and plays a restrained celebration for each new one, once —
  * at a calm moment: never while a field is focused, a sheet is open or an editor is in use.
+ *
+ * "Cycle N complete" follows the program's cycle start and length, so a program change can make
+ * one appear and its Undo take it back. A seen mark can't be taken back (it is stored on the
+ * server), so cycle achievements are handled with care: while such an Undo is on offer they are
+ * neither shown nor filed (`celebrationHold`), and an old one is never filed quietly — only a
+ * celebration that was actually shown and dismissed marks a cycle seen. That way a cycle that was
+ * "complete" only for a moment, or only on another device's stale copy, still gets its real one.
  */
 export function Celebrations() {
   const { data, today, achievements: all } = useData();
@@ -44,25 +52,34 @@ export function Celebrations() {
   // Keys already queued or dismissed this session. `seenAchievements` catches up a render
   // later, and without this a just-dismissed celebration would immediately queue again.
   const handled = useRef(new Set<string>());
+  // A program change's Undo is still on offer: cycle achievements wait (see above).
+  const held = useSyncExternalStore(subscribeCelebrationHold, cycleCelebrationsHeld, cycleCelebrationsHeld);
 
   useEffect(() => {
     const seen = new Set(data.seenAchievements);
-    const fresh = all.filter((a) => !seen.has(a.key) && !handled.current.has(a.key));
-    if (!fresh.length) return;
-    for (const a of fresh) handled.current.add(a.key);
     // Only celebrate recent things; quietly file away anything older.
     const cutoff = addDays(today, -3);
+    const fresh = all.filter((a) => {
+      if (seen.has(a.key) || handled.current.has(a.key)) return false;
+      // An old cycle achievement stays unfiled, and is looked at again on every change: its date
+      // moves with the program.
+      return !isCycleAchievement(a.key) || a.date >= cutoff;
+    });
+    if (!fresh.length) return;
+    for (const a of fresh) handled.current.add(a.key);
     const old = fresh.filter((a) => a.date < cutoff);
     if (old.length) markSeen(old.map((a) => a.key));
     const recent = fresh.filter((a) => a.date >= cutoff).reverse();
     if (recent.length) setQueue((q) => [...q, ...recent]);
   }, [all, data.seenAchievements, today, markSeen]);
 
-  // An edit can take an achievement back before it is shown; skip those.
+  // An edit can take an achievement back before it is shown; skip those — it shows after all if
+  // the edit is undone. A cycle achievement also waits out a program change's Undo: while it is
+  // on offer the cycle isn't shown, so it can't be dismissed (and marked seen) either.
   const live = useMemo(() => {
     const keys = new Set(all.map((a) => a.key));
-    return queue.filter((a) => keys.has(a.key));
-  }, [all, queue]);
+    return queue.filter((a) => keys.has(a.key) && !(held && isCycleAchievement(a.key)));
+  }, [all, queue, held]);
   const current = live[0];
 
   // Wait for a calm moment. Once showing, stay up until the queue is through.

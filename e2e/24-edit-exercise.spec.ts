@@ -1,6 +1,6 @@
 /**
  * Editing an exercise (§6.5): its measure, category and load change from the Edit exercise sheet —
- * opened from a session's exercise options or Settings' exercise library. History keeps the
+ * opened from a session's exercise options or Program's exercise library. History keeps the
  * measure it was done in; next week's pre-fill uses the new one (set count and loads carried,
  * targets reset); a session not finished shows an exercise with nothing logged in the new measure
  * without rewriting it — logging a set writes it — and changing back restores its own targets.

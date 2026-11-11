@@ -11,14 +11,12 @@ import { newId } from "../../shared/session";
 import type { Settings } from "../../shared/schemas";
 import { PaceSlider } from "../components/PaceSlider";
 import { formatProjectedRange } from "../components/projection";
-import { useToast } from "../components/Toast";
+import { ScreenHeader } from "../components/ScreenHeader";
+import { useSettingsUndo } from "../components/settings/undo";
 import { Bar, BoxNumber, Empty, Section, Sheet } from "../components/ui";
 import { useTitle } from "../components/useTitle";
 import { fmt, signed } from "../lib/format";
 import { useData, useSaveSettings } from "../lib/store";
-
-/** How long a pace change's Undo stays up (a toast with an action), and so how long nudges fold into one. */
-const PACE_UNDO_MS = 7000;
 
 export function GoalsScreen() {
   const { data, today, model } = useData();
@@ -33,47 +31,41 @@ export function GoalsScreen() {
   const [goalInput, setGoalInput] = useState<number | null>(null);
   const [goalDraft, setGoalDraft] = useState<number | null>(null);
   const [addingTarget, setAddingTarget] = useState(false);
-  const toast = useToast();
   useTitle("Goals");
-  // Undo runs later (from a toast); it must patch the settings as they are then, not now.
-  const latest = useRef(settings);
-  latest.current = settings;
-
   const save = (patch: Partial<Settings>) => void saveSettings({ ...settings, ...patch });
-  const undoable = (patch: Partial<Settings>, message: string, undo: (s: Settings) => Partial<Settings>) => {
+  // Undo runs later, from a toast — perhaps after this screen is gone: it changes only its own
+  // fields, on the settings as they are then (components/settings/undo.ts).
+  const rendered = useRef(settings);
+  rendered.current = settings;
+  const raiseUndo = useSettingsUndo(
+    (next) => void saveSettings(next),
+    () => rendered.current,
+  );
+  /** `undo` gets the settings as they are when Undo is tapped; null: it can't be undone any more. */
+  const undoable = (patch: Partial<Settings>, message: string, undo: (s: Settings) => Partial<Settings> | null) => {
     save(patch);
-    toast.show({
+    raiseUndo({
       message,
-      action: { label: "Undo", onAction: () => void saveSettings({ ...latest.current, ...undo(latest.current) }) },
+      undo: (now) => {
+        const back = undo(now);
+        return back && { ...now, ...back };
+      },
     });
   };
   // The pace sets the calorie targets, so a change is announced and can be taken back. One toast per
   // gesture (the slider commits on release); nudging again while that toast is still up replaces it,
-  // and its Undo goes back to the pace from before the first nudge.
-  const paceUndo = useRef<{ id: number; from: number; at: number } | null>(null);
+  // and its Undo goes back to the pace from before the first nudge — then focus returns to the slider.
   const commitPace = (pace: number) => {
     if (!goal) return;
-    const now = Date.now();
-    const prev = paceUndo.current && now - paceUndo.current.at < PACE_UNDO_MS ? paceUndo.current : null;
-    if (prev) toast.dismiss(prev.id);
-    const from = prev ? prev.from : goal.pacePctPerWeek;
     save({ weightGoal: { ...goal, pacePctPerWeek: pace } });
-    paceUndo.current = null;
-    if (pace === from) return; // back where it started: nothing to undo
     const sign = direction === "gain" ? "+" : direction === "lose" ? "−" : "";
-    const id = toast.show({
+    raiseUndo<number>({
+      fold: { key: "pace", before: goal.pacePctPerWeek, after: pace },
       message: `Pace set to ${sign}${pace.toFixed(2)}%/wk`,
-      duration: PACE_UNDO_MS,
-      action: {
-        label: "Undo",
-        onAction: () => {
-          paceUndo.current = null;
-          const s = latest.current;
-          if (s.weightGoal) void saveSettings({ ...s, weightGoal: { ...s.weightGoal, pacePctPerWeek: from } });
-        },
-      },
+      undo: (now, from) => now.weightGoal && { ...now, weightGoal: { ...now.weightGoal, pacePctPerWeek: from } },
+      cantUndo: "Can't undo: the goal was cleared since.",
+      focus: () => document.querySelector<HTMLElement>('input[type="range"][aria-label^="Pace"]'),
     });
-    paceUndo.current = { id, from, at: now };
   };
   const goalValue = goalDraft ?? goalInput;
   const goalValid = goalValue !== null && goalValue >= 50 && goalValue <= 1000;
@@ -91,12 +83,8 @@ export function GoalsScreen() {
 
   return (
     <div>
-      <header className="pt-2">
-        {/* The title matches the tab; the tagline is the eyebrow. */}
-        <div className="label text-fg-2">The why</div>
-        <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">Goals</h1>
-      </header>
-
+      {/* The title matches the tab; the tagline is the eyebrow. */}
+      <ScreenHeader eyebrow="The why" title="Goals" />
       {/* Weight goal */}
       <Section label="Goal weight">
         {goal ? (
@@ -151,7 +139,7 @@ export function GoalsScreen() {
               type="button"
               // 44px tall; the text sits where it did (mt-6 minus the extra height above it).
               className="label mt-3 -mb-3 inline-flex min-h-11 items-center text-mute"
-              onClick={() => undoable({ weightGoal: null }, "Goal cleared", () => ({ weightGoal: goal }))}
+              onClick={() => undoable({ weightGoal: null }, "Goal cleared", (now) => (now.weightGoal ? null : { weightGoal: goal }))}
             >
               Clear goal
             </button>

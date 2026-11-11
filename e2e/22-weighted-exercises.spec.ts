@@ -1,7 +1,7 @@
 /**
  * Weighted is its own choice, next to the measure: a weighted dead hang (time + load) shows and
  * logs a load; an unweighted plank (time only) has no load anywhere. The flag can be changed
- * later in the Edit exercise sheet (Settings → Exercise library).
+ * later in the Edit exercise sheet (Program → Exercise library).
  */
 import { expect, expectSynced, MONDAY, onboardedOn, openExerciseEditor, serverData, test, toastMessage } from "./helpers";
 
