@@ -20,7 +20,16 @@ export function StrengthView({ data, strong, onOpen }: { data: AppData; strong: 
   const anyTarget = data.settings.strengthTargets.length > 0;
   return (
     <Section label="Maxes">
-      {tracked.length === 0 && <Empty>No lift tracks a max yet. Turn on &ldquo;tracks a max&rdquo; for an exercise in Settings.</Empty>}
+      {tracked.length === 0 && (
+        <Empty>
+          No lift tracks a max yet. Turn on &ldquo;tracks a max&rdquo; for an exercise in{" "}
+          {/* The exercise library lives in Program (it left Settings); `hit` gives the inline link a taller target. */}
+          <Link to="/program#library" className="hit text-accent underline underline-offset-2">
+            Program&rsquo;s exercise library
+          </Link>
+          .
+        </Empty>
+      )}
       <div className="-mx-1">
         {tracked.map((ex) => {
           const entries = data.maxEntries

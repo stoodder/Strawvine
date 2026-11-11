@@ -226,7 +226,7 @@ describe("Today's checklist: the Morning check-in row carries the recovery numbe
 
   it("prompts for what it holds while nothing is logged", () => {
     render(<DayChecklist {...props} day={emptyDayLog(DATE)} />);
-    expect(lines(morning())).toEqual(["Weight · sleep · HRV"]);
+    expect(lines(morning())).toEqual(["Weight · sleep · recovery"]);
     expect(lines(fuel())).toEqual(["Daily totals"]);
     // The weight alone is the row's value, and still leaves the prompt.
     expect(morning().textContent).not.toContain("lb");
@@ -249,7 +249,10 @@ describe("Today's checklist: the Morning check-in row carries the recovery numbe
         }}
       />,
     );
-    expect(lines(morning())).toEqual(["7h 30m · sleep score 81 · HRV 55 · RHRresting heart rate 48", "VO2 51.6 · energy 4/5 · soreness 2/5"]);
+    expect(lines(morning())).toEqual([
+      "7h 30m · sleep score 81 · HRV 55 · RHRresting heart rate 48",
+      "VO2 51.6 · energy 4/5 · soreness 2/5",
+    ]);
     // The weight stays the row's right-hand value, beside the label.
     expect(morning().querySelector(".num")!.textContent).toBe("197.8 lb");
     // "RHR" on screen, "resting heart rate" for a screen reader (which spells the abbreviation out);
@@ -295,7 +298,27 @@ describe("Today's checklist: the Morning check-in row carries the recovery numbe
     expect(lines(fuel())).toEqual(["Daily totals"]);
     // With nothing at all, the prompt — not an empty line.
     rerender(<DayChecklist {...props} day={rest as DayLog} />);
-    expect(lines(morning())).toEqual(["Weight · sleep · HRV"]);
+    expect(lines(morning())).toEqual(["Weight · sleep · recovery"]);
+  });
+
+  it("a day from before sleep and HRV were logged (both undefined) shows the prompt, never 'NaNh' or 'HRV undefined'", () => {
+    const { sleepMinutes: _sleep, hrvMs: _hrv, sleepScore: _score, ...older } = emptyDayLog(DATE);
+    expect("sleepMinutes" in older || "hrvMs" in older).toBe(false);
+    const { rerender } = render(<DayChecklist {...props} day={older as DayLog} />);
+    expect(lines(morning())).toEqual(["Weight · sleep · recovery"]);
+    expect(morning().textContent).not.toMatch(/HRV|NaN|undefined|\dh/);
+    // With a weight (the row's value) and a rating, only those show.
+    rerender(<DayChecklist {...props} day={{ ...older, weightLb: 201.2, energy: 2 } as DayLog} />);
+    expect(lines(morning())).toEqual(["energy 2/5"]);
+    expect(morning().querySelector(".num")!.textContent).toBe("201.2 lb");
+    expect(morning().textContent).not.toMatch(/HRV|NaN|undefined|\dh/);
+  });
+
+  it("the prompt names what the row holds without singling out one reading: weight, sleep, recovery", () => {
+    render(<DayChecklist {...props} day={emptyDayLog(DATE)} />);
+    const prompt = lines(morning())[0]!;
+    expect(prompt).toBe("Weight · sleep · recovery");
+    expect(prompt).not.toMatch(/HRV/);
   });
 
   it("the Nutrition row still lists the Also today flags on a line of its own", () => {
@@ -355,4 +378,3 @@ describe("MorningEditor's 1–5 scales read as tappable and show the choice", ()
     expect(discs("Energy")).toEqual(["1:off", "2:off", "3:off", "4:off", "5:off"]);
   });
 });
-

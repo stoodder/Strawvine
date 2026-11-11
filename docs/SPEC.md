@@ -115,8 +115,8 @@ tile.
 - Today shows everything the morning check-in holds in that row's summary — there is no separate Recovery section. The
   weight is the row's value; under the label, two short lines that each fit a 320 px phone carry what was logged: the
   night's readings ("7h 12m · score 81 · HRV 62 · RHR 49"), then VO2 max and the ratings ("VO2 51.6 · energy 4/5 ·
-  soreness 2/5"). Nothing logged: the prompt "Weight · sleep · HRV". Screen readers hear "sleep score" and "resting
-  heart rate". A past day (`/day/:date`) shows the same row.
+  soreness 2/5"). Nothing logged: the prompt "Weight · sleep · recovery". Screen readers hear "sleep score" and
+  "resting heart rate". A past day (`/day/:date`) shows the same row.
 - Energy and soreness are 1–5 scales of numbered buttons (44 px targets), filled up to the chosen one; tapping the
   chosen one again clears it.
 - The weekly check-in (§4.6) shows the week's average resting HR and the latest VO2 max with its change over about a
@@ -228,22 +228,36 @@ logged, §3.5), and next week's recommended calories & macros. The Zone 2 kcal t
 "done": planned days with Zone 2 done; a reading on a day not done, or on an unplanned day, isn't in it.
 
 The card opens with a one-line **verdict**: the week's trend change against the plan (`weeklyRate` / `weeklyVerdict`,
-`src/shared/insights.ts` — the same rule as the rate-of-change insights in §7, so the two never disagree). Said in
-words with an icon, never by colour alone:
+`src/shared/insights.ts`). Said in words with an icon (a check, a dashed circle, a warning triangle), never by colour
+alone:
 
-| Verdict             | When                                                                                | Tone |
-| ------------------- | ----------------------------------------------------------------------------------- | ---- |
-| Not enough data yet | fewer than 10 logged days, or no trend weight a week apart                          | info |
-| Maintaining         | the plan is to hold (no goal, at the goal, past it); warns only past a safety limit | info |
-| On plan             | ≥ 60 % of the planned change, the planned way, within the safety limit              | good |
-| Slower than plan    | the planned way (or flat: a change that prints as 0.0 lb), under 60 %               | info |
-| Faster than plan    | the planned way, past the safety limit for that direction (§4.4)                    | warn |
-| Wrong direction     | against the plan                                                                    | warn |
+| Verdict             | When                                                                                          | Tone        |
+| ------------------- | --------------------------------------------------------------------------------------------- | ----------- |
+| Not enough data yet | fewer than 10 logged days, or no trend weight a week apart                                    | info        |
+| Maintaining         | the plan is to hold (no goal, at the goal, past it) and the trend is within the safety limits | info        |
+| Drifting            | the plan is to hold and the trend is past a safety limit (§4.4)                               | warn        |
+| On plan             | 60 % to 150 % of the planned change, the planned way, within the safety limit                 | good        |
+| Slower than plan    | the planned way, under 60 %                                                                   | info        |
+| Flat this week      | a change that prints as 0.0 lb, or as at most 0.2 lb against the plan: scale noise            | info        |
+| Faster than plan    | the planned way: more than 150 % of the plan (a note), or past the safety limit (a warning)   | info / warn |
+| Wrong direction     | against the plan by more than 0.2 lb (as printed)                                             | warn        |
 
-e.g. "On plan · −1.3 lb this week against −1.5"; past a limit it adds ", past your 1% weekly limit". The 10 days and
-the 60 % are insight constants (`RATE_MIN_LOGGED_DAYS`, `ON_PLAN_MIN_SHARE`), not training rules. Under the verdict the
-tiles are grouped: Body (TDEE, trend weight), Fuel (intake, protein), Activity (steps; lifts / metcon / Zone 2 counts),
-Recovery (sleep · HRV, resting HR, VO2 max).
+e.g. "On plan · −1.3 lb this week against −1.5 lb", "Flat this week · +0.1 lb against −1.5 lb", "Maintaining · trend
++0.2 lb this week"; past a limit it adds ", past your 1% weekly limit" and is always a warning, whatever the verdict
+(a change past a limit is never "flat").
+
+- `weeklyRate` is the rule, shared with the rate-of-change insights in §7: on plan is at least 60 % of the planned
+  change, the planned way, within the limit; past the limit that way is faster; against the plan by anything that
+  prints is the wrong way. The insights read it as is — "right on plan" covers everything `weeklyRate` has on plan.
+- `weeklyVerdict` words it, and for the reader splits three of its cases further: against the plan by no more than
+  0.2 lb as printed (or a week that prints as 0.0) is **flat**, not a warning; on plan by more than 1.5 × the plan is
+  **faster**, as a note; holding past a limit is **drifting**, not a calm "Maintaining". These are read at the precision
+  the change is shown in, so the title never contradicts the number under it.
+- The 10 days, the 60 %, the 0.2 lb and the 1.5 × are insight constants (`RATE_MIN_LOGGED_DAYS`, `ON_PLAN_MIN_SHARE`,
+  `FLAT_MAX_LB`, `FASTER_THAN_PLAN_SHARE`), not training rules.
+
+Under the verdict the tiles are grouped: Body (TDEE, trend weight), Fuel (intake, protein), Activity (steps; lifts /
+metcon / Zone 2 counts), Recovery (sleep · HRV, resting HR, VO2 max).
 
 ### 4.7 Progress views
 
@@ -254,13 +268,19 @@ targets as read-only progress; targets are edited on Goals).
 
 - The view is part of the URL (`/progress?view=body`; Week is `/progress`), so a reload, a link and Back land on it.
   Switching views replaces the history entry: Back leaves Progress instead of replaying taps.
+- The view last shown is **remembered for the session** (sessionStorage; nothing is remembered where storage is
+  unavailable): coming back to Progress from another screen — the tab bar links to the bare path — opens it again, and
+  puts it in the URL by replacing the bare entry. An explicit `?view=` always wins (`?view=week` is the week). Only a
+  link into the app's Progress restores: a fresh load of the bare path (a typed URL, a reload) and Back / Forward to
+  it are the week, as is the first visit. Tapping Progress while on Progress goes to the week.
 - Body, Fuel and Activity share one chart range (30 / 90 / All), shown at the top of each.
 - **Energy balance ends yesterday.** Today's intake is still being logged: once the day has a weight and its first
   meal, the engine's value for today (§4.1) averages in the calories _so far_, which would drag the intake line — and
   the TDEE derived from it — down every morning. So both lines, the "Latest" readout and the table stop at the last
   complete day (`energyBalanceSeries`), like the steps trend (§3.2) and the day's targets. The engine itself is
   unchanged; the bodyweight chart includes today (a weigh-in is a finished reading), and the intake strip shows today
-  dimmed, as "so far".
+  as unfinished: a hollow bar (an outline, like the steps chart's "so far" point) with "so far" under it where a
+  finished day shows its difference from the target (read out as "… 450 of 2,390 kcal, 1,940 left").
 
 ## 5. Goals
 
@@ -270,6 +290,14 @@ targets as read-only progress; targets are edited on Goals).
   ("Pace set to −0.75%/wk · Undo"); further nudges while that toast is up fold into it, and its Undo returns to the pace
   from before the first of them. On touch the thumb moves only for a drag along the track or a tap on it — a touch that
   turns into a vertical scroll changes nothing and scrolls the page.
+  - A finger is read from where it is, not from the browser's own slider (Chromium jumps its thumb to the finger at
+    once; iOS Safari moves it only when the 18 px thumb itself is grabbed, and never for a tap on the track): nothing
+    happens until it has travelled 8 px; along the track the thumb then follows it — from anywhere on the track,
+    keeping its offset when the finger landed on the thumb — and the pace is saved when it lifts; a tap on the track
+    sets the pace there, a tap on the thumb changes nothing.
+  - A second finger, a cancelled touch, or the page scrolling under the finger after all puts the pace back where it
+    was; nothing is saved.
+  - A change that comes with no gesture at all (a screen reader's increment) is saved at once, each on its own.
 - The **consistency heatmap** has a legend under it, in words beside a sample of each shade: nothing logged, partly
   done (brighter the more of the day's list is done), closed, and today's ring.
 - Strength targets per lift (e.g. Deadlift 600). A target is hit by a max entry at or above it dated on/after the day
@@ -496,7 +524,10 @@ links to the sections that moved (`/settings#program`, `/settings#training`) red
 - **Close the day**: today's checklist (morning check-in — done by the weigh-in alone — nutrition, steps target,
   zone 2, metcon, lift as scheduled or moved — see "Do this session today") — closing every item extends the streak.
 - Today's header places the day in the program in words (`cycleLabel`, `src/shared/program.ts`): "Week 2 of 5",
-  "Deload week", and from the second cycle on "Cycle 2 · Week 2 of 5".
+  "Deload week", and from the second cycle on "Cycle 2 · Week 2 of 5". It sits on a line of its own under what is left
+  of the day ("6 left to close the day"), so the pair never runs past two lines; where the header's text column is
+  narrow (a 320 px phone) each line drops its tail instead of wrapping: "6 left to close" over the short label
+  ("Cycle 2 · Week 1", "Deload").
 - Streaks, PR moments, cycle completions, calibration milestones, strength-target hits, goal weight.
 - Each achievement is celebrated once. A max gain the screen already showed (applying an AMRAP bump) is filed as seen
   in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or

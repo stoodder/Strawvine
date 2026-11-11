@@ -160,7 +160,7 @@ function morningSummary(day: DayLog): { sub: ReactNode; note?: ReactNode } {
   if (day.energy != null) felt.push(`energy ${day.energy}/5`);
   if (day.soreness != null) felt.push(`soreness ${day.soreness}/5`);
   const lines = [night, felt].filter((l) => l.length > 0).map(dotted);
-  if (lines.length === 0) return { sub: "Weight · sleep · HRV" };
+  if (lines.length === 0) return { sub: "Weight · sleep · recovery" };
   return { sub: lines[0], note: lines[1] };
 }
 

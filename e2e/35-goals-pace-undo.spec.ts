@@ -1,7 +1,8 @@
 /**
  * Goals' pace slider sets the calorie targets, so it is hard to nudge by accident and easy to take
  * back: a drag saves once (on release, not per tick) and raises "Pace set to … · Undo"; a finger
- * that scrolls the page across the slider never moves the thumb.
+ * that scrolls the page across the slider never moves the thumb, one that drags along it or taps
+ * the track does — read from where the finger is, so it doesn't hang on any browser's own slider.
  *
  * Touch goes through CDP (Input.dispatchTouchEvent → the browser's own gesture handling, so
  * touch-action and native scrolling apply); the mouse drag through Playwright's mouse.
@@ -29,7 +30,22 @@ async function thumb(page: Page) {
     const i = el as HTMLInputElement;
     return { min: Number(i.min), max: Number(i.max), value: Number(i.value) };
   });
-  return { x: box.x + 9 + ((value - min) / (max - min)) * (box.width - 18), y: box.y + box.height / 2, box };
+  return { x: box.x + 9 + ((value - min) / (max - min)) * (box.width - 18), y: box.y + box.height / 2, box, min, max };
+}
+
+/** The pace whose thumb position is nearest `x` (steps of 0.05 from the slowest pace). */
+function paceUnder(at: Awaited<ReturnType<typeof thumb>>, x: number) {
+  const fraction = Math.min(1, Math.max(0, (x - at.box.x - 9) / (at.box.width - 18)));
+  return +(at.min + Math.round((fraction * (at.max - at.min)) / 0.05) * 0.05).toFixed(2);
+}
+
+/** A one-finger tap at (x, y): down, a moment, up — no travel. */
+async function tap(page: Page, x: number, y: number) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  await page.waitForTimeout(40);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await cdp.detach();
 }
 
 /** A one-finger swipe from (x, y) by (dx, dy), in `steps` moves 16 ms apart, then the finger lifts. */
@@ -138,6 +154,56 @@ test("touch: scrolling the page across the slider never moves the thumb; a drag 
   expect(saves).toHaveLength(1);
 
   // Undo works after a touch too.
+  await notifications(page).getByRole("button", { name: "Undo" }).click();
+  await expect(slider(page)).toHaveValue("0.75");
+  await expectSynced(page);
+  await expect.poll(() => serverPace(page)).toBe(0.75);
+  expect(saves).toHaveLength(2);
+});
+
+test("touch: a tap on the track sets the pace there, once; a tap on the thumb doesn't; a drag may start anywhere on the track", async ({
+  page,
+}) => {
+  await openGoals(page);
+  const saves = settingsSaves(page);
+  const settled = async (pace: number) => {
+    await expect(slider(page)).toHaveValue(String(pace));
+    await expect(toastMessage(page, `Pace set to −${pace.toFixed(2)}%/wk`)).toBeVisible();
+    await expectSynced(page);
+    await expect.poll(() => serverPace(page)).toBe(pace);
+  };
+
+  // A tap on the thumb (a little off its centre): nothing moves, nothing is saved.
+  let at = await thumb(page);
+  await tap(page, at.x + 5, at.y);
+  await expect(slider(page)).toHaveValue("0.75");
+  expect(saves).toHaveLength(0);
+  await expect(notifications(page).getByRole("button", { name: "Undo" })).toHaveCount(0);
+
+  // A tap on the track, a quarter of the way along: the pace under the finger, saved once — and not
+  // again by the mouse events a browser makes up after a tap.
+  const quarter = paceUnder(at, at.box.x + at.box.width / 4);
+  expect(quarter).toBeLessThan(0.5);
+  await tap(page, at.box.x + at.box.width / 4, at.y);
+  await settled(quarter);
+  await page.waitForTimeout(800);
+  expect(saves).toHaveLength(1);
+  await expect(slider(page)).toHaveValue(String(quarter));
+  expect(await page.evaluate(() => window.scrollY), "a tap doesn't scroll the page").toBe(0);
+
+  // A drag that starts on the track, far from the thumb: the thumb comes to the finger and follows it.
+  at = await thumb(page);
+  const startX = at.box.x + at.box.width * 0.6;
+  const end = paceUnder(at, startX - 40);
+  expect(end).toBeGreaterThan(quarter);
+  expect(end).toBeLessThan(0.75);
+  await swipe(page, startX, at.y, -40, 4);
+  await settled(end);
+  expect(saves).toHaveLength(2);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+  // One toast for both nudges; its Undo goes back to where they began.
+  await expect(notifications(page).getByRole("button", { name: "Undo" })).toHaveCount(1);
   await notifications(page).getByRole("button", { name: "Undo" }).click();
   await expect(slider(page)).toHaveValue("0.75");
   await expectSynced(page);

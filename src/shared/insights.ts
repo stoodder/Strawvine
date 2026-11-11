@@ -245,24 +245,43 @@ export function weeklyRate(input: {
   return { kind, changeLb, pctPerWeek, planLb, overLimit, loggedCount };
 }
 
+/*
+ * The verdict's wording thresholds. They refine how `weeklyRate`'s kinds are *said*; the rule
+ * itself (and with it the rate insights) is untouched.
+ */
+/** Against the plan by no more than this (as printed), or 0.0: scale noise — "Flat this week". */
+export const FLAT_MAX_LB = 0.2;
+/** The planned way by more than this multiple of the plan, within the safety limit: "Faster than plan". */
+export const FASTER_THAN_PLAN_SHARE = 1.5;
+
+/**
+ * `weeklyRate`'s kinds as the verdict words them, plus two of its own:
+ * - `flat`: the week prints as 0.0 lb, or as at most `FLAT_MAX_LB` against the plan — noise, not a direction;
+ * - `drifting`: the plan is to hold and the trend is past a safety limit;
+ * - `faster` also covers the planned way by more than `FASTER_THAN_PLAN_SHARE` × the plan, within the limit.
+ */
+export type VerdictKind = RateKind | "flat" | "drifting";
+
 export interface WeeklyVerdict {
-  kind: RateKind;
+  kind: VerdictKind;
   /** good: on plan · warn: past a safety limit, or against the plan · info: everything else. */
   tone: Insight["tone"];
   /** "On plan" */
   title: string;
-  /** "−1.3 lb this week against −1.5" */
+  /** "−1.3 lb this week against −1.5 lb" */
   detail: string;
-  /** The whole line: "On plan · −1.3 lb this week against −1.5". */
+  /** The whole line: "On plan · −1.3 lb this week against −1.5 lb". */
   text: string;
 }
 
-const VERDICT_TITLE: Record<RateKind, string> = {
+const VERDICT_TITLE: Record<VerdictKind, string> = {
   "no-data": "Not enough data yet",
   maintaining: "Maintaining",
+  drifting: "Drifting",
   "on-plan": "On plan",
   faster: "Faster than plan",
   slower: "Slower than plan",
+  flat: "Flat this week",
   "wrong-way": "Wrong direction",
 };
 
@@ -273,28 +292,44 @@ function signedLb(n: number): string {
 }
 
 /**
- * The weekly check-in's headline: the week's trend change against the plan, in one line. It only
- * words `checkin.rate` (`weeklyRate`) — it has no thresholds of its own.
+ * The weekly check-in's headline: the week's trend change against the plan, in one line. It words
+ * `checkin.rate` (`weeklyRate`) and splits three of its kinds further for the reader; what counts
+ * as on plan, past a limit or against the plan is still `weeklyRate`'s call:
+ * - against the plan by a change that prints within `FLAT_MAX_LB` (or a week that prints as 0.0)
+ *   is "Flat this week", a note — "Wrong direction", a warning, starts beyond that;
+ * - on plan by more than `FASTER_THAN_PLAN_SHARE` × the plan is "Faster than plan", a note (past
+ *   the safety limit it already was, as a warning);
+ * - holding with the trend past a safety limit is "Drifting", not a calm "Maintaining".
  */
 export function weeklyVerdict(checkin: Pick<WeeklyCheckin, "rate">): WeeklyVerdict {
-  const { kind, changeLb, planLb, overLimit, loggedCount } = checkin.rate;
-  const title = VERDICT_TITLE[kind];
+  const { kind: rateKind, changeLb, planLb, overLimit, loggedCount } = checkin.rate;
+  let kind: VerdictKind = rateKind;
   let tone: Insight["tone"] = "info";
   let detail: string;
-  if (kind === "no-data" || changeLb === null) {
+  if (rateKind === "no-data" || changeLb === null) {
     detail =
       loggedCount < RATE_MIN_LOGGED_DAYS
         ? `the trend is judged after ${RATE_MIN_LOGGED_DAYS} logged days (${loggedCount} so far)`
         : "it takes trend weights a week apart";
   } else {
+    // Read at the precision the change is shown in, so the title never contradicts the number under it.
+    const printed = Number(Math.abs(changeLb).toFixed(1));
+    if (rateKind === "maintaining") {
+      if (overLimit) kind = "drifting";
+    } else if (!overLimit && ((rateKind === "slower" && printed === 0) || (rateKind === "wrong-way" && printed <= FLAT_MAX_LB)))
+      kind = "flat";
+    else if (rateKind === "on-plan" && Math.abs(changeLb) > Math.abs(planLb) * FASTER_THAN_PLAN_SHARE) kind = "faster";
+
     const limit = overLimit ? `, past your ${overLimit.limitPct}% weekly limit` : "";
     detail =
-      kind === "maintaining"
+      kind === "maintaining" || kind === "drifting"
         ? `trend ${signedLb(changeLb)} lb this week${limit}`
-        : `${signedLb(changeLb)} lb this week against ${signedLb(planLb)}${limit}`;
+        : // "Flat this week" has already said when.
+          `${signedLb(changeLb)} lb${kind === "flat" ? "" : " this week"} against ${signedLb(planLb)} lb${limit}`;
     if (overLimit || kind === "wrong-way") tone = "warn";
     else if (kind === "on-plan") tone = "good";
   }
+  const title = VERDICT_TITLE[kind];
   return { kind, tone, title, detail, text: `${title} · ${detail}` };
 }
 

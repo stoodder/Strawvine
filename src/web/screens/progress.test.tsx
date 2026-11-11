@@ -235,11 +235,12 @@ describe("Progress views: what each one shows", () => {
     show();
     expect(headings(2)).toEqual(["Weekly check-in"]);
     expect(headings(3)).toEqual(["Body", "Fuel", "Activity", "Recovery"]);
-    // A flat trend on a cut: slower than plan, in words (and an icon), not colour alone.
+    // A flat trend on a cut: said so, as a note — in words (and an icon), not colour alone.
     const verdict = document.querySelector("[data-verdict]")!;
-    expect(verdict.getAttribute("data-verdict")).toBe("slower");
-    expect(verdict.textContent).toMatch(/^Slower than plan · 0\.0 lb this week against −\d\.\d$/);
-    expect(verdict.querySelector("svg[aria-hidden]")).not.toBeNull();
+    expect(verdict.getAttribute("data-verdict")).toBe("flat");
+    expect(verdict.getAttribute("data-tone")).toBe("info");
+    expect(verdict.textContent).toMatch(/^Flat this week · 0\.0 lb against −\d\.\d lb$/);
+    expect(verdict.querySelector("svg[aria-hidden].lucide-circle-dashed")).not.toBeNull();
     const group = (name: string) => screen.getByRole("heading", { level: 3, name }).parentElement!;
     expect([...group("Body").querySelectorAll(".label")].map((l) => l.textContent)).toEqual(["TDEE", "Trend weight"]);
     expect([...group("Fuel").querySelectorAll(".label")].map((l) => l.textContent)).toEqual(["Avg intake", "Avg protein"]);

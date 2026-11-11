@@ -36,9 +36,12 @@ test("views switch from the tablist, live in the URL, and survive a reload, a de
   await expect(selected(page)).toHaveText("Week");
   await expect(page).toHaveURL(urlOf(null));
   const checkin = section(page, "Weekly check-in");
-  await expect(checkin.locator("[data-verdict]")).toHaveText(
-    /^(On plan|Faster than plan|Slower than plan|Wrong direction) · [+−]?\d+\.\d lb this week against −\d\.\d/,
-  );
+  // The seeded cut (0.75 %/week, about 1.5 lb) is losing ~1.3 lb a week: on plan, in lime with a check.
+  const verdict = checkin.locator("[data-verdict]");
+  await expect(verdict).toHaveText(/^On plan · −\d\.\d lb this week against −\d\.\d lb$/);
+  await expect(verdict).toHaveAttribute("data-verdict", "on-plan");
+  await expect(verdict).toHaveAttribute("data-tone", "good");
+  await expect(verdict.locator("svg.lucide-circle-check")).toHaveCount(1);
   await expect(checkin.getByRole("heading", { level: 3 })).toHaveText(["Body", "Fuel", "Activity", "Recovery"]);
   await expect(checkin.getByText("Next week")).toBeVisible();
 
@@ -90,6 +93,65 @@ test("views switch from the tablist, live in the URL, and survive a reload, a de
   await expect(section(page, "Energy balance").getByRole("img")).toBeVisible();
   await page.getByRole("link", { name: "Progress" }).click();
   await expect(selected(page)).toHaveText("Week");
+});
+
+test("the tab bar's Progress comes back to the view last shown; views and the restore leave no trail in the history", async ({ page }) => {
+  await onboardedOn(page, MONDAY);
+  await seedHistory(page);
+  await page.goto("/");
+  const nav = page.getByRole("navigation", { name: "Primary" });
+  const h1 = page.getByRole("heading", { level: 1 });
+  const toProgress = () => nav.getByRole("link", { name: "Progress" }).click();
+
+  // The first visit is the week.
+  await toProgress();
+  await expect(selected(page)).toHaveText("Week");
+  await expect(page).toHaveURL(urlOf(null));
+  await tab(page, "Body").click();
+  await tab(page, "Fuel").click();
+  await expect(page).toHaveURL(urlOf("fuel"));
+  // Views replace one another: Back leaves Progress instead of replaying the taps.
+  await page.goBack();
+  await expect(h1).toHaveText("Today");
+  await expect(page).toHaveURL(/\/$/);
+
+  // Back on Progress from the tab bar: Fuel again, in the URL too — so a reload keeps it.
+  await toProgress();
+  await expect(selected(page)).toHaveText("Fuel");
+  await expect(page).toHaveURL(urlOf("fuel"));
+  await expect(section(page, "Energy balance").getByRole("img")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Weekly check-in", exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(selected(page)).toHaveText("Fuel");
+  // The restore replaced the bare path: Back leaves Progress, it doesn't bounce back in.
+  await page.goBack();
+  await expect(h1).toHaveText("Today");
+
+  // From another tab as well; and it follows the view, not the first one remembered.
+  await toProgress();
+  await tab(page, "Strength").click();
+  await nav.getByRole("link", { name: "Goals" }).click();
+  await expect(h1).toHaveText("Goals");
+  await toProgress();
+  await expect(selected(page)).toHaveText("Strength");
+  await expect(page).toHaveURL(urlOf("strength"));
+
+  // Progress tapped while on Progress goes to the week — which is then what is remembered.
+  await toProgress();
+  await expect(selected(page)).toHaveText("Week");
+  await expect(page).toHaveURL(urlOf(null));
+  await nav.getByRole("link", { name: "Today" }).click();
+  await expect(h1).toHaveText("Today");
+  await toProgress();
+  await expect(selected(page)).toHaveText("Week");
+
+  // An explicit view wins over the memory; a fresh load of the bare path is the week.
+  await tab(page, "Activity").click();
+  await page.goto("/progress?view=body");
+  await expect(selected(page)).toHaveText("Body");
+  await page.goto("/progress");
+  await expect(selected(page)).toHaveText("Week");
+  await expect(page).toHaveURL(urlOf(null));
 });
 
 test("the control stays in reach while a view scrolls, and scrolls inside itself when narrow", async ({ page }) => {
@@ -217,8 +279,38 @@ test("logging today's weight and calories leaves Fuel's energy balance (and its 
   await energy.getByRole("button", { name: "Table" }).click();
   await expect(energy.getByRole("table").getByRole("row").nth(1)).toHaveText(/^Oct 25/);
   await expect(energy.getByRole("table").getByRole("row", { name: /^Oct 26/ })).toHaveCount(0);
-  // Today is on the intake strip, as "so far".
-  await expect(energy.getByText(/^Today so far: 450 of [\d,]+ kcal/)).toHaveCount(1);
+  // Today is on the intake strip, as "so far": to a screen reader ("… left", not "under")…
+  await expect(energy.getByText(/^Today so far: 450 of [\d,]+ kcal, [\d,]+ left$/)).toHaveCount(1);
+  // …and on screen, where a finished day shows its difference — on a hollow bar, not a filled one.
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 700 });
+    const todayColumn = energy.locator("li[data-day=today]");
+    const soFar = todayColumn.locator("[data-so-far]");
+    await expect(soFar).toBeVisible();
+    await expect(soFar).toHaveText("so far");
+    // On one line, inside its column.
+    const [box, column] = [(await soFar.boundingBox())!, (await todayColumn.boundingBox())!];
+    expect(box.height, `"so far" on one line at ${width}px`).toBeLessThan(20);
+    expect(await soFar.evaluate((el) => el.scrollWidth <= el.clientWidth), `"so far" fits its column at ${width}px`).toBe(true);
+    expect(box.x).toBeGreaterThanOrEqual(column.x - 0.5);
+    await expect(todayColumn.locator(".num")).toHaveCount(0);
+    const paint = (which: string) =>
+      energy
+        .locator(`li[data-day=${which}] .h-14 > div:not(.h-px)`)
+        .last()
+        .evaluate((el) => {
+          const s = getComputedStyle(el);
+          return { background: s.backgroundColor, shadow: s.boxShadow };
+        });
+    const [today, yesterday] = [await paint("today"), await paint("past")];
+    expect(today.shadow, "today's bar is outlined").toContain("inset");
+    expect(yesterday.shadow).not.toContain("inset");
+    expect(today.background, "today's bar isn't filled like a finished day's").not.toBe(yesterday.background);
+    // Finished days keep their difference.
+    await expect(energy.locator("li[data-day=past] .num").last()).toHaveText(/^([+−][\d.]+k?|0)$/);
+    await expect(energy.locator("li[data-day=past] [data-so-far]")).toHaveCount(0);
+    expect(await pageOverflow(page)).toBeNull();
+  }
   // And the bodyweight chart, where today's weigh-in is a finished reading, does include it.
   await tab(page, "Body").click();
   await expect(section(page, "Bodyweight").getByRole("img")).toHaveAttribute("aria-label", /^Bodyweight, Sep 27 to Oct 26\./);

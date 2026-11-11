@@ -44,6 +44,26 @@ describe("before the program starts", () => {
   });
 });
 
+describe("the day's checklist, as named", () => {
+  it("the morning item is the 'Morning check-in' (it holds sleep and recovery too), still done by the weigh-in alone", () => {
+    const date = "2026-11-03";
+    const items = (day?: DayLog) => checklist(date, day, undefined, settings);
+    const morning = (day?: DayLog) => items(day).find((i) => i.key === "morning")!;
+    expect(morning()).toMatchObject({ key: "morning", label: "Morning check-in", done: false });
+    expect(items()[0]!.key).toBe("morning");
+    // Sleep, HRV and the ratings don't close it; the weight does.
+    expect(morning({ ...emptyDayLog(date), sleepMinutes: 450, hrvMs: 60, energy: 4 }).done).toBe(false);
+    expect(morning(weighIn(date, 200))).toMatchObject({ label: "Morning check-in", done: true });
+    // It leads the list, ahead of Nutrition; the day's own reading (`dayChecklist`) names it the same.
+    expect(
+      items()
+        .slice(0, 2)
+        .map((i) => i.label),
+    ).toEqual(["Morning check-in", "Nutrition"]);
+    expect(dayChecklist(date, appData()).find((i) => i.key === "morning")!.label).toBe("Morning check-in");
+  });
+});
+
 describe("max PR achievements", () => {
   const initial: MaxEntry = {
     id: 1,

@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { Fragment, useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ChevronLeft, ChevronRight, Flame, Settings2 } from "lucide-react";
 import { addDays, isISODate, weekdayName } from "../../shared/dates";
@@ -7,7 +7,7 @@ import { CALIBRATION_DAYS } from "../../shared/energy";
 import { dayChecklist, isClosed } from "../../shared/gamify";
 import { targetsFor } from "../../shared/insights";
 import { overTarget, PROTEIN_OVER_TARGET_SCALE, remainingKcal, type OverTargetScale } from "../../shared/nutrition";
-import { cycleLabel, cyclePosition, programDayFor } from "../../shared/program";
+import { cycleLabel, cyclePosition, programDayFor, type CyclePosition } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
@@ -25,6 +25,21 @@ import { fmt, signed } from "../lib/format";
 import { success } from "../lib/haptics";
 import { useData, usePendingDates, useSaveDay } from "../lib/store";
 import { useTitle } from "../components/useTitle";
+
+/** Shown only where the header's text column has room for the long form (about 168 px at the default text size). */
+const WIDE_ONLY = "@max-[10.5rem]:hidden";
+
+/**
+ * Where the day sits in the program, as the short label (`cycleLabel(…, { short: true })`: "Week 2",
+ * "Deload", "Cycle 2 · Week 1") and the rest of the full one (" of 5", " week") — the tail a narrow
+ * header leaves out.
+ */
+export function cycleParts(pos: CyclePosition, weeksCount: number): { short: string; rest: string } {
+  const full = cycleLabel(pos, weeksCount);
+  const short = cycleLabel(pos, weeksCount, { short: true });
+  // The short label is the full one's start; were that ever not so, the full label is shown everywhere.
+  return full.startsWith(short) ? { short, rest: full.slice(short.length) } : { short: full, rest: "" };
+}
 
 export function TodayScreen() {
   const params = useParams();
@@ -64,6 +79,7 @@ export function TodayScreen() {
 
   const programDay = programDayFor(data.settings.program, date);
   const pos = cyclePosition(data.settings.program, date);
+  const cycle = pos ? cycleParts(pos, data.settings.program.weeks.length) : null;
   // This day's plan, moved to (and maybe done on) another day ("Do this session today").
   const doneEarly = session ? null : sessionDoneEarly(date, data.sessions);
   const draft = programDay && !session && !doneEarly ? buildSession(date, data) : null;
@@ -123,29 +139,35 @@ export function TodayScreen() {
       {/* Hero */}
       {/* At 200% zoom the streak and ring wrap under the title instead of squeezing it. */}
       <div className="mt-6 flex flex-wrap items-center justify-between gap-x-5 gap-y-4">
-        <div className="min-w-32 flex-1">
+        {/* A container: the lines under the title shorten to the room this column really has (beside the streak and ring). */}
+        <div className="@container min-w-32 flex-1">
           <h1 className="text-[clamp(1.75rem,11vw,2.75rem)] leading-none font-light tracking-tight">
             {isToday ? "Today" : weekdayName(date)}
           </h1>
-          {/* Balanced, so a wrap doesn't leave the "·" dangling at the end of the first line. */}
-          <p className="mt-3 text-sm text-balance text-mute">
-            {closed ? (
-              <span className="text-accent">Day closed. Nicely done.</span>
-            ) : (
-              <>
-                <span className="num text-fg-2">{items.length - doneCount}</span> left to close the day
-              </>
+          {/* Two lines, each its own: what is left of the day, then where the day sits in the program. Where the
+              column is narrow (a 320 px phone) each drops its tail — "6 left to close" / "Cycle 2 · Week 1" —
+              rather than wrap into a third line or break mid-phrase. */}
+          <p className="mt-3 text-sm text-mute" data-day-sub="">
+            <span className="block">
+              {closed ? (
+                <span className="text-accent">
+                  Day closed.<span className={WIDE_ONLY}> Nicely done.</span>
+                </span>
+              ) : (
+                <>
+                  <span className="num text-fg-2">{items.length - doneCount}</span> left to close
+                  <span className={WIDE_ONLY}> the day</span>
+                </>
+              )}
+            </span>
+            {cycle && (
+              <span className="block" data-cycle="">
+                {/* One paragraph to a screen reader (and to `textContent`): "… the day · Week 2 of 5". */}
+                <span className="sr-only"> · </span>
+                {cycle.short}
+                {cycle.rest && <span className={WIDE_ONLY}>{cycle.rest}</span>}
+              </span>
             )}
-            {/* "Week 2 of 5" · "Deload week" · "Cycle 2 · Week 1 of 5": breaks between its parts, never inside one. */}
-            {pos &&
-              cycleLabel(pos, data.settings.program.weeks.length)
-                .split(" · ")
-                .map((part) => (
-                  <Fragment key={part}>
-                    {" · "}
-                    <span className="whitespace-nowrap">{part}</span>
-                  </Fragment>
-                ))}
           </p>
           {!isToday && (
             // Same as Train's: 44px tall, without pushing the hero down.
