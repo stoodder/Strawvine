@@ -53,14 +53,17 @@ for (const width of [195, 320]) {
       await page.waitForTimeout(500);
     };
 
-    test("Train: the dock fits with the rest timer and a toast", async ({ page }) => {
+    test("Train: the dock fits with the rest timer, a toast and Finish", async ({ page }) => {
       await fillTheDock(page);
       expect(await outside(dock(page)), `the dock at ${width} px`).toEqual([]);
+      // Finish sits nearest the nav, under the toast: it doesn't move when the toast or the rest pill go.
+      // At 200% zoom the screen is too short for all three: Finish leaves the dock (it's still on the page).
+      const finish = notifications(page).getByRole("button", { name: /^Finish · 1\/\d+ sets$/ });
+      const undo = notifications(page).getByRole("button", { name: "Undo" });
+      if (width === 195) await expect(finish).toBeHidden();
+      else expect((await finish.boundingBox())!.y, "Finish is below the toast").toBeGreaterThan((await undo.boundingBox())!.y);
       // The dock's controls stay reachable: each is fully inside the viewport.
-      for (const control of [
-        page.getByRole("button", { name: "Dismiss rest timer" }),
-        notifications(page).getByRole("button", { name: "Undo" }),
-      ]) {
+      for (const control of [page.getByRole("button", { name: "Dismiss rest timer" }), undo, ...(width === 195 ? [] : [finish])]) {
         const box = (await control.boundingBox())!;
         expect(box.x, "dock control left edge").toBeGreaterThanOrEqual(0);
         expect(box.x + box.width, "dock control right edge").toBeLessThanOrEqual(width + 0.5);

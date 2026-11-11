@@ -15,17 +15,21 @@ export function measureUnit(m: Measure): string {
   return m === "seconds" ? "s" : m === "meters" ? "m" : "";
 }
 
-export function Plates({ weight }: { weight: number | null }) {
+/**
+ * The plates to load per side for `weight` (nothing for an empty bar or less). `label` leads the
+ * row in place of "per side" — e.g. "Set 3 · per side" under a list of sets, to say which one.
+ */
+export function Plates({ weight, label = "per side" }: { weight: number | null; label?: string }) {
   if (!weight || weight <= 45) return null;
   const { plates, remainder } = platesPerSide(weight);
   return (
     <div
       role="img"
-      className="flex flex-wrap items-center gap-1.5"
-      aria-label={`Plates per side: ${plates.join(", ")}${remainder > 0 ? `, plus ${remainder} lb` : ""}`}
+      className="flex min-h-6 flex-wrap items-center gap-1.5"
+      aria-label={`${label === "per side" ? "Plates per side" : `Plates, ${label.replace(" · ", ", ")}`}: ${plates.join(", ")}${remainder > 0 ? `, plus ${remainder} lb` : ""}`}
     >
       <span className="label mr-1 whitespace-nowrap" aria-hidden>
-        per side
+        {label}
       </span>
       {plates.map((p, i) => (
         <span

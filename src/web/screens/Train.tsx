@@ -21,7 +21,7 @@ import {
 import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { trainingPrefs } from "../../shared/defaults";
 import { amrapPrs } from "../../shared/gamify";
-import { currentMax, cyclePosition, programDayFor, progressionGain } from "../../shared/program";
+import { currentMax, cycleLabel, cyclePosition, programDayFor, progressionGain } from "../../shared/program";
 import type { Block, BlockExercise, Exercise, Session, SetEntry } from "../../shared/schemas";
 import {
   accessoryHint,
@@ -33,7 +33,6 @@ import {
   isSessionStarted,
   isWeighted,
   logAtTargets,
-  needsLoadBeforeLogging,
   newId,
   nextSetAfter,
   planChanged,
@@ -59,7 +58,7 @@ import {
   type ExPlace,
 } from "../../shared/sessionStructure";
 import { useDockHeight, useDockTop } from "../components/Dock";
-import { CheckDot, Empty, Section, Sheet } from "../components/ui";
+import { Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
 import { DateJump } from "../components/today/DateJump";
 import { addStandings, rejoinSuperset } from "../../shared/sessionStructureUndo";
@@ -70,9 +69,10 @@ import { RestTimer, useRestTimer } from "../components/train/RestTimer";
 import { SupersetSheet, WorkoutOrderSheet } from "../components/train/SupersetSheets";
 import { useDismissedHints } from "../components/train/hintDismiss";
 import { afterLayout, useRevealAboveDock, whenReady } from "../components/train/reveal";
-import { MainSetButton, PlannedChip, SetChip } from "../components/train/SetControls";
+import { AccessorySetRow, MainSetRow } from "../components/train/SetControls";
 import { AmrapSheet, measureUnit, Plates, SetEditSheet, type AmrapRepPr } from "../components/train/SetSheets";
 import {
+  checkAction,
   describeSet,
   findSet,
   mapBlock,
@@ -393,17 +393,18 @@ export function TrainScreen() {
   const toggleDone = (ref: SetRef) => {
     const found = findSet(session, ref);
     if (!found || found.block.skipped) return;
-    if (found.set.amrap && !found.set.done) return setAmrap(ref);
     const weighted = loadedIn(found.block, found.ex.exerciseId);
-    // A weighted accessory set with no load yet: a tap would log it without one, so the set
-    // editor opens to set the load first.
-    if (found.block.kind === "accessory" && needsLoadBeforeLogging(found.set, weighted)) return setEditing(ref);
+    // An AMRAP needs its real count (the rep counter); a weighted accessory set with no load yet
+    // would be logged without one, so the set editor opens to set the load first.
+    const action = checkAction(found.set, found.block.kind, weighted);
+    if (action === "count") return setAmrap(ref);
+    if (action === "load") return setEditing(ref);
     const logging = !found.set.done;
     const next = mapSet(session, ref, (x) => (x.done ? { ...x, done: false } : logAtTargets(x, weighted)));
     tick();
-    // A main-lift set gets no undo toast: tapping the row again unlogs it, and the toast would sit
-    // in the dock right over the next set. Accessory chips are small and dense, so they keep a
-    // short one.
+    // A main-lift set gets no undo toast: its check unlogs it again, and the toast would sit in
+    // the dock right over the next set. Accessory rows are compact and close together, so a
+    // stray tap there keeps a short one.
     if (found.block.kind === "primary") commit(next);
     else commit(next, { message: `${setLabel(ref)} ${logging ? "logged" : "unlogged"}`, scope: ref, duration: 4000 });
     if (logging) {
@@ -522,6 +523,8 @@ export function TrainScreen() {
    * same sets back; later, "Restore" rebuilds the prescribed ones from the plan.
    */
   const openMain = primaryEx?.sets.filter((s) => !s.done).length ?? 0;
+  /** The main lift's next open set: the one the plates under the rows are for. */
+  const nextMain = primaryEx?.sets.find((s) => !s.done) ?? null;
   const skipRestOfMain = () => {
     if (!primaryBlock || !primaryEx || !openMain) return;
     const ref = { blockId: primaryBlock.id, exIdx: 0 };
@@ -926,7 +929,8 @@ export function TrainScreen() {
 
   return (
     <div>
-      <header className="flex items-center justify-between gap-2 pt-2">
+      {/* The program link drops to a line of its own (still at the right) when the dates leave it no room. */}
+      <header className="flex flex-wrap items-center justify-between gap-x-2 pt-2">
         <div className="flex min-w-0 items-center">
           <button
             type="button"
@@ -949,14 +953,19 @@ export function TrainScreen() {
           </button>
         </div>
         {pos && (
-          <div className="label whitespace-nowrap">
-            <span aria-hidden>
-              C{pos.cycle} · {pos.week.deload ? <span className="text-fg-2">Deload</span> : `W${pos.weekIndex + 1}/${program.weeks.length}`}
-            </span>
-            <span className="sr-only">
-              Cycle {pos.cycle}, {pos.week.deload ? "deload week" : `week ${pos.weekIndex + 1} of ${program.weeks.length}`}
-            </span>
-          </div>
+          // Where this session sits in the program, in plain words; the program itself is a tap away.
+          <Link
+            to="/program"
+            aria-label={`Program: ${cycleLabel(pos, program)}`}
+            // Plain small text rather than the wide mono label: "Cycle 2 · Week 1 of 5" still fits beside the dates on a 375 px phone.
+            className={clsx(
+              "tap -mr-2 ml-auto inline-flex min-h-11 items-center gap-1 px-2 text-xs whitespace-nowrap",
+              pos.week.deload ? "text-fg-2" : "text-mute",
+            )}
+          >
+            {cycleLabel(pos, program)}
+            <ChevronRight size={12} aria-hidden className="opacity-60" />
+          </Link>
         )}
       </header>
 
@@ -1214,83 +1223,31 @@ export function TrainScreen() {
                       </button>
                     )}
                   </div>
-                  <div>
+                  <ul aria-label={`${primaryName} sets`}>
                     {primaryEx.sets.map((s, i) => {
                       const ref = { blockId: primaryBlock.id, exIdx: 0, setId: s.id };
-                      const over = s.amrap && s.done && s.reps !== null && s.targetReps !== null ? s.reps - s.targetReps : 0;
-                      const beat = over > 0;
-                      const extra = i >= plannedCount;
-                      const tag = s.amrap
-                        ? beat
-                          ? `+${over} reps${s.appliedProgressionLb ? ` · +${s.appliedProgressionLb} lb` : ""}`
-                          : "AMRAP"
-                        : extra
-                          ? "back-off"
-                          : null;
-                      if (isPreview)
-                        return (
-                          <div key={s.id} className="flex min-h-11 items-center gap-4 py-2">
-                            <span className="label w-5" aria-hidden>
-                              {i + 1}
-                            </span>
-                            <span className="sr-only">{`Set ${i + 1}: ${describeSet(s, "reps")}${s.amrap ? ", AMRAP" : ""}`}</span>
-                            <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-1" aria-hidden>
-                              <span className="num text-3xl font-light tracking-tight text-fg-2">{s.targetWeight}</span>
-                              <span className="text-sm whitespace-nowrap text-mute">
-                                × {s.targetReps}
-                                {s.amrap && "+"}
-                              </span>
-                              {tag && <span className={clsx("label whitespace-nowrap", s.amrap ? "text-accent" : "text-mute")}>{tag}</span>}
-                            </span>
-                          </div>
-                        );
                       return (
-                        <div key={s.id} data-set={s.id} data-open={s.done ? undefined : ""} className="flex items-center gap-4 py-2">
-                          <span className="label w-5" aria-hidden>
-                            {i + 1}
-                          </span>
-                          <MainSetButton
-                            srPrefix={`${primaryName} set ${i + 1}:`}
-                            pressed={s.done}
-                            describedBy={hintId}
-                            onTap={() => toggleDone(ref)}
-                            onHold={() => (s.amrap ? setAmrap(ref) : setEditing(ref))}
-                          >
-                            <span className={clsx("num text-3xl font-light tracking-tight", s.done ? "text-fg" : "text-fg-2")}>
-                              {s.done ? s.weight : s.targetWeight}
-                            </span>
-                            {/* Flex items drop the spaces between them; keep them in the accessible name. */}
-                            <span className="sr-only">{"\u00a0"}</span>
-                            <span className="text-sm whitespace-nowrap text-mute">
-                              × {s.done ? s.reps : s.targetReps}
-                              {s.amrap && !s.done && "+"}
-                            </span>
-                            {tag && (
-                              <>
-                                <span className="sr-only">{"\u00a0"}</span>
-                                <span
-                                  className={clsx("label whitespace-nowrap", s.amrap ? (beat ? "text-gold" : "text-accent") : "text-mute")}
-                                >
-                                  {tag}
-                                </span>
-                              </>
-                            )}
-                          </MainSetButton>
-                          {/* CheckDot carries its own hc-edge (high contrast). */}
-                          <CheckDot
-                            done={s.done}
-                            tone={beat ? "gold" : "accent"}
-                            onClick={() => toggleDone(ref)}
-                            label={`${primaryName} set ${i + 1} logged`}
-                          />
-                        </div>
+                        <MainSetRow
+                          key={s.id}
+                          dataSet={s.id}
+                          exerciseName={primaryName}
+                          index={i}
+                          set={s}
+                          extra={i >= plannedCount}
+                          preview={isPreview}
+                          onCheck={() => toggleDone(ref)}
+                          // An AMRAP is edited where it's counted (reps, load, the max bump).
+                          onEdit={() => (s.amrap ? setAmrap(ref) : setEditing(ref))}
+                        />
                       );
                     })}
-                  </div>
+                  </ul>
                   <div className="mt-1 flex min-h-11 flex-wrap items-center justify-between gap-x-4 gap-y-1">
-                    <div className="min-h-6">
-                      <Plates weight={primaryEx.sets.find((s) => !s.done)?.targetWeight ?? null} />
-                    </div>
+                    {/* What to load for the next open set — named, so it's clear which row the plates are for. */}
+                    <Plates
+                      weight={nextMain?.targetWeight ?? null}
+                      label={nextMain && !isPreview ? `Set ${primaryEx.sets.indexOf(nextMain) + 1} · per side` : undefined}
+                    />
                     {!isPreview && (
                       <div className="-mr-2 ml-auto flex items-center">
                         {missingMain.length > 0 && (
@@ -1366,7 +1323,8 @@ export function TrainScreen() {
               const superset = b.exercises.length > 1;
               const letter = letters.get(b.id) ?? "";
               return (
-                <div key={b.id} data-block={b.id} className="mb-8">
+                // Each exercise ends in its "+ set" row (or, in a preview, nothing): that row is most of the gap to the next block.
+                <div key={b.id} data-block={b.id} className={isPreview ? "mb-8" : "mb-3"}>
                   {superset &&
                     (isPreview ? (
                       <div className="mb-2 flex items-center gap-2 text-glow">
@@ -1442,7 +1400,7 @@ export function TrainScreen() {
                             });
                       const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
                       return (
-                        <div key={exKey(e, exIdx, b.id)} className={clsx(exIdx > 0 && "mt-5")}>
+                        <div key={exKey(e, exIdx, b.id)} className={clsx(exIdx > 0 && (isPreview ? "mt-5" : "mt-1"))}>
                           <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
                             <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
                               {tagLabel}
@@ -1502,42 +1460,40 @@ export function TrainScreen() {
                               </button>
                             </div>
                           )}
-                          {isPreview ? (
-                            <ul className="mt-1 flex flex-wrap gap-2" aria-label={`${name} sets`}>
-                              {e.sets.map((s, si) => (
-                                <PlannedChip key={s.id} index={si} set={s} measure={e.measure} weighted={weighted} />
-                              ))}
-                            </ul>
-                          ) : (
-                            <div className="mt-1 flex flex-wrap gap-2">
-                              {e.sets.map((s, si) => {
-                                const setRef = { ...ref, setId: s.id };
-                                return (
-                                  <SetChip
-                                    key={s.id}
-                                    dataSet={s.id}
-                                    open={!s.done}
-                                    exerciseName={name}
-                                    index={si}
-                                    set={s}
-                                    measure={e.measure}
-                                    weighted={weighted}
-                                    describedBy={hintId}
-                                    onTap={() => toggleDone(setRef)}
-                                    onHold={() => setEditing(setRef)}
-                                  />
-                                );
-                              })}
-                              {e.sets.length < MAX_SETS && (
-                                <button
-                                  type="button"
-                                  aria-label={`Add ${name} set`}
-                                  className="tap hc-edge grid h-[52px] w-11 place-items-center rounded-2xl text-mute ring-1 ring-white/[0.06] ring-inset"
-                                  onClick={() => addAccessorySet(ref)}
-                                >
-                                  <Plus size={14} />
-                                </button>
-                              )}
+                          {/* The same rows as the main lift, compact: values open the editor, the check logs. */}
+                          <ul aria-label={`${name} sets`}>
+                            {e.sets.map((s, si) => {
+                              const setRef = { ...ref, setId: s.id };
+                              return (
+                                <AccessorySetRow
+                                  key={s.id}
+                                  dataSet={s.id}
+                                  exerciseName={name}
+                                  index={si}
+                                  set={s}
+                                  measure={e.measure}
+                                  weighted={weighted}
+                                  needsLoad={checkAction(s, "accessory", weighted) === "load"}
+                                  preview={isPreview}
+                                  onCheck={() => toggleDone(setRef)}
+                                  onEdit={() => setEditing(setRef)}
+                                />
+                              );
+                            })}
+                          </ul>
+                          {!isPreview && e.sets.length < MAX_SETS && (
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                aria-label={`Add ${name} set`}
+                                className="tap label -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                                onClick={() => {
+                                  addAccessorySet(ref);
+                                  tick();
+                                }}
+                              >
+                                <Plus size={12} aria-hidden /> set
+                              </button>
                             </div>
                           )}
                         </div>
@@ -1560,28 +1516,22 @@ export function TrainScreen() {
                 {primaryBlock ? `; main-lift loads use today's max and move with any AMRAP before then` : ""}.
               </p>
             ) : (
-              <>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    disabled={blocksFull}
-                    aria-describedby={blocksFull ? `${hintId}-full` : undefined}
-                    onClick={() => setAdding({ mode: "new" })}
-                  >
-                    <Plus size={16} /> Exercise
-                  </button>
-                  {blocksFull && (
-                    <span id={`${hintId}-full`} className="text-xs text-mute">
-                      A session holds up to {MAX_BLOCKS} blocks
-                    </span>
-                  )}
-                </div>
-                <p id={hintId} className="mt-4 text-xs text-mute">
-                  Tap a set to log it · hold to edit
-                  <span className="sr-only">. With a keyboard, press Shift+F10 or the context-menu key on a set to edit it.</span>
-                </p>
-              </>
+              <div className={clsx("flex flex-wrap items-center gap-x-4 gap-y-2", accessories.length > 0 && "mt-6")}>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  disabled={blocksFull}
+                  aria-describedby={blocksFull ? `${hintId}-full` : undefined}
+                  onClick={() => setAdding({ mode: "new" })}
+                >
+                  <Plus size={16} /> Exercise
+                </button>
+                {blocksFull && (
+                  <span id={`${hintId}-full`} className="text-xs text-mute">
+                    A session holds up to {MAX_BLOCKS} blocks
+                  </span>
+                )}
+              </div>
             )}
           </Section>
 
@@ -1601,6 +1551,7 @@ export function TrainScreen() {
               <div className="mt-10 flex flex-col items-center gap-4">
                 <FinishPanel
                   session={session}
+                  dock
                   allowEmpty={primarySkipped}
                   doneSets={doneSets}
                   totalSets={totalSets}
@@ -1833,24 +1784,9 @@ export function TrainScreen() {
 
       <Sheet open={!!actionsEx} onClose={() => setActions(null)} title={actionsEx ? exName(actionsEx.exerciseId) : ""}>
         {actions && actionsBlock && actionsEx && (
+          // In order of use mid-session: log as planned, the sets, the superset, skip — then what
+          // changes the exercise everywhere (edit), and last what takes it out (remove).
           <div className="pb-2">
-            {exById(actionsEx.exerciseId) && (
-              <button
-                type="button"
-                aria-haspopup="dialog"
-                className="tap mb-6 flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
-                onClick={() => {
-                  setEditingExercise({ id: actionsEx.exerciseId, ref: actions });
-                  setActions(null);
-                }}
-              >
-                <Pencil size={16} aria-hidden className="shrink-0 text-mute" />
-                <span className="min-w-0">
-                  Edit exercise
-                  <span className="block text-xs text-fg-2">Name, category, measure, load, max · every session</span>
-                </span>
-              </button>
-            )}
             {(() => {
               // "Log as planned": this exercise's open sets, and for a superset the next round / the whole block.
               const exOpen = actionsEx.sets.filter(loggable).length;
@@ -2042,6 +1978,23 @@ export function TrainScreen() {
                   <span className="block text-xs text-fg-2">Stays in next {weekday}'s plan</span>
                 </span>
               </button>
+              {exById(actionsEx.exerciseId) && (
+                <button
+                  type="button"
+                  aria-haspopup="dialog"
+                  className="tap flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-4 py-3.5 text-left"
+                  onClick={() => {
+                    setEditingExercise({ id: actionsEx.exerciseId, ref: actions });
+                    setActions(null);
+                  }}
+                >
+                  <Pencil size={16} aria-hidden className="shrink-0 text-mute" />
+                  <span className="min-w-0">
+                    Edit exercise
+                    <span className="block text-xs text-fg-2">Name, category, measure, load, max · every session</span>
+                  </span>
+                </button>
+              )}
               <button
                 type="button"
                 className="tap flex w-full items-center gap-3 rounded-2xl bg-warn/[0.06] px-4 py-3.5 text-left text-warn"

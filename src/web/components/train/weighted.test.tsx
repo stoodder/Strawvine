@@ -1,6 +1,6 @@
 /**
  * Weighted exercises (any measure + a load): creating one, showing or hiding the load on set
- * chips and in the set editor. (Editing an exercise: EditExerciseSheet.test.tsx.)
+ * rows and in the set editor. (Editing an exercise: EditExerciseSheet.test.tsx.)
  */
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -8,7 +8,7 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { Exercise, SetEntry } from "../../../shared/schemas";
 import { AddExerciseSheet } from "./AddExerciseSheet";
-import { PlannedChip, SetChip } from "./SetControls";
+import { AccessorySetRow } from "./SetControls";
 import { SetEditSheet } from "./SetSheets";
 import { describeSet } from "./sessionEdit";
 
@@ -167,46 +167,63 @@ describe("creating an exercise", () => {
   });
 });
 
-describe("set chips", () => {
-  // jsdom trims the spaces inside the sr-only spans (" at ", " lb") that browsers keep: compare without them.
-  const named = (text: string) => (name: string) => name.replace(/\s/g, "") === text.replace(/\s/g, "");
+describe("set rows", () => {
   const element = (s: SetEntry, weighted: boolean) => (
-    <SetChip exerciseName="Hang" index={0} set={s} measure="seconds" weighted={weighted} onTap={() => {}} onHold={() => {}} />
+    <ul>
+      <AccessorySetRow exerciseName="Hang" index={0} set={s} measure="seconds" weighted={weighted} onCheck={() => {}} onEdit={() => {}} />
+    </ul>
   );
-  const chip = (s: SetEntry, weighted: boolean) => render(element(s, weighted), { container: root() });
+  const row = (s: SetEntry, weighted: boolean) => render(element(s, weighted), { container: root() });
+  /** What the row shows after its set number (its values control, named by it; the check, named `name`, has no text). */
+  const shown = (name: string) => {
+    expect(screen.getByRole("button", { name, pressed: false })).toBeTruthy();
+    const values = screen.getByRole("button", { name: /^Edit Hang set 1: / });
+    expect(values.getAttribute("aria-label")).toContain(values.textContent!.slice(2));
+    return values.textContent!.slice(2);
+  };
 
   it("shows the load of a weighted set, with its time", () => {
-    chip(set({ targetWeight: 25 }), true);
-    expect(screen.getByRole("button", { name: named("Hang set 1: 30s at 25 lb") }).textContent).toContain("25");
+    row(set({ targetWeight: 25 }), true);
+    expect(shown("Hang set 1: 30s at 25 lb")).toBe("30 s · 25 lb");
   });
 
-  it("shows a weighted set without a load as an empty “lb”, so there's a load to set", () => {
-    chip(set(), true);
-    expect(screen.getByRole("button", { name: named("Hang set 1: 30s (no load)") }).textContent).toMatch(/– lb$/);
+  it("shows a weighted set without a load as an empty “– lb”, so there's a load to set", () => {
+    row(set(), true);
+    expect(shown("Hang set 1: 30s (no load)")).toBe("30 s · – lb");
   });
 
   it("shows no target load on an unweighted set, but shows a logged one", () => {
-    const { rerender } = chip(set(), false);
-    expect(screen.getByRole("button", { name: named("Hang set 1: 30s") }).textContent).not.toContain("lb");
+    const { rerender } = row(set(), false);
+    expect(shown("Hang set 1: 30s")).toBe("30 s");
     rerender(element(set({ targetWeight: 20 }), false));
-    expect(screen.getByRole("button", { name: named("Hang set 1: 30s") }).textContent).not.toContain("20");
+    expect(shown("Hang set 1: 30s")).toBe("30 s");
     rerender(element(set({ done: true, reps: 30, weight: 20 }), false));
-    expect(screen.getByRole("button", { name: named("Hang set 1: 30s at 20 lb") }).textContent).toContain("20");
+    expect(screen.getByRole("button", { name: "Hang set 1: 30s at 20 lb", pressed: true })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit Hang set 1: 30 s · 20 lb" }).textContent).toBe("1 30 s · 20 lb");
   });
 
-  it("previews a weighted set without a load as an empty “lb”, and an unweighted one without its target load", () => {
+  it("previews a weighted set without a load as an empty “– lb”, and an unweighted one without its target load", () => {
     render(
       <ul>
-        <PlannedChip index={0} set={set({ targetReps: 40 })} measure="meters" weighted />
-        <PlannedChip index={1} set={set({ id: "s2", targetReps: 40, targetWeight: 70 })} measure="meters" weighted={false} />
-        <PlannedChip index={2} set={set({ id: "s3", targetReps: 40, targetWeight: 70 })} measure="meters" weighted />
+        <AccessorySetRow preview exerciseName="Carry" index={0} set={set({ targetReps: 40 })} measure="meters" weighted />
+        <AccessorySetRow
+          preview
+          exerciseName="Carry"
+          index={1}
+          set={set({ id: "s2", targetReps: 40, targetWeight: 70 })}
+          measure="meters"
+          weighted={false}
+        />
+        <AccessorySetRow preview exerciseName="Carry" index={2} set={set({ id: "s3", targetReps: 40, targetWeight: 70 })} measure="meters" weighted />
       </ul>,
       { container: root() },
     );
     const [empty, plain, loaded] = screen.getAllByRole("listitem");
-    expect(empty!.textContent).toMatch(/Set 1: 40 meters \(no load\).*– lb$/);
-    expect(plain!.textContent).toBe("Set 2: 40 meters40m");
-    expect(loaded!.textContent).toMatch(/Set 3: 40 meters at 70 lb.*70$/);
+    expect(empty!.textContent).toBe("Set 1: 40 meters (no load)1 40 m · – lb");
+    expect(plain!.textContent).toBe("Set 2: 40 meters2 40 m");
+    expect(loaded!.textContent).toBe("Set 3: 40 meters at 70 lb3 40 m · 70 lb");
+    // A preview is read, not pressed.
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });
 

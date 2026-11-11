@@ -88,6 +88,15 @@ export function cyclePosition(program: Program, date: ISODate): CyclePosition | 
   };
 }
 
+/**
+ * Where a date sits in the program, in plain words for a screen header: "Week 1 of 5", or
+ * "Deload week" on a deload; from the second cycle on, led by the cycle ("Cycle 2 · Week 1 of 5").
+ */
+export function cycleLabel(pos: Pick<CyclePosition, "cycle" | "weekIndex" | "week">, program: Pick<Program, "weeks">): string {
+  const week = pos.week.deload ? "Deload week" : `Week ${pos.weekIndex + 1} of ${program.weeks.length}`;
+  return pos.cycle > 1 ? `Cycle ${pos.cycle} · ${week}` : week;
+}
+
 export function programDayFor(program: Program, date: ISODate): ProgramDay | null {
   return program.days[String(weekdayOf(date))] ?? null;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
-import { cyclePosition, currentMax, mainLiftSets, platesPerSide, progressionGain, repMaxPct } from "./program";
+import { cycleLabel, cyclePosition, currentMax, mainLiftSets, platesPerSide, progressionGain, repMaxPct } from "./program";
 import type { MaxEntry } from "./schemas";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -69,6 +69,25 @@ describe("cyclePosition", () => {
     const p = cyclePosition(program, "2026-12-07")!;
     expect([p.cycle, p.weekIndex]).toEqual([2, 0]);
     expect(cyclePosition(program, "2026-11-10")!.cycleEnd).toBe("2026-12-06");
+  });
+});
+
+describe("cycleLabel", () => {
+  const at = (date: string) => cycleLabel(cyclePosition(program, date)!, program);
+  it("counts the week of the cycle in plain words", () => {
+    expect(at("2026-11-02")).toBe("Week 1 of 5");
+    expect(at("2026-11-25")).toBe("Week 4 of 5");
+  });
+  it("names a deload week instead of counting it", () => {
+    expect(at("2026-11-30")).toBe("Deload week");
+  });
+  it("leads with the cycle from the second one on", () => {
+    expect(at("2026-12-07")).toBe("Cycle 2 · Week 1 of 5");
+    expect(at("2027-01-04")).toBe("Cycle 2 · Deload week");
+  });
+  it("follows the program's own length", () => {
+    const short = { ...program, weeks: program.weeks.slice(0, 3) };
+    expect(cycleLabel(cyclePosition(short, "2026-11-09")!, short)).toBe("Week 2 of 3");
   });
 });
 

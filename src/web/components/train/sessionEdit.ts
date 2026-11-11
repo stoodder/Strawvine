@@ -3,7 +3,7 @@
  * helpers only (no training formulas): the plan itself comes from src/shared.
  */
 import type { Block, BlockExercise, Measure, Session, SetEntry } from "../../../shared/schemas";
-import { shownLoad } from "../../../shared/session";
+import { needsLoadBeforeLogging, shownLoad } from "../../../shared/session";
 
 export type SetRef = { blockId: string; exIdx: number; setId: string };
 export type ExRef = { blockId: string; exIdx: number };
@@ -33,6 +33,20 @@ export function findSet(session: Session, ref: SetRef | null) {
   const idx = ex?.sets.findIndex((x) => x.id === ref.setId) ?? -1;
   const set = ex?.sets[idx];
   return block && ex && set ? { block, ex, set, index: idx } : null;
+}
+
+/**
+ * What a set's check does when pressed:
+ *   "count"  — an open AMRAP set opens its rep counter (it needs the real count);
+ *   "load"   — an open set of a weighted accessory with no load yet opens the set editor, so a
+ *              weighted set is never logged without a load by accident (the main lift always has one);
+ *   "toggle" — anything else is logged at its targets, or unlogged.
+ */
+export type CheckAction = "count" | "load" | "toggle";
+export function checkAction(set: SetEntry, kind: Block["kind"], weighted: boolean): CheckAction {
+  if (set.amrap && !set.done) return "count";
+  if (kind === "accessory" && needsLoadBeforeLogging(set, weighted)) return "load";
+  return "toggle";
 }
 
 /** The value a set currently shows: what was done once logged, else the target. */
