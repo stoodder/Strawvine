@@ -25,33 +25,17 @@ import type { ReactNode } from "react";
 import { Check, Pencil } from "lucide-react";
 import type { Measure, SetEntry } from "../../../shared/schemas";
 import { shownLoad } from "../../../shared/session";
-import { measureUnit } from "./SetSheets";
-import { describeSet, unitWord } from "./sessionEdit";
+import { describeSet, mainSetTag, measureUnit, unitWord, type SetTag } from "./sessionEdit";
 
 /** iOS: no callout / text selection on a press, no double-tap zoom delay. */
-const noCallout = { WebkitTouchCallout: "none", touchAction: "manipulation" } as const;
+export const noCallout = { WebkitTouchCallout: "none", touchAction: "manipulation" } as const;
 /** Stands in for a value a set doesn't have yet (no load, no target). */
 const EMPTY = "–";
 
-type Tone = "accent" | "gold" | "mute";
-export interface SetTag {
-  text: string;
-  tone: Tone;
-}
-const TAG_TONE: Record<Tone, string> = { accent: "text-accent", gold: "text-gold", mute: "text-mute" };
-
-/**
- * A main-lift set's tag: "AMRAP" until it's logged over target ("+3 reps · +3 lb" once the max
- * bump is applied), "back-off" for a set added beyond the plan.
- */
-export function mainSetTag(set: SetEntry, extra: boolean): SetTag | null {
-  if (set.amrap) {
-    const over = set.done && set.reps !== null && set.targetReps !== null ? set.reps - set.targetReps : 0;
-    if (over > 0) return { text: `+${over} reps${set.appliedProgressionLb ? ` · +${set.appliedProgressionLb} lb` : ""}`, tone: "gold" };
-    return { text: "AMRAP", tone: "accent" };
-  }
-  return extra ? { text: "back-off", tone: "mute" } : null;
-}
+export { mainSetTag, type SetTag };
+const TAG_TONE: Record<SetTag["tone"], string> = { accent: "text-accent", gold: "text-gold", mute: "text-mute" };
+/** A tag's colour: the accent for an AMRAP still to do, gold once it beat its target, mute for a note. */
+export const tagTone = (tag: SetTag): string => TAG_TONE[tag.tone];
 
 /**
  * "170 × 6", "140 × 12+ AMRAP": a main-lift set as its row shows it and both its controls name it
@@ -107,11 +91,17 @@ export function accessorySetShown(set: SetEntry, measure: Measure, weighted: boo
 }
 
 /** The round check: an open ring, filled (with a tick) once the set is logged. Decorative — its button names it. */
-function CheckMark({ done, tone, size }: { done: boolean; tone: "accent" | "gold"; size: number }) {
+export function CheckMark({ done, tone, size }: { done: boolean; tone: "accent" | "gold"; size: number }) {
   const color = tone === "gold" ? "var(--color-gold)" : "var(--color-accent)";
   return (
     // hc-edge: in high contrast the open ring gets a visible edge (its own is only 0.35 white).
-    <span aria-hidden className="hc-edge relative grid shrink-0 place-items-center rounded-full" style={{ width: size, height: size }}>
+    <span
+      aria-hidden
+      // The colour it is filled with (none while open): accent, or gold for a beaten AMRAP.
+      data-tone={done ? tone : undefined}
+      className="hc-edge relative grid shrink-0 place-items-center rounded-full"
+      style={{ width: size, height: size }}
+    >
       <motion.span
         className="absolute inset-0 rounded-full"
         initial={false}
@@ -291,7 +281,7 @@ export function MainSetRow({
       {tag && (
         <>
           {" "}
-          <span className={clsx("label whitespace-nowrap", TAG_TONE[tag.tone])}>{tag.text}</span>
+          <span className={clsx("label whitespace-nowrap", tagTone(tag))}>{tag.text}</span>
         </>
       )}
     </>

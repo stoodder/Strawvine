@@ -97,6 +97,29 @@ export function replaceSetAndPropagate(ex: BlockExercise, prev: SetEntry, next: 
   };
 }
 
+/** The unit a measure's amounts carry on screen: "s", "m" — none for reps. */
+export function measureUnit(m: Measure): string {
+  return m === "seconds" ? "s" : m === "meters" ? "m" : "";
+}
+
+export interface SetTag {
+  text: string;
+  tone: "accent" | "gold" | "mute";
+}
+
+/**
+ * A main-lift set's tag: "AMRAP" until it's logged over target ("+3 reps · +3 lb" once the max
+ * bump is applied), "back-off" for a set added beyond the plan.
+ */
+export function mainSetTag(set: SetEntry, extra: boolean): SetTag | null {
+  if (set.amrap) {
+    const over = set.done && set.reps !== null && set.targetReps !== null ? set.reps - set.targetReps : 0;
+    if (over > 0) return { text: `+${over} reps${set.appliedProgressionLb ? ` · +${set.appliedProgressionLb} lb` : ""}`, tone: "gold" };
+    return { text: "AMRAP", tone: "accent" };
+  }
+  return extra ? { text: "back-off", tone: "mute" } : null;
+}
+
 export function unitWord(m: Measure, n: number | null): string {
   const one = n === 1;
   return m === "seconds" ? (one ? "second" : "seconds") : m === "meters" ? (one ? "meter" : "meters") : one ? "rep" : "reps";
@@ -115,11 +138,14 @@ export function describeSet(s: SetEntry, m: Measure, weighted?: boolean): string
   return `${reps ?? "no target"} ${reps === null ? "" : unitWord(m, reps)}${load}`.replace(/\s+/g, " ").trim();
 }
 
-/** "4×10" when every set shares a rep count, else "6/8/10/12". */
+/**
+ * "4 × 10" when every set shares a rep count, else "6/8/10/12" — the one way the screen writes a
+ * run of sets (the deload's plan in the main lift's header, a folded exercise's result).
+ */
 export function repScheme(reps: ReadonlyArray<number | null>): string {
   const xs = reps.filter((r): r is number => r !== null);
   if (!xs.length) return "";
-  return xs.every((r) => r === xs[0]) ? `${xs.length}×${xs[0]}` : xs.join("/");
+  return xs.every((r) => r === xs[0]) ? `${xs.length} × ${xs[0]}` : xs.join("/");
 }
 
 /** Session content without ids: two builds of the same plan compare equal. */

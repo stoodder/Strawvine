@@ -26,6 +26,7 @@ import type { Block, BlockExercise, Exercise, Session, SetEntry } from "../../sh
 import {
   accessoryHint,
   blankSet,
+  blockComplete,
   buildSession,
   buildSessionFrom,
   effectiveSession,
@@ -64,7 +65,10 @@ import { DateJump } from "../components/today/DateJump";
 import { addStandings, rejoinSuperset } from "../../shared/sessionStructureUndo";
 import { AddExerciseSheet, type ExerciseMark } from "../components/train/AddExerciseSheet";
 import { EditExerciseSheet } from "../components/train/EditExerciseSheet";
+import { exerciseSummary } from "../components/train/exerciseSummary";
 import { FinishPanel } from "../components/train/FinishPanel";
+import { Foldable, FoldedBlock, FoldToggle, type FoldedItem } from "../components/train/FoldedBlock";
+import { useFolds } from "../components/train/folds";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
 import { SupersetSheet, WorkoutOrderSheet } from "../components/train/SupersetSheets";
 import { useDismissedHints } from "../components/train/hintDismiss";
@@ -299,6 +303,24 @@ export function TrainScreen() {
     }
   }, [sheetOpen, toast]);
 
+  // --- Finished blocks fold to a summary row (view state only: components/train/folds) -------
+  // A block is done by the counts Finish goes by (`blockComplete`); a preview shows the plan.
+  // Done blocks fold when the day is opened and when the app comes back to the foreground — never
+  // while the page is in use (see folds.ts) — and by hand:
+  const folds = useFolds(
+    date,
+    session.blocks.map((b) => ({ id: b.id, done: !isPreview && blockComplete(b) })),
+  );
+  /** When a block was last folded or opened by hand: the dock's Finish stays as it is for a moment after (FinishPanel). */
+  const [foldedByHandAt, setFoldedByHandAt] = useState(0);
+  /** Fold a done block, or open it — in one step; the toggle is where it was, on the block's other face. */
+  const setFolded = (blockId: string, fold: boolean) => {
+    const hadFocus = !!document.activeElement?.closest(`[data-fold="${blockId}"]`);
+    folds.setFolded(blockId, fold);
+    setFoldedByHandAt(performance.now());
+    if (hadFocus) focusAfter(() => document.querySelector<HTMLElement>(`[data-fold-toggle="${blockId}"]`));
+  };
+
   /**
    * Save a change (the first one persists a draft). With `undo`, offer to revert it: just the
    * touched exercise (or block) when `scope` is given (later edits elsewhere survive), else the
@@ -452,9 +474,13 @@ export function TrainScreen() {
   const primaryStarted = primaryEx?.sets.some((s) => s.done) ?? false;
   /** Main lift skipped today (injury, fatigue): collapsed, counts toward nothing, the day can still finish. */
   const primarySkipped = !!primaryBlock?.skipped;
+  /** Every set of the main lift is logged (never in a preview, which shows the plan): it can fold. */
+  const primaryDone = !isPreview && !!primaryBlock && blockComplete(primaryBlock);
   /** Sets the program prescribed for this session's week; any beyond are added back-off sets. */
   const plannedCount =
     session.week !== null ? (program.weeks[session.week - 1]?.reps.length ?? primaryEx?.sets.length ?? 0) : (primaryEx?.sets.length ?? 0);
+  /** Prescribed sets the main lift no longer holds ("Skip rest"): its folded row must not read as everything logged. */
+  const skippedMain = primaryEx ? Math.max(0, plannedCount - primaryEx.sets.length) : 0;
   /**
    * The plan this session follows: today's, or — for a session moved here from another day
    * ("Do this session today") — that day's, rebuilt for this date.
@@ -886,6 +912,16 @@ export function TrainScreen() {
   const exControl = (ref: ExRef, which: "unskip" | "options") => () =>
     document.querySelector<HTMLElement>(`[data-ex="${ref.blockId}:${ref.exIdx}"][data-control="${which}"]`);
 
+  /** A finished block's exercises as its folded row lists them: each with what its logged sets came to. */
+  const foldedItems = (b: Block): FoldedItem[] =>
+    b.exercises.map((e, i) => ({
+      key: exKey(e, i, b.id),
+      name: exName(e.exerciseId),
+      tag: b.exercises.length > 1 ? `${letters.get(b.id) ?? ""}${i + 1}` : undefined,
+      summary: exerciseSummary(e, b.kind, loadedIn(b, e.exerciseId)),
+      skipped: !!e.skipped,
+    }));
+
   /** Move the open sets of an accessory to the suggested load (never automatic). */
   const applyHint = (ref: ExRef, weight: number, name: string) => {
     tick();
@@ -1229,10 +1265,43 @@ export function TrainScreen() {
                   </div>
                 </div>
               ) : (
-                <>
+                // Done (every set it still holds is logged), the main lift can show as one row: its sets in a
+                // line, the AMRAP with its tag. Keyed by the block: another day's main lift is another one.
+                <Foldable
+                  key={primaryBlock.id}
+                  id={primaryBlock.id}
+                  done={primaryDone}
+                  folded={folds.folded(primaryBlock.id)}
+                  summary={
+                    <FoldedBlock
+                      blockId={primaryBlock.id}
+                      items={foldedItems(primaryBlock)}
+                      size="main"
+                      // Gold as on the AMRAP's own row: it beat its target.
+                      tone={foldedItems(primaryBlock).some((it) => it.summary.parts.some((p) => p.tag?.tone === "gold")) ? "gold" : "accent"}
+                      // Sets skipped ("Skip rest") aren't logged: the row says so in place of "all sets logged".
+                      status={skippedMain ? `${plural(skippedMain, "set")} skipped` : undefined}
+                      record={isRecord}
+                      onOpen={() => setFolded(primaryBlock.id, false)}
+                    />
+                  }
+                >
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3">
                     <div className="flex flex-wrap items-baseline gap-x-3">
-                      <div className="text-2xl font-light">{primaryName}</div>
+                      {primaryDone ? (
+                        // The name folds it again (the toggle's 44 px reach past the line is cancelled, so the header keeps its height).
+                        <FoldToggle
+                          blockId={primaryBlock.id}
+                          size="main"
+                          className="-my-1.5"
+                          status={skippedMain ? `${plural(skippedMain, "set")} skipped` : undefined}
+                          onFold={() => setFolded(primaryBlock.id, true)}
+                        >
+                          <span className="text-2xl font-light">{primaryName}</span>
+                        </FoldToggle>
+                      ) : (
+                        <div className="text-2xl font-light">{primaryName}</div>
+                      )}
                       {session.deload && (
                         <span className="label whitespace-nowrap text-fg-2">
                           deload · {repScheme(primaryEx.sets.slice(0, plannedCount).map((s) => s.targetReps))}
@@ -1325,7 +1394,7 @@ export function TrainScreen() {
                       </div>
                     )}
                   </div>
-                </>
+                </Foldable>
               )}
             </Section>
           )}
@@ -1384,193 +1453,224 @@ export function TrainScreen() {
             {accessories.map((b) => {
               const superset = b.exercises.length > 1;
               const letter = letters.get(b.id) ?? "";
+              /** Every set of the block is logged (a superset as a whole): it folds, and an open one can be folded again. */
+              const done = !isPreview && blockComplete(b);
               return (
                 // Each exercise ends in its "+ set" row (or, in a preview, nothing): that 44 px row is
                 // the whole gap to the next exercise — a control where the separation would be anyway.
+                // A done block can show as one row (`Foldable`): the next block follows it directly.
                 <div key={b.id} data-block={b.id} className={clsx(isPreview && "mb-8")}>
-                  {superset &&
-                    (isPreview ? (
-                      <div className="mb-2 flex items-center gap-2 text-glow">
-                        <Link2 size={12} />
-                        <span className="label text-glow">Superset {letter}</span>
-                      </div>
-                    ) : (
-                      // The superset's own sheet: its order, taking one out, adding one.
-                      <button
-                        type="button"
-                        aria-haspopup="dialog"
-                        aria-label={`Manage Superset ${letter}`}
-                        data-manage={b.id}
-                        className="tap -my-1.5 -ml-2 mb-0.5 inline-flex min-h-11 items-center gap-2 px-2 text-glow"
-                        onClick={() => openManage(b.id)}
-                      >
-                        <Link2 size={12} aria-hidden />
-                        <span className="label text-glow">Superset {letter}</span>
-                        <ChevronRight size={12} aria-hidden className="opacity-60" />
-                      </button>
-                    ))}
-                  <div className={clsx(superset && "border-l border-glow/25 pl-4")}>
-                    {b.exercises.map((e, exIdx) => {
-                      const name = exName(e.exerciseId);
-                      const ref = { blockId: b.id, exIdx };
-                      const tagLabel = superset && <span className="label mr-2 text-glow">{`${letter}${exIdx + 1}`}</span>;
-                      if (e.skipped)
-                        return (
-                          <div
-                            key={exKey(e, exIdx, b.id)}
-                            // No "+ set" row ends a skipped exercise: its own margin is the gap to the next one.
-                            className="mb-3 flex min-h-11 flex-wrap items-center justify-between gap-x-3"
+                  <Foldable
+                    id={b.id}
+                    done={done}
+                    folded={folds.folded(b.id)}
+                    summary={
+                      <FoldedBlock
+                        blockId={b.id}
+                        items={foldedItems(b)}
+                        superset={superset ? letter : undefined}
+                        record={isRecord}
+                        onOpen={() => setFolded(b.id, false)}
+                      />
+                    }
+                  >
+                    {superset &&
+                      (isPreview ? (
+                        <div className="mb-2 flex items-center gap-2 text-glow">
+                          <Link2 size={12} />
+                          <span className="label text-glow">Superset {letter}</span>
+                        </div>
+                      ) : (
+                        <div className="-mt-1.5 mb-0.5 flex items-center justify-between">
+                          {/* The superset's own sheet: its order, taking one out, adding one. */}
+                          <button
+                            type="button"
+                            aria-haspopup="dialog"
+                            aria-label={`Manage Superset ${letter}`}
+                            data-manage={b.id}
+                            className="tap -ml-2 inline-flex min-h-11 items-center gap-2 px-2 text-glow"
+                            onClick={() => openManage(b.id)}
                           >
-                            <div className="min-w-0 truncate text-[0.9375rem] text-mute">
-                              {tagLabel}
-                              {name}
+                            <Link2 size={12} aria-hidden />
+                            <span className="label text-glow">Superset {letter}</span>
+                            <ChevronRight size={12} aria-hidden className="opacity-60" />
+                          </button>
+                          {/* Done, a superset folds as one — from here, where each exercise has its options. */}
+                          {done && <FoldToggle blockId={b.id} label={`Superset ${letter}`} onFold={() => setFolded(b.id, true)} />}
+                        </div>
+                      ))}
+                    <div className={clsx(superset && "border-l border-glow/25 pl-4")}>
+                      {b.exercises.map((e, exIdx) => {
+                        const name = exName(e.exerciseId);
+                        const ref = { blockId: b.id, exIdx };
+                        const tagLabel = superset && <span className="label mr-2 text-glow">{`${letter}${exIdx + 1}`}</span>;
+                        if (e.skipped)
+                          return (
+                            <div
+                              key={exKey(e, exIdx, b.id)}
+                              // No "+ set" row ends a skipped exercise: its own margin is the gap to the next one.
+                              className="mb-3 flex min-h-11 flex-wrap items-center justify-between gap-x-3"
+                            >
+                              <div className="min-w-0 truncate text-[0.9375rem] text-mute">
+                                {tagLabel}
+                                {name}
+                              </div>
+                              <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end">
+                                <span className="label">
+                                  Skipped<span className="max-[16rem]:hidden"> today</span>
+                                </span>
+                                {!isPreview && (
+                                  <>
+                                    <span className="label px-1.5" aria-hidden>
+                                      ·
+                                    </span>
+                                    <button
+                                      type="button"
+                                      aria-label={`Unskip ${name}`}
+                                      data-ex={`${b.id}:${exIdx}`}
+                                      data-control="unskip"
+                                      className="tap label -mr-2 min-h-11 px-2 text-accent"
+                                      onClick={() => {
+                                        setSkipped(ref, false);
+                                        focusWhenReady(exControl(ref, "options"));
+                                      }}
+                                    >
+                                      Unskip
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </div>
-                            <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end">
-                              <span className="label">
-                                Skipped<span className="max-[16rem]:hidden"> today</span>
-                              </span>
-                              {!isPreview && (
-                                <>
-                                  <span className="label px-1.5" aria-hidden>
-                                    ·
-                                  </span>
-                                  <button
-                                    type="button"
-                                    aria-label={`Unskip ${name}`}
-                                    data-ex={`${b.id}:${exIdx}`}
-                                    data-control="unskip"
-                                    className="tap label -mr-2 min-h-11 px-2 text-accent"
-                                    onClick={() => {
-                                      setSkipped(ref, false);
-                                      focusWhenReady(exControl(ref, "options"));
-                                    }}
-                                  >
-                                    Unskip
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      const weighted = exWeighted(e.exerciseId);
-                      const hint =
-                        isPreview || session.deload || session.completedAt
-                          ? null
-                          : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, {
-                              weighted,
-                              // Only performances in the measure this block is shown and logged in:
-                              // the exercise's current one, or the one its logged sets were done in.
-                              measure: e.measure,
-                            });
-                      const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
-                      return (
-                        <div key={exKey(e, exIdx, b.id)} className={clsx(exIdx > 0 && isPreview && "mt-5")}>
-                          <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
-                            <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
-                              {tagLabel}
-                              {name}
-                            </div>
-                            {!isPreview && (
-                              <button
-                                type="button"
-                                aria-label={`${name} options`}
-                                aria-haspopup="dialog"
-                                data-ex={`${b.id}:${exIdx}`}
-                                data-control="options"
-                                className="tap -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
-                                onClick={() => setActions({ ...ref, exerciseId: e.exerciseId })}
-                              >
-                                <MoreHorizontal size={16} />
-                              </button>
-                            )}
-                          </div>
-                          {showHint && hint && (
-                            <div className="-mt-1 mb-1 flex flex-wrap items-center gap-x-2 text-xs text-mute">
-                              {hint.kind === "hold" ? (
-                                // Calmer than an increase: nothing to apply, just "stay here" — with
-                                // when it was missed ("Missed reps at 60 lb on Nov 2 · hold").
-                                <span>{hint.reason.replace(" — ", " · ")}</span>
+                          );
+                        const weighted = exWeighted(e.exerciseId);
+                        const hint =
+                          isPreview || session.deload || session.completedAt
+                            ? null
+                            : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, {
+                                weighted,
+                                // Only performances in the measure this block is shown and logged in:
+                                // the exercise's current one, or the one its logged sets were done in.
+                                measure: e.measure,
+                              });
+                        const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
+                        return (
+                          <div key={exKey(e, exIdx, b.id)} className={clsx(exIdx > 0 && isPreview && "mt-5")}>
+                            <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
+                              {done && !superset ? (
+                                // Done and open: the name folds it again (a superset folds from its own header).
+                                <FoldToggle blockId={b.id} className="flex-1" onFold={() => setFolded(b.id, true)}>
+                                  <span className="min-w-0 text-[0.9375rem] wrap-anywhere">{name}</span>
+                                </FoldToggle>
                               ) : (
-                                <>
-                                  <span title={hint.reason}>
-                                    Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb
-                                    <span className="max-[359px]:hidden"> · {targetsMetPhrase(hint.measure)}</span> → try{" "}
-                                    <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
-                                  </span>
-                                  <button
-                                    type="button"
-                                    aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
-                                    className="tap label -my-2 min-h-11 px-1.5 text-accent"
-                                    onClick={() => {
-                                      applyHint(ref, hint.suggestedWeight, name);
-                                      // The hint row goes once the sets are at the suggestion.
-                                      focusWhenReady(exControl(ref, "options"));
-                                    }}
-                                  >
-                                    Apply
-                                  </button>
-                                </>
+                                <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
+                                  {tagLabel}
+                                  {name}
+                                </div>
                               )}
-                              <button
-                                type="button"
-                                aria-label={`Dismiss the ${name} hint for today`}
-                                className="tap -my-2 -ml-2 grid min-h-11 w-11 place-items-center text-mute"
-                                onClick={() => {
-                                  dismissHint(e.exerciseId);
-                                  focusAfter(exControl(ref, "options"));
-                                }}
-                              >
-                                <X size={12} />
-                              </button>
-                            </div>
-                          )}
-                          {/* The same rows as the main lift, compact: values open the editor, the check logs. */}
-                          <ul aria-label={`${name} sets`}>
-                            {e.sets.map((s, si) => {
-                              const setRef = { ...ref, setId: s.id };
-                              return (
-                                <AccessorySetRow
-                                  key={s.id}
-                                  dataSet={s.id}
-                                  exerciseName={name}
-                                  index={si}
-                                  set={s}
-                                  measure={e.measure}
-                                  weighted={weighted}
-                                  needsLoad={checkAction(s, "accessory", weighted) === "load"}
-                                  preview={isPreview}
-                                  record={isRecord}
-                                  onCheck={() => toggleDone(setRef)}
-                                  onEdit={() => setEditing(setRef)}
-                                />
-                              );
-                            })}
-                          </ul>
-                          {!isPreview && (
-                            // The row stays (empty) for an exercise that is full: it's the gap to the next one.
-                            <div className="flex min-h-11 justify-end">
-                              {e.sets.length < MAX_SETS && (
+                              {!isPreview && (
                                 <button
                                   type="button"
-                                  aria-label={`Add ${name} set`}
-                                  className="tap label -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                                  onClick={() => {
-                                    addAccessorySet(ref);
-                                    tick();
-                                  }}
+                                  aria-label={`${name} options`}
+                                  aria-haspopup="dialog"
+                                  data-ex={`${b.id}:${exIdx}`}
+                                  data-control="options"
+                                  className="tap -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
+                                  onClick={() => setActions({ ...ref, exerciseId: e.exerciseId })}
                                 >
-                                  <Plus size={12} aria-hidden /> set
+                                  <MoreHorizontal size={16} />
                                 </button>
                               )}
                             </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
+                            {showHint && hint && (
+                              <div className="-mt-1 mb-1 flex flex-wrap items-center gap-x-2 text-xs text-mute">
+                                {hint.kind === "hold" ? (
+                                  // Calmer than an increase: nothing to apply, just "stay here" — with
+                                  // when it was missed ("Missed reps at 60 lb on Nov 2 · hold").
+                                  <span>{hint.reason.replace(" — ", " · ")}</span>
+                                ) : (
+                                  <>
+                                    <span title={hint.reason}>
+                                      Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb
+                                      <span className="max-[359px]:hidden"> · {targetsMetPhrase(hint.measure)}</span> → try{" "}
+                                      <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
+                                    </span>
+                                    <button
+                                      type="button"
+                                      aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
+                                      className="tap label -my-2 min-h-11 px-1.5 text-accent"
+                                      onClick={() => {
+                                        applyHint(ref, hint.suggestedWeight, name);
+                                        // The hint row goes once the sets are at the suggestion.
+                                        focusWhenReady(exControl(ref, "options"));
+                                      }}
+                                    >
+                                      Apply
+                                    </button>
+                                  </>
+                                )}
+                                <button
+                                  type="button"
+                                  aria-label={`Dismiss the ${name} hint for today`}
+                                  className="tap -my-2 -ml-2 grid min-h-11 w-11 place-items-center text-mute"
+                                  onClick={() => {
+                                    dismissHint(e.exerciseId);
+                                    focusAfter(exControl(ref, "options"));
+                                  }}
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            )}
+                            {/* The same rows as the main lift, compact: values open the editor, the check logs. */}
+                            <ul aria-label={`${name} sets`}>
+                              {e.sets.map((s, si) => {
+                                const setRef = { ...ref, setId: s.id };
+                                return (
+                                  <AccessorySetRow
+                                    key={s.id}
+                                    dataSet={s.id}
+                                    exerciseName={name}
+                                    index={si}
+                                    set={s}
+                                    measure={e.measure}
+                                    weighted={weighted}
+                                    needsLoad={checkAction(s, "accessory", weighted) === "load"}
+                                    preview={isPreview}
+                                    record={isRecord}
+                                    onCheck={() => toggleDone(setRef)}
+                                    onEdit={() => setEditing(setRef)}
+                                  />
+                                );
+                              })}
+                            </ul>
+                            {!isPreview && (
+                              // The row stays (empty) for an exercise that is full: it's the gap to the next one.
+                              <div className="flex min-h-11 justify-end">
+                                {e.sets.length < MAX_SETS && (
+                                  <button
+                                    type="button"
+                                    aria-label={`Add ${name} set`}
+                                    className="tap label -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                                    onClick={() => {
+                                      addAccessorySet(ref);
+                                      tick();
+                                    }}
+                                  >
+                                    <Plus size={12} aria-hidden /> set
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Foldable>
                 </div>
               );
             })}
+            {/* Where the exercises end: everything after it moves as one when blocks fold (folds.ts `foldInPlace`). */}
+            <div data-fold-end="" />
             {!accessories.length && (
               <p className="mb-6 text-sm text-mute">
                 {isPreview
@@ -1625,6 +1725,7 @@ export function TrainScreen() {
                 <FinishPanel
                   session={session}
                   dock
+                  layoutChangedAt={foldedByHandAt}
                   allowEmpty={primarySkipped}
                   doneSets={doneSets}
                   totalSets={totalSets}

@@ -1,7 +1,8 @@
 import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { Session } from "../../../shared/schemas";
+import { allLogged } from "../../../shared/session";
 import { fmt } from "../../lib/format";
 import { DOCK_PRIORITY, DockItem, useDockHeight } from "../Dock";
 import { afterLayout, useOnScreenAboveNav, useRevealAboveDock } from "./reveal";
@@ -10,6 +11,32 @@ const EASE = [0.22, 1, 0.36, 1] as const;
 
 /** Finish sits nearest the nav in the dock: under toasts, which are under the rest pill. */
 export const DOCK_FINISH_PRIORITY = DOCK_PRIORITY.toast + 10;
+/**
+ * After a block was folded or opened by hand the page is a different length, which can put the
+ * page's own Finish button on screen or take it off: for this long the dock keeps offering (or
+ * not offering) Finish as it did, so the pill never comes or goes — and the rest pill above it
+ * never takes its place — under a tap that follows the fold.
+ */
+export const DOCK_FINISH_HOLD_MS = 2000;
+
+/**
+ * `value`, except that for `ms` after `since` (a `performance.now()` time; 0: never) it stays what
+ * it was at `since` — then takes the current value again.
+ */
+export function useHeldSince<T>(value: T, since: number, ms: number): T {
+  const held = useRef(value);
+  const [, rerender] = useState(0);
+  const until = since ? since + ms : 0;
+  const holding = performance.now() < until;
+  if (!holding) held.current = value;
+  useEffect(() => {
+    if (!holding) return;
+    const timer = window.setTimeout(() => rerender((n) => n + 1), Math.max(0, until - performance.now()) + 20);
+    return () => window.clearTimeout(timer);
+  }, [holding, until]);
+  return held.current;
+}
+
 /** On a very short screen (under 30rem tall) Finish leaves the dock to the rest pill and toasts. */
 export const DOCK_FINISH_SHORT_SCREEN = "[@media(max-height:30rem)]:hidden";
 
@@ -32,7 +59,7 @@ export function dockFinishShown({
   confirming: boolean;
   inlineOnScreen: boolean | null;
 }): boolean {
-  return dock && doneSets > 0 && doneSets >= totalSets && !confirming && inlineOnScreen === false;
+  return dock && allLogged({ done: doneSets, total: totalSets }) && !confirming && inlineOnScreen === false;
 }
 
 export interface RecapLine {
@@ -116,6 +143,7 @@ export function FinishPanel({
   onReopen,
   allowEmpty = false,
   dock = false,
+  layoutChangedAt = 0,
 }: {
   session: Session;
   doneSets: number;
@@ -133,6 +161,8 @@ export function FinishPanel({
    * an Undo): Finish is at the end of the page. Same press as the button here.
    */
   dock?: boolean;
+  /** When a block was last folded or opened by hand (`performance.now()`; 0: never): see DOCK_FINISH_HOLD_MS. */
+  layoutChangedAt?: number;
 }) {
   const [confirming, setConfirming] = useState(false);
   const hintId = useId();
@@ -142,7 +172,9 @@ export function FinishPanel({
   /** The page's own Finish button, and whether any of it shows above the nav (null: not known yet). */
   const [inlineFinish, setInlineFinish] = useState<HTMLButtonElement | null>(null);
   const inlineOnScreen = useOnScreenAboveNav(inlineFinish);
-  const inDock = dockFinishShown({ dock, doneSets, totalSets, confirming, inlineOnScreen });
+  // Where the page's button is decides between dock and page — but not in the moment after a fold by hand.
+  const inlineHeld = useHeldSince(inlineOnScreen, layoutChangedAt, DOCK_FINISH_HOLD_MS);
+  const inDock = dockFinishShown({ dock, doneSets, totalSets, confirming, inlineOnScreen: inlineHeld });
   /**
    * Where focus goes once the next view mounts: the control that was pressed (Finish, Keep
    * logging, Reopen) is replaced, so without this focus would drop to <body>. Only set by a

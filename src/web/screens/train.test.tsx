@@ -5,9 +5,11 @@
  * of logging — no long press anywhere. Plus what sits around the rows: the rest a check starts
  * (and ends, unlogged), Finish in the dock once everything is logged, the program link in the
  * header in every cycle state (and the way back from Program), what stands in for a main lift
- * before the program starts, and the order of the exercise options.
+ * before the program starts, and the order of the exercise options. And done exercises folding to a
+ * summary row — when the day is opened, the app comes back to the foreground, or by hand; never
+ * while the page is in use (view state only).
  */
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +17,7 @@ import { defaultSettings } from "../../shared/defaults";
 import type { Exercise, MaxEntry, Session, Settings } from "../../shared/schemas";
 import { blankSet, buildSession } from "../../shared/session";
 import { DockProvider } from "../components/Dock";
+import { forgetFolds } from "../components/train/folds";
 import { ProgramScreen } from "./Program";
 import { TrainScreen } from "./Train";
 
@@ -162,6 +165,19 @@ const setById = (id: string) =>
     .flatMap((e) => e.sets)
     .find((s) => s.id === id)!;
 const check = (name: RegExp) => screen.getByRole("button", { name });
+/**
+ * A done block's toggle, by the name it leads with: its folded row (not expanded), or the one in
+ * its open header. `status`: what the name says after it ("all sets logged").
+ */
+const foldToggle = (name: string, expanded: boolean, status = "all sets logged") =>
+  screen.queryByRole("button", { name: new RegExp(`^${name}\\s*\\(${status}\\)`), expanded });
+const folded = (name: string, status?: string) => {
+  const row = foldToggle(name, false, status);
+  if (!row) throw new Error(`No folded row for ${name}`);
+  return row;
+};
+const queryFolded = (name: string) => foldToggle(name, false);
+const openToggle = (name: string) => foldToggle(name, true);
 const dock = () => within(screen.getByRole("region", { name: "Notifications" }));
 const finishInDock = () => dock().queryByRole("button", { name: /^Finish · / });
 const restPill = () => dock().queryByRole("group", { name: "Rest timer" });
@@ -215,6 +231,9 @@ window.scrollBy = () => {};
 
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
+  // Which blocks were opened by hand lives in the page's memory: every test is a fresh page.
+  forgetFolds();
   store.toasts.length = 0;
   store.data = { ...base(), sessions: [planned()] };
 });
@@ -671,10 +690,13 @@ describe("logged rows: mid-session they recede, on a record they are the content
     expect(numeral(/^Edit Pull-up set 2: /).className).toMatch(/text-fg(?!-)/);
   });
 
-  it("a past day, finished or not: the same", () => {
+  it("a past day, finished or not: the same", async () => {
+    const user = userEvent.setup();
     const past = "2026-11-09";
     store.data = { ...base(), sessions: [allLogged(planned(past), ["p2"])] };
     renderTrain(`/train/${past}`);
+    // The main lift is done, so it opens folded: its rows are a tap away.
+    await user.click(folded("Bench press"));
     expect(numeral(/^Edit Bench press set 1: /).className).toContain("text-fg-2");
     expect(numeral(/^Edit Pull-up set 1: /).className).toContain("text-fg-2");
     expect(numeral(/^Edit Pull-up set 1: /).className).not.toContain("text-mute");
@@ -883,5 +905,405 @@ describe("exercise options", () => {
       expect.stringMatching(/^Edit exercise/),
       expect.stringMatching(/^Remove — also from future Mondays/),
     ]);
+  });
+});
+
+describe("done exercises fold to a summary row", () => {
+  const queryFolded = (name: string) => foldToggle(name, false);
+  /** The toggle in an open, done block's header. */
+  const openToggle = (name: string) => foldToggle(name, true);
+  const rows = (name: string) => screen.queryByRole("list", { name: `${name} sets` });
+  const wait = (ms: number) => act(() => new Promise<void>((r) => setTimeout(r, ms)));
+  /** The app comes back to the foreground (the phone unlocked between sets). */
+  const foreground = () => act(() => void document.dispatchEvent(new Event("visibilitychange")));
+  /** Train goes (another tab) and comes back: the screen is new, the page — and its memory — the same. */
+  const leaveAndReturn = (path?: string) => {
+    cleanup();
+    document.body.innerHTML = '<div id="root"></div>';
+    renderTrain(path);
+  };
+  /** A superset (Pull-up, Curl with a load) after the main lift. */
+  const withSuperset = (): Session => {
+    const s = planned();
+    return {
+      ...s,
+      blocks: [
+        s.blocks[0]!,
+        {
+          id: "ss",
+          kind: "accessory",
+          exercises: [
+            { exerciseId: PULL_UP, measure: "reps", sets: [blankSet({ id: "p1", targetReps: 8 }), blankSet({ id: "p2", targetReps: 8 })] },
+            { exerciseId: CURL, measure: "reps", sets: [blankSet({ id: "c1", targetReps: 10, targetWeight: 30 })] },
+          ],
+        },
+      ],
+    };
+  };
+  /** The colour of a folded row's check. */
+  const checkTone = (row: HTMLElement) => row.querySelector("[data-tone]")?.getAttribute("data-tone");
+
+  it("a session opens with its done exercises folded, each saying what it came to", () => {
+    store.data = { ...base(), sessions: [allLogged(planned(), ["p2"])] };
+    renderTrain();
+    // Week 3: 4 / 5 / 6 / 8+ at the calculated loads, the AMRAP logged at its target.
+    const main = today().blocks[0]!.exercises[0]!.sets;
+    expect(folded("Bench press").textContent).toContain(main.map((x) => `${x.weight} × ${x.reps}`).join(" · "));
+    expect(folded("Bench press").textContent).toContain("AMRAP");
+    expect(rows("Bench press")).toBeNull();
+    // One set each: just what their rows show.
+    expect(folded("Curl").textContent).toMatch(/Curl.*10 × – lb \(no load\)$/);
+    expect(folded("Hang").textContent).toMatch(/Hang.*30 s · 25 lb$/);
+    // One with a set still open is open, without a toggle.
+    expect(rows("Pull-up")).not.toBeNull();
+    expect(queryFolded("Pull-up")).toBeNull();
+    expect(openToggle("Pull-up")).toBeNull();
+    // The counts are the session's, folded or not.
+    expect(document.body.textContent).toContain("7/8 sets");
+    // Each folded row is a full touch target (52 px; the main lift's 60).
+    expect(folded("Curl").className).toContain("min-h-[3.25rem]");
+    expect(folded("Bench press").className).toContain("min-h-[3.75rem]");
+  });
+
+  it("the folded main lift's check is gold only when its AMRAP beat the target — the tag with it", () => {
+    const s = allLogged(planned());
+    store.data = { ...base(), sessions: [s] };
+    renderTrain();
+    // Logged at its target: the accent, as every other row.
+    expect(checkTone(folded("Bench press"))).toBe("accent");
+    expect(within(folded("Bench press")).getByText("AMRAP").className).toContain("text-accent");
+    expect(checkTone(folded("Hang"))).toBe("accent");
+
+    const beaten: Session = {
+      ...s,
+      blocks: s.blocks.map((b) =>
+        b.kind === "primary" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, sets: e.sets.map((x) => (x.amrap ? { ...x, reps: x.targetReps! + 3 } : x)) })) } : b,
+      ),
+    };
+    act(() => store.set({ ...base(), sessions: [beaten] }));
+    expect(within(folded("Bench press")).getByText("+3 reps").className).toContain("text-gold");
+    expect(checkTone(folded("Bench press"))).toBe("gold");
+    expect(checkTone(folded("Hang"))).toBe("accent");
+  });
+
+  it("a tap opens it — rows, options and all — its name in the header folds it again, and the very next tap on a set lands", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned())] };
+    renderTrain();
+    expect(screen.queryByRole("button", { name: "Hang options" })).toBeNull();
+    await user.click(folded("Hang"));
+    expect(rows("Hang")).not.toBeNull();
+    expect(queryFolded("Hang")).toBeNull();
+    expect(screen.getByRole("button", { name: "Hang options" })).toBeTruthy();
+    // Straight away — nothing is ever swallowed: the check unlogs, and logs again.
+    await user.click(check(/^Hang set 1: /));
+    expect(setById("h1").done).toBe(false);
+    await user.click(check(/^Hang set 1: /));
+    expect(setById("h1").done).toBe(true);
+    // The others stay folded.
+    expect(folded("Curl")).toBeTruthy();
+    await user.click(openToggle("Hang")!);
+    expect(rows("Hang")).toBeNull();
+    expect(folded("Hang")).toBeTruthy();
+    // The main lift, too.
+    await user.click(folded("Bench press"));
+    expect(rows("Bench press")).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: "Add a back-off set of Bench press" }));
+    expect(today().blocks[0]!.exercises[0]!.sets).toHaveLength(5);
+  });
+
+  it("is operable by keyboard, and focus follows the toggle instead of dropping to the page", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned())] };
+    renderTrain();
+    folded("Curl").focus();
+    await user.keyboard("{Enter}");
+    expect(rows("Curl")).not.toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(openToggle("Curl")));
+    await user.keyboard(" ");
+    expect(rows("Curl")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(folded("Curl")));
+  });
+
+  it("logging an exercise's last set folds nothing — it stays as it is, with a toggle to fold it by hand", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned(), ["p2", "h1"])] };
+    renderTrain();
+    await user.click(check(/^Pull-up set 2: /));
+    expect(check(/^Pull-up set 2: /).getAttribute("aria-pressed")).toBe("true");
+    await wait(1200);
+    expect(rows("Pull-up")).not.toBeNull();
+    expect(queryFolded("Pull-up")).toBeNull();
+    // Done and open: its name is the toggle now.
+    expect(openToggle("Pull-up")).not.toBeNull();
+    // The next exercise's set, tapped right after, is logged.
+    await user.click(check(/^Hang set 1: /));
+    expect(setById("h1").done).toBe(true);
+    await user.click(openToggle("Pull-up")!);
+    expect(folded("Pull-up").textContent).toMatch(/2 × 8 reps$/);
+    expect(rows("Hang")).not.toBeNull();
+  });
+
+  it("back in the foreground, the exercises done meanwhile fold; one opened by hand stays open", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned(), ["p2", "h1"])] };
+    renderTrain();
+    // Bench press and Curl opened folded; open Curl by hand, finish the pull-ups.
+    await user.click(folded("Curl"));
+    await user.click(check(/^Pull-up set 2: /));
+    expect(rows("Pull-up")).not.toBeNull();
+    foreground();
+    expect(rows("Pull-up")).toBeNull();
+    expect(folded("Pull-up")).toBeTruthy();
+    expect(folded("Bench press")).toBeTruthy();
+    // Opened by hand: still open. Not done: open as ever.
+    expect(rows("Curl")).not.toBeNull();
+    expect(rows("Hang")).not.toBeNull();
+    // Folded by hand, it folds with the others from then on.
+    await user.click(openToggle("Curl")!);
+    foreground();
+    expect(folded("Curl")).toBeTruthy();
+  });
+
+  it("going to the background folds nothing", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned(), ["p2"])] };
+    renderTrain();
+    await user.click(check(/^Pull-up set 2: /));
+    const state = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    foreground();
+    expect(rows("Pull-up")).not.toBeNull();
+    state.mockRestore();
+    foreground();
+    expect(rows("Pull-up")).toBeNull();
+  });
+
+  it("a set that arrives from another device folds nothing while the page is in use — only at the next of those moments", () => {
+    store.data = { ...base(), sessions: [allLogged(planned(), ["p2"])] };
+    renderTrain();
+    act(() => store.set({ ...store.data, sessions: [allLogged(planned())] }));
+    expect(check(/^Pull-up set 2: /).getAttribute("aria-pressed")).toBe("true");
+    expect(rows("Pull-up")).not.toBeNull();
+    expect(queryFolded("Pull-up")).toBeNull();
+    foreground();
+    expect(folded("Pull-up")).toBeTruthy();
+  });
+
+  it("unlogging a set of an opened exercise leaves it open (and stops the rest it started); done again it stays — and folds at the next moment", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned(), ["p2"])] };
+    renderTrain();
+    await user.click(check(/^Pull-up set 2: /));
+    expect(restPill()).not.toBeNull();
+    await user.click(check(/^Pull-up set 2: /));
+    expect(setById("p2").done).toBe(false);
+    expect(restPill()).toBeNull();
+    expect(rows("Pull-up")).not.toBeNull();
+    expect(openToggle("Pull-up")).toBeNull();
+    // An exercise opened by hand, a set unlogged and logged again: it is an ordinary done block again.
+    await user.click(folded("Hang"));
+    await user.click(check(/^Hang set 1: /));
+    await user.click(check(/^Hang set 1: /));
+    expect(rows("Hang")).not.toBeNull();
+    foreground();
+    expect(folded("Hang")).toBeTruthy();
+    // The pull-ups, still a set short, are open.
+    expect(rows("Pull-up")).not.toBeNull();
+  });
+
+  it("an exercise opened by hand stays open through edits that keep it done", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned())] };
+    renderTrain();
+    await user.click(folded("Hang"));
+    await user.click(screen.getByRole("button", { name: /^Edit Hang set 1: / }));
+    const editor = within(screen.getByRole("dialog", { name: "Hang · set 1" }));
+    await user.click(editor.getByRole("button", { name: "Increase load" }));
+    await user.click(editor.getByRole("button", { name: "Update" }));
+    expect(setById("h1").weight).toBeGreaterThan(25);
+    foreground();
+    expect(rows("Hang")).not.toBeNull();
+    expect(openToggle("Hang")).not.toBeNull();
+  });
+
+  it("a superset folds as one, when every member is done — and opens and folds from its header", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(withSuperset(), ["c1"])] };
+    renderTrain();
+    // Pull-up is done, Curl isn't: the superset is open, no member folds by itself.
+    expect(rows("Pull-up")).not.toBeNull();
+    expect(queryFolded("Pull-up")).toBeNull();
+    expect(queryFolded("Superset A")).toBeNull();
+    expect(openToggle("Superset A")).toBeNull();
+    await user.click(check(/^Curl set 1: /));
+    // Done now, and still open: its header offers the fold.
+    expect(rows("Curl")).not.toBeNull();
+    await user.click(openToggle("Superset A")!);
+    expect(rows("Pull-up")).toBeNull();
+    expect(rows("Curl")).toBeNull();
+    expect(folded("Superset A").textContent).toMatch(/A1Pull-up2 × 8 reps.*A2Curl10 × 30 lb/);
+    expect(screen.queryByRole("button", { name: "Manage Superset A" })).toBeNull();
+    await user.click(folded("Superset A"));
+    expect(screen.getByRole("button", { name: "Manage Superset A" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Curl options" })).toBeTruthy();
+    // Opened again elsewhere (the tab left and come back to), it is still open: it was opened by hand.
+    leaveAndReturn();
+    expect(rows("Curl")).not.toBeNull();
+  });
+
+  it("a member skipped today doesn't hold its superset open, and shows as skipped on the folded row", () => {
+    const s = allLogged(withSuperset(), ["c1"]);
+    const skipped: Session = {
+      ...s,
+      blocks: s.blocks.map((b) => (b.id === "ss" ? { ...b, exercises: b.exercises.map((e) => (e.exerciseId === CURL ? { ...e, skipped: true } : e)) } : b)),
+    };
+    store.data = { ...base(), sessions: [skipped] };
+    renderTrain();
+    expect(folded("Superset A").textContent).toMatch(/A2Curl.*Skipped today/);
+    expect(folded("Superset A").textContent).not.toMatch(/Curl.*10 ×/);
+  });
+
+  it("an exercise skipped today stays its own row: not done, nothing to fold", () => {
+    const s = allLogged(planned());
+    const skipped: Session = { ...s, blocks: s.blocks.map((b) => (b.id === "hang" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, skipped: true })) } : b)) };
+    store.data = { ...base(), sessions: [skipped] };
+    renderTrain();
+    expect(screen.getByRole("button", { name: "Unskip Hang" })).toBeTruthy();
+    expect(queryFolded("Hang")).toBeNull();
+  });
+
+  it("a main lift whose rest was skipped: open, the notice and Restore as before; folded, the row says the sets were skipped", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned(), ["m3", "m4", "p1", "p2", "c1", "h1"])] };
+    renderTrain();
+    await user.click(screen.getByRole("button", { name: "Skip rest of Bench press today" }));
+    expect(today().blocks[0]!.exercises[0]!.sets).toHaveLength(2);
+    // Every set it still holds is logged, but nothing folds: the notice is right there.
+    expect(rows("Bench press")).not.toBeNull();
+    expect(screen.getByText("2 sets skipped")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Restore 2 skipped sets of Bench press" })).toBeTruthy();
+    // Its header toggle doesn't call it "all sets logged" either.
+    expect(openToggle("Bench press")).toBeNull();
+    expect(foldToggle("Bench press", true, "2 sets skipped")).not.toBeNull();
+
+    // The day opened again: folded — and the row doesn't read as everything logged.
+    leaveAndReturn();
+    expect(queryFolded("Bench press")).toBeNull();
+    const row = folded("Bench press", "2 sets skipped");
+    const main = today().blocks[0]!.exercises[0]!.sets;
+    expect(row.textContent).toContain(main.map((x) => `${x.weight} × ${x.reps}`).join(" · "));
+    expect(within(row).getByText("2 sets skipped")).toBeTruthy();
+    expect(row.textContent).not.toContain("all sets logged");
+    // Restore is one tap further: open it.
+    await user.click(row);
+    await user.click(screen.getByRole("button", { name: "Restore 2 skipped sets of Bench press" }));
+    expect(today().blocks[0]!.exercises[0]!.sets).toHaveLength(4);
+    expect(foldToggle("Bench press", true, "2 sets skipped")).toBeNull();
+  });
+
+  it("is view state only: nothing is saved, in the session or on the device", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned())] };
+    renderTrain();
+    const before = today();
+    const snapshot = JSON.stringify(before);
+    await user.click(folded("Hang"));
+    await user.click(openToggle("Hang")!);
+    await user.click(folded("Bench press"));
+    foreground();
+    // Not one save: the stored session is the very same object.
+    expect(today()).toBe(before);
+    expect(JSON.stringify(today())).toBe(snapshot);
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it("coming back to Train folds what was done meanwhile and keeps what was opened by hand; a reload starts folded", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [allLogged(planned(), ["p2"])] };
+    renderTrain();
+    await user.click(folded("Hang"));
+    await user.click(check(/^Pull-up set 2: /));
+    leaveAndReturn();
+    expect(rows("Hang")).not.toBeNull();
+    expect(folded("Pull-up")).toBeTruthy();
+    expect(folded("Curl")).toBeTruthy();
+    // A reload: the page's memory is gone with it.
+    reload();
+    forgetFolds();
+    renderTrain();
+    expect(rows("Hang")).toBeNull();
+    expect(folded("Hang")).toBeTruthy();
+  });
+
+  it("another day is another day: what was opened by hand here isn't open there, same block or not", async () => {
+    const user = userEvent.setup();
+    const lastMonday = "2026-11-09";
+    // Two days whose main-lift blocks have the very same id.
+    const sameIds = (s: Session): Session => ({ ...s, blocks: s.blocks.map((b, i) => ({ ...b, id: i === 0 ? "main" : b.id })) });
+    store.data = { ...base(), sessions: [sameIds(allLogged(planned())), sameIds(allLogged(planned(lastMonday)))] };
+    renderTrain(`/train/${lastMonday}`);
+    await user.click(folded("Bench press"));
+    await user.click(folded("Hang"));
+    expect(rows("Bench press")).not.toBeNull();
+    // On to today, in the same screen: it opens folded, whatever is open on the other day.
+    await user.click(screen.getByRole("link", { name: "← Today" }));
+    expect(where()).toBe("/train");
+    expect(rows("Bench press")).toBeNull();
+    expect(folded("Bench press")).toBeTruthy();
+    expect(folded("Hang")).toBeTruthy();
+    // And back, a day at a time: last Monday's are as they were left.
+    for (let i = 0; i < 7; i++) await user.click(screen.getByRole("button", { name: "Previous day" }));
+    expect(where()).toBe(`/train/${lastMonday}`);
+    expect(rows("Bench press")).not.toBeNull();
+    expect(rows("Hang")).not.toBeNull();
+    expect(folded("Curl")).toBeTruthy();
+  });
+
+  it("a finished session opens as a recap: every done exercise folded, one left open still open", () => {
+    store.data = { ...base(), sessions: [{ ...allLogged(planned(), ["p2"]), completedAt: `${TODAY}T18:00:00.000Z` }] };
+    renderTrain();
+    for (const name of ["Bench press", "Curl", "Hang"]) expect(folded(name)).toBeTruthy();
+    expect(rows("Pull-up")).not.toBeNull();
+    // On a record the folded rows read a step brighter, as logged rows do.
+    expect(folded("Curl").querySelector(".num")!.className).toContain("text-fg-2");
+  });
+
+  it("a preview never folds: it shows the plan, whatever the day holds", () => {
+    // A session saved (and logged) on a day that is still ahead.
+    const ahead = "2026-11-23";
+    store.data = { ...base(), sessions: [allLogged(planned(ahead))] };
+    renderTrain(`/train/${ahead}`);
+    expect(screen.getByText("Preview")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /all sets logged/ })).toBeNull();
+    expect(document.querySelector("[data-folded]")).toBeNull();
+    foreground();
+    expect(document.querySelector("[data-folded]")).toBeNull();
+    expect(rows("Bench press")).not.toBeNull();
+  });
+
+  it("the dock's Finish doesn't come or go in the moment after a fold by hand — the page's own button coming on screen waits", async () => {
+    const user = userEvent.setup();
+    watchViewport(false);
+    store.data = { ...base(), sessions: [allLogged(planned(), ["h1"])] };
+    renderTrain();
+    await user.click(check(/^Hang set 1: /));
+    expect(finishInDock()).not.toBeNull();
+    expect(restPill()).not.toBeNull();
+    // Folding the block by hand makes the page shorter: its own Finish button comes on screen.
+    await user.click(openToggle("Hang")!);
+    scrollPage(true);
+    // The dock keeps Finish where it is (the rest pill above it doesn't drop into its place) …
+    expect(finishInDock()).not.toBeNull();
+    await wait(1000);
+    expect(finishInDock()).not.toBeNull();
+    // … and steps aside once the moment has passed.
+    await waitFor(() => expect(finishInDock()).toBeNull(), { timeout: 3000 });
+    // Without a fold, the page's button coming on screen takes it out of the dock at once (as ever).
+    scrollPage(false);
+    await waitFor(() => expect(finishInDock()).not.toBeNull(), { timeout: 3000 });
+    await wait(1200);
+    scrollPage(true);
+    expect(finishInDock()).toBeNull();
   });
 });

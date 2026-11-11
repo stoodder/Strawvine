@@ -6,7 +6,7 @@
  * without rewriting it — logging a set writes it — and changing back restores its own targets.
  */
 import type { Page } from "@playwright/test";
-import { expect, expectSynced, MONDAY, MONDAY_ISO, onboardedOn, openExerciseEditor, serverData, test } from "./helpers";
+import { expect, expectSynced, foldedRow, MONDAY, MONDAY_ISO, onboardedOn, openExerciseEditor, openFolded, serverData, test } from "./helpers";
 
 /** The Monday after the suite's first one: week 2, Push again. */
 const NEXT_MONDAY = new Date(2026, 10, 2, 10, 0, 0);
@@ -123,6 +123,9 @@ test("a new measure applies from now on; the logged session keeps the old one", 
 
   // Last week's session still shows what was done.
   await page.goto(`/train/${MONDAY_ISO}`);
+  // Done, so that day opens with it folded — in the measure it was done in; opened, its rows say the same.
+  await expect(foldedRow(page, "Sled push")).toContainText("3 × 10 · 90 lb");
+  await openFolded(page, "Sled push");
   for (const n of [1, 2, 3]) await expect(chip(page, "Sled push", n)).toHaveAccessibleName(/10\s?reps\s+at\s+90\s+lb$/);
 });
 

@@ -7,13 +7,12 @@ import { defaultTarget } from "../../../shared/session";
 import type { Measure, SetEntry } from "../../../shared/schemas";
 import { celebrate, success } from "../../lib/haptics";
 import { Sheet, Stepper } from "../ui";
+import { measureUnit } from "./sessionEdit";
+
+export { measureUnit };
 
 /** Ref callback: focus an element as it mounts (after the control that was pressed went away). */
 const focusOnMount = (el: HTMLElement | null) => el?.focus({ preventScroll: true });
-
-export function measureUnit(m: Measure): string {
-  return m === "seconds" ? "s" : m === "meters" ? "m" : "";
-}
 
 /**
  * The plates to load per side for `weight` (nothing for an empty bar or less). `label` leads the

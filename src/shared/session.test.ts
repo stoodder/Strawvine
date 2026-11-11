@@ -5,7 +5,10 @@ import { achievements, checklist, streaks, type AppData } from "./gamify";
 import { emptyDayLog, type BlockExercise, type Exercise, type MaxEntry, type Session, type SetEntry } from "./schemas";
 import {
   accessoryHint,
+  allLogged,
   blankSet,
+  blockComplete,
+  blockCounts,
   buildSession,
   buildSessionFrom,
   defaultTarget,
@@ -800,6 +803,42 @@ describe("sessionCounts", () => {
       ],
     };
     expect(sessionCounts(s)).toEqual({ done: 2, total: 3 });
+    // The session's counts are its blocks' counts, added up.
+    expect(s.blocks.map(blockCounts)).toEqual([
+      { done: 1, total: 2 },
+      { done: 1, total: 1 },
+    ]);
+  });
+});
+
+describe("blockComplete", () => {
+  const done = () => blankSet({ done: true });
+  const block = (exs: Array<{ sets: SetEntry[]; skipped?: boolean }>, extra: Partial<Session["blocks"][number]> = {}): Session["blocks"][number] => ({
+    id: "b",
+    kind: "accessory",
+    exercises: exs.map((e, i) => ({ exerciseId: 10 + i, measure: "reps" as const, ...e })),
+    ...extra,
+  });
+
+  it("is every set logged, and at least one — the rule Finish is offered by", () => {
+    expect(allLogged({ done: 3, total: 3 })).toBe(true);
+    expect(allLogged({ done: 2, total: 3 })).toBe(false);
+    expect(allLogged({ done: 0, total: 0 })).toBe(false);
+    expect(blockComplete(block([{ sets: [done(), done()] }]))).toBe(true);
+    expect(blockComplete(block([{ sets: [done(), blankSet()] }]))).toBe(false);
+    // Nothing to log isn't done.
+    expect(blockComplete(block([{ sets: [] }]))).toBe(false);
+  });
+
+  it("takes a superset as a whole", () => {
+    expect(blockComplete(block([{ sets: [done()] }, { sets: [done(), done()] }]))).toBe(true);
+    expect(blockComplete(block([{ sets: [done()] }, { sets: [done(), blankSet()] }]))).toBe(false);
+  });
+
+  it("counts a skipped member for nothing, and a block skipped entirely isn't complete", () => {
+    expect(blockComplete(block([{ sets: [done()] }, { sets: [blankSet()], skipped: true }]))).toBe(true);
+    expect(blockComplete(block([{ sets: [done()], skipped: true }]))).toBe(false);
+    expect(blockComplete(block([{ sets: [done()] }], { kind: "primary", skipped: true }))).toBe(false);
   });
 });
 

@@ -277,6 +277,23 @@ export async function expectFocusNotOnBody(page: Page, what: string): Promise<st
   return last;
 }
 
+/**
+ * Train: a done block's toggle, by the name it leads with ("Bench press", "Superset A") — its
+ * folded row (`expanded: false`: it shows as one summary row), or the one in its open header
+ * (`expanded: true`, which folds it again). `status`: what the name says after it — "all sets
+ * logged", or "2 sets skipped" for a main lift whose rest was skipped.
+ */
+export const foldToggle = (page: Page, name: string, expanded: boolean, status = "all sets logged") =>
+  page.getByRole("button", { name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\(${status}\\)`), expanded });
+/** Train: the folded row of a done block. */
+export const foldedRow = (page: Page, name: string, status?: string) => foldToggle(page, name, false, status);
+
+/** Train: open a done block from its folded row — its rows, "+ set" and options are there again, at once. */
+export async function openFolded(page: Page, name: string) {
+  await foldedRow(page, name).click();
+  await expect(foldToggle(page, name, true)).toBeVisible();
+}
+
 /** The dock's toasts (outside #root, so they stay usable while a sheet is open). */
 export const notifications = (page: Page) => page.getByRole("region", { name: "Notifications" });
 

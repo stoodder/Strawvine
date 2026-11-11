@@ -412,20 +412,49 @@ export function planChanged(session: Session, ctx: Omit<BuildContext, "sessions"
   return !planMatches(session, ctx);
 }
 
-/** Logged and total sets of a session, leaving out exercises (and a main lift) skipped today. */
-export function sessionCounts(session: Session): { done: number; total: number } {
+export interface SetCounts {
+  done: number;
+  total: number;
+}
+
+/** Logged and total sets of one block (the main lift, an exercise, a superset), leaving out what was skipped today. */
+export function blockCounts(block: Block): SetCounts {
   let done = 0;
   let total = 0;
-  for (const b of session.blocks) {
-    if (b.skipped) continue;
-    for (const e of b.exercises) {
+  if (!block.skipped)
+    for (const e of block.exercises) {
       if (e.skipped) continue;
       total += e.sets.length;
       for (const s of e.sets) if (s.done) done++;
     }
+  return { done, total };
+}
+
+/** Logged and total sets of a session, leaving out exercises (and a main lift) skipped today. */
+export function sessionCounts(session: Session): SetCounts {
+  let done = 0;
+  let total = 0;
+  for (const b of session.blocks) {
+    const c = blockCounts(b);
+    done += c.done;
+    total += c.total;
   }
   return { done, total };
 }
+
+/**
+ * Every counted set is logged — and at least one is (what was skipped counts for nothing, so
+ * something must be logged). The one rule for "done": the session's counts offer Finish from the
+ * dock by it, a block's counts (`blockComplete`) fold that block to its summary on Train.
+ */
+export const allLogged = ({ done, total }: SetCounts): boolean => done > 0 && done >= total;
+
+/**
+ * Whether a block is complete: every set of it is logged (`allLogged` of `blockCounts`). A
+ * superset is one block, so it is complete as a whole — a member skipped today doesn't hold it
+ * open, as it doesn't hold Finish back. A block skipped entirely (or without sets) isn't complete.
+ */
+export const blockComplete = (block: Block): boolean => allLogged(blockCounts(block));
 
 const sameNum = (a: number | null, b: number | null) => (a === null || b === null ? a === b : Math.abs(a - b) < 1e-6);
 

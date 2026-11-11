@@ -499,9 +499,54 @@ optional note.
     that rest. Undo toasts are for edits with no other undo: an editor save that changed a value, deleting a set,
     logging the remaining sets / a round, skip, remove, superset edits.
   - **Finish** is at the end of the page. Once every set is logged it is also offered from the bottom dock ("Finish ·
-    7/7 sets", in the accent, nearest the nav) while the page's own button is off screen — never both at once. With
+    7/7 sets", in the accent, nearest the nav) while the page's own button is off screen — never both at once (but for
+    the moment after a block is folded or opened by hand, see "Done exercises fold"). With
     sets still open the dock is left to the workout (the rest pill, an Undo) and the page's button asks the
     unlogged-sets question first; then the recap.
+  - **Done exercises fold.** A block — the main lift, an exercise, or a superset as a whole — is _done_ when every
+    one of its sets is logged, by the counts Finish goes by (`blockComplete`: what is skipped today counts for
+    nothing, so a superset with a skipped member is done when the others are; a block with nothing logged, or
+    skipped entirely, never is). A done block can show as **one row**: its name, what it came to, and the logged row's
+    filled check — gold only when the main lift's AMRAP beat its target, as on that set's own row.
+    - **Nothing folds while the page is in use**, so nothing moves under a thumb and no tap is ever ignored. Logging a
+      block's last set changes nothing but that set: the block stays as it is, and its header becomes the toggle that
+      folds it (the exercise's name with a chevron; for a superset, whose name opens its sheet, a chevron at the end of
+      its header). The same goes for a set that arrives from another device.
+    - Done blocks fold, **in one step** (no animation), at three moments: when the day is **opened** (the app is
+      opened or reloaded, the Train tab is come back to, another date is shown — so a session, today's, a past day's
+      or a finished one, opens with its done blocks folded: a finished session reads as a recap, whatever was left
+      unlogged open); when the app **comes back to the foreground** (the phone unlocked between sets), unless a sheet
+      is open; and **by hand** — a tap on the folded row opens the block with everything it had (its rows, "+ set", the
+      options, the superset's sheet), a tap on the open block's header toggle folds it. A preview shows the plan and
+      never folds. An exercise skipped today is not done: it stays its own row with Unskip.
+    - Back in the foreground the page is **held in place**: the first block at or below the top of the screen that
+      isn't done — the one being worked on — is where it was (done blocks, folded or open, don't count; past the last
+      block, what follows the exercises does). The page scrolls up by what folded away above it, in the same step;
+      only at the very top of the page, where there is nothing left to scroll, does what follows come up.
+    - A block **opened by hand stays open** through those moments, for the life of the page, until it is folded by
+      hand — or stops being done (a set unlogged or added), which makes it an ordinary open block again: done once
+      more, it folds at the next of those moments.
+    - The row's result is the logged sets in a line (`exerciseSummary`, formatting only): "3 × 8 · 135 lb" when they
+      are alike ("3 × 10 reps", "3 × 30 s · 25 lb", "3 × 40 m · 70 lb" — the unit as a set's row has it, sets × amount
+      written as everywhere on the screen, e.g. the deload's "4 × 10"); amounts or loads that differ are listed set by
+      set ("8/8/6 · 135 lb", "3 × 8 · 125/130/135 lb"), beyond four differing sets as a range ("5 sets · 6–10 reps ·
+      40–50 lb"); a single set is just what its row shows ("8 × 25 lb", "30 s"); the main lift reads set by set as its
+      rows do, the AMRAP with its tag ("170 × 6 · 160 × 8 · 150 × 10 · 140 × 14 +2 reps · +2 lb"). It never gives a set
+      a load or a count it wasn't logged with: a set without one is "–" in a list ("2 × 10 · 25/– lb", "–/10 · 50 lb" —
+      the count logged, never the target), and where a range would cover it the line says "up to" ("5 × 20 m · up to
+      10 lb"); a set logged at 0 lb has no load. A folded superset is one row too: "Superset A", then each member
+      with its result (or "Skipped today").
+    - A main lift whose rest was skipped ("Skip rest": the sets it still holds are all logged) is done, and stays open
+      with its "2 sets skipped · Restore" notice like any block completed on the page. Folded, its row doesn't read as
+      everything logged: it says "2 sets skipped", in the row and in its name; Restore is there once it is opened.
+    - The folded row is a button at least 44 px tall (`aria-expanded`), named by what it shows ("Lateral raise (all
+      sets logged) 3 × 12 · 20 lb"). Keyboard focus on a toggle follows it to the block's other face.
+    - After a fold or an opening by hand the page is a different length, which can put the page's own Finish button
+      on screen or take it off. For 2 s the dock keeps offering Finish — or not — as it did, so neither that pill nor
+      the rest pill above it changes place under a tap that follows; then the usual rule applies again (see Finish).
+    - Folded or open is **the view's state only**: never part of the session, the store, the outbox or the server,
+      and no setting. A block opened by hand is remembered per day for the life of the page (another tab and back
+      keeps it); a reload — and another device — starts from "done blocks folded".
   - Train's header always links to Program: the week in words ("Week 1 of 5"; on screens under 360 px "Week 1",
     "Deload", "Cycle 2 · Week 1"), or before the first cycle when it starts ("Starts Mon Nov 2"). Before the first
     cycle a lifting day says "Your program starts Monday, Nov 2" in place of its main lift; once the cycle runs, a
