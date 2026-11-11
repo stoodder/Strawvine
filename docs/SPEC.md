@@ -220,9 +220,11 @@ estimate down for a few days (an 8 lb overnight jump once produced an 870 kcal t
 TDEE can ask for too little on its own. So the target has a backstop:
 
 - **`limits.minCalories`** (kcal/day, 800–5,000; default **1,500**), edited in Settings → Nutrition as "Minimum
-  calories". The field is optional in the settings document: settings stored before it existed (or saved by a build
-  that doesn't know it) read as the default through `minCalories()` (`src/shared/defaults.ts`). Nothing is migrated and
-  the default is never written into a document in passing.
+  calories". The range is written down once (`MIN_CALORIES_RANGE`, `src/shared/schemas.ts`) for the schema, the field
+  and its message; there is no "off" — the backstop is always there. The field is optional in the settings document:
+  settings stored before it existed (or saved by a build that doesn't know it) read as the default through
+  `minCalories()` (`src/shared/defaults.ts`). Nothing is migrated and the default is never written into a document in
+  passing.
 - `recommend` applies it in **every direction** (cut, maintenance, build): the target is never below the minimum. The
   recommendation says so (`floored`, with `minCalories`) only when the minimum is holding the target up — a plan that
   lands exactly on it stands on its own. **Macros** are built from the held calories.
@@ -230,18 +232,28 @@ TDEE can ask for too little on its own. So the target has a backstop:
   §4.6) is held by the minimum as it is set now.
 - **The rate follows the calories.** A cut held at the minimum is a smaller deficit than the pace asked for, so the
   recommendation's rate (`rateLbPerWeek`, `pacePctPerWeek`) becomes the one the held target is built for:
-  `(minimum − TDEE) × 7 / 3500`, never faster than the pace and never a gain — 0 when the minimum is at or above the
-  TDEE. Everything that reads the plan reads that rate: Today's "Cut · −0.8 lb/wk" ("Cut · on hold" at 0), the
-  check-in's "plan −0.8" and its verdict (§4.6: a week at the minimum is "On plan" against the held rate, never "Slower
-  than plan" against a pace the app itself held back; at 0 the plan is to hold, so the week reads "Maintaining" or
-  "Drifting"), the rate insights (§7), and the projected date "at pace" (none when the rate is 0; the date at the
-  observed trend is unaffected). A held maintenance or build keeps its own rate: the minimum is above the TDEE estimate
-  there, and the app plans no faster gain on it.
+  `(minimum − TDEE) × 7 / 3500`, never faster than the pace and never a gain. Everything that reads the plan reads that
+  rate: Today's "Cut · −0.8 lb/wk", the check-in's "plan −0.8" and its verdict (§4.6: a week at the minimum is "On
+  plan" against the held rate, never "Slower than plan" against a pace the app itself held back) and the rate insights
+  (§7). A held maintenance or build keeps its own rate: the minimum is above the TDEE estimate there, and the app plans
+  no faster gain on it.
+- **On hold** is decided once, in `recommend`: a held cut whose rate would print as 0.0 lb/wk — less than 0.05
+  (`HOLD_BELOW_LB_PER_WEEK`, a display precision), which covers a minimum at or above the TDEE — has a rate of exactly
+  0 (`isOnHold`). Every screen reads that same 0: Today says "Cut · on hold", the check-in's plan is to hold (no "plan"
+  beside the trend, the week reads "Maintaining" or "Drifting", §4.6) and Goals says the cut is on hold. A rate is never
+  printed as "−0.0".
+- **A held week is never fast because of the hold.** While the minimum holds the target up, the plan's rate is small by
+  the app's doing, so losing more than 1.5 × that is not "Faster than plan" (§4.6) or "ahead of plan" (§7): the week
+  stays "On plan". Only the safety limit calls a held week fast. For the same reason there is **no projected date "at
+  pace"** while the target is held (either direction) — the calories aren't the pace's, and what the minimum leaves of
+  it would project years out near a hold; the date at the observed trend is unaffected and is then the only one shown.
+- Today doesn't say "(capped)" beside the rate of a held target: that word is about the pace, and the target isn't the
+  pace's.
 - **Said quietly wherever the target is shown**, while it is held and only then: "Held at your 1,500 kcal minimum." —
   under the target on Today's Fuel (today and past days), under next week's target in the check-in (§4.6) and as a line
   of its shared text. On Goals (§5), under the pace slider — which keeps showing the pace that was chosen — it adds
   what that does to the pace: "Your calorie target is held at your 1,500 kcal minimum, so it is built for −0.8 lb/wk
-  for now." ("…so the cut is on hold for now." at 0). It is reassurance, not a warning: the page's muted text, no
+  for now." ("…so the cut is on hold for now." on hold). It is reassurance, not a warning: the page's muted text, no
   warning colour, no icon, no alert.
 - The existing safety limits are unchanged: max loss / max gain cap the _pace_; the minimum is a floor under the
   _target_. Protein and fat alone can still add up to more than the target (carbs are then 0): the minimum doesn't
@@ -281,16 +293,22 @@ e.g. "On plan · −1.3 lb this week against −1.5 lb", "Flat this week · +0.1
 +0.2 lb this week"; past a limit it adds ", past your 1% weekly limit" and is always a warning, whatever the verdict
 (a change past a limit is never "flat").
 
+While the minimum calorie target holds the plan's target up (§4.4) the 150 % line doesn't apply: such a week is "On
+plan" however far past the held rate it went, and only the safety limit makes it "Faster than plan".
+
 - The **plan** is the recommendation's rate (§4.4): the chosen pace after the safety limit and the taper — and, while
-  the minimum calorie target holds a cut's target up, the slower rate that target is built for.
+  the minimum calorie target holds a cut's target up, the slower rate that target is built for (0, a plan to hold,
+  when the cut is on hold). `weeklyRate` carries that the plan is held (`held`).
 - `weeklyRate` is the rule, shared with the rate-of-change insights in §7: on plan is at least 60 % of the planned
   change, the planned way, within the limit; past the limit that way is faster; against the plan by anything that
   prints is the wrong way. The insight reads it as is, with one refinement shared with the verdict: on plan by more
   than 1.5× the plan (`FASTER_THAN_PLAN_SHARE`) reads "ahead of plan" as a note rather than "right on plan", so Today's
-  signal and the weekly verdict never disagree.
+  signal and the weekly verdict never disagree. Neither applies the 1.5× to a held plan, and a week that prints as 0.0
+  gets no rate insight (the verdict calls it flat).
 - `weeklyVerdict` words it, and for the reader splits three of its cases further: against the plan by no more than
-  0.2 lb as printed (or a week that prints as 0.0) is **flat**, not a warning; on plan by more than 1.5 × the plan is
-  **faster**, as a note; holding past a limit is **drifting**, not a calm "Maintaining". These are read at the precision
+  0.2 lb as printed (or a week that prints as 0.0, on plan or slower) is **flat**, not a warning; on plan by more than
+  1.5 × the plan is **faster**, as a note (not for a held plan); holding past a limit is **drifting**, not a calm
+  "Maintaining". These are read at the precision
   the change is shown in, so the title never contradicts the number under it.
 - The 10 days, the 60 %, the 0.2 lb and the 1.5 × are insight constants (`RATE_MIN_LOGGED_DAYS`, `ON_PLAN_MIN_SHARE`,
   `FLAT_MAX_LB`, `FASTER_THAN_PLAN_SHARE`), not training rules.
@@ -323,8 +341,9 @@ targets as read-only progress; targets are edited on Goals).
 
 ## 5. Goals
 
-- Goal weight with projected date range. While the minimum calorie target holds the target up (§4.4), the date "at
-  pace" is at the rate the held target is built for, and a quiet line under the pace slider says so.
+- Goal weight with projected date range. While the minimum calorie target holds the target up (§4.4) there is no date
+  "at pace" (the projection is the observed trend's alone), and a quiet line under the pace slider says what the target
+  is built for.
 - The **pace slider** sets the calorie targets, so it is hard to nudge by accident and easy to take back: a change is
   saved once per gesture (when the finger, mouse or key lets go — not per tick) and announced with an undoable toast
   ("Pace set to −0.75%/wk · Undo"); further nudges while that toast is up fold into it, and its Undo returns to the pace

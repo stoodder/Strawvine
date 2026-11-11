@@ -162,6 +162,33 @@ describe("Today's Fuel: a target held at the minimum calorie target", () => {
     expect(target(fuelSection).textContent).toBe("Target1,500kcalCut · on holdHeld at your 1,500 kcal minimum.");
   });
 
+  it("on hold is the domain's call, at the precision the rate prints in: 24 kcal under the TDEE is, 30 is not", () => {
+    // 1,524 against a 1,500 minimum is 0.048 lb/week (prints as 0.0): a hold. Never "Cut · −0.0 lb/wk".
+    for (const kcal of [1510, 1524]) {
+      const view = renderDay(eating(kcal));
+      expect(target(view.section("Fuel")).textContent, `${kcal}`).toBe("Target1,500kcalCut · on holdHeld at your 1,500 kcal minimum.");
+      view.unmount();
+    }
+    // 1,530 is 0.06 lb/week: a cut, as slow as it prints.
+    const view = renderDay(eating(1530));
+    expect(target(view.section("Fuel")).textContent).toBe("Target1,500kcalCut · −0.1 lb/wkHeld at your 1,500 kcal minimum.");
+    expect(document.body.textContent).not.toMatch(/[−-]0\.0/);
+  });
+
+  it("doesn't call a held rate capped: the cap is on the pace, and the target isn't the pace's", () => {
+    // A pace of 2 %/week against a 1 % limit: capped. On its own the tile says so…
+    const overLimit = (s: AppData["settings"]): AppData["settings"] => ({ ...s, weightGoal: { ...s.weightGoal!, pacePctPerWeek: 2 } });
+    let view = renderDay(eating(3000, overLimit(cutting())));
+    expect(target(view.section("Fuel")).textContent).toBe("Target2,000kcalCut · −2.0 lb/wk (capped)");
+    view.unmount();
+    // …held at the minimum, the rate beside it is the minimum's, not the capped pace.
+    view = renderDay(eating(1900, overLimit(cutting())));
+    expect(target(view.section("Fuel")).textContent).toBe("Target1,500kcalCut · −0.8 lb/wkHeld at your 1,500 kcal minimum.");
+    view.unmount();
+    view = renderDay(eating(1400, overLimit(cutting())));
+    expect(target(view.section("Fuel")).textContent).toBe("Target1,500kcalCut · on holdHeld at your 1,500 kcal minimum.");
+  });
+
   it("builds the macro targets from the held calories", () => {
     // 200 g protein and 70 g fat are 1,430 kcal: 18 g of carbs fit under 1,500 (none would under 900).
     const fuelSection = renderDay(eating(1900)).section("Fuel");

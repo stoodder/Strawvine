@@ -11,7 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultSettings } from "../../shared/defaults";
-import { settingsSchema, type Exercise, type Program, type Settings } from "../../shared/schemas";
+import { MIN_CALORIES_RANGE, settingsSchema, type Exercise, type Program, type Settings } from "../../shared/schemas";
 import { shiftEffect, SHIFT_GUARD_MS } from "../components/program/ProgramSections";
 import { programPathForSettingsHash } from "../components/program/sections";
 import { UNDO_MS } from "../components/settings/undo";
@@ -1223,8 +1223,10 @@ describe("Settings", () => {
       expect(store.saved).toHaveLength(0);
     });
 
-    it("saves only its own field, on a document with or without one", async () => {
-      for (const before of [base(), legacy()]) {
+    it("saves only its own field, on a document with or without one, whatever the other limits are", async () => {
+      // The other limits are not the defaults: a save that rebuilt `limits` from defaults would show.
+      const custom = (s: Settings): Settings => ({ ...s, limits: { ...s.limits, maxLossPctPerWeek: 0.8, maxGainPctPerWeek: 0.3 } });
+      for (const before of [base(), legacy(), custom(base()), custom(legacy())]) {
         reset(before);
         const user = userEvent.setup();
         const view = show("/settings");
@@ -1267,6 +1269,52 @@ describe("Settings", () => {
       expect(field().getAttribute("aria-invalid")).toBeNull();
     });
 
+    it("the message goes when the value it already had is typed back (the input has nothing new to commit)", async () => {
+      const user = userEvent.setup();
+      show("/settings");
+      await type(user, field(), "0");
+      expect(field().getAttribute("aria-invalid")).toBe("true");
+      expect(within(field().closest("section")!).getByText("Between 800 and 5,000.")).toBeTruthy();
+      await type(user, field(), "1500");
+      expect(field().value).toBe("1,500");
+      expect(field().getAttribute("aria-invalid")).toBeNull();
+      expect(screen.queryByText("Between 800 and 5,000.")).toBeNull();
+      expect(store.saved).toHaveLength(0);
+    });
+
+    it("the message goes as soon as the entry is edited, and comes back if it is left out of range again", async () => {
+      const user = userEvent.setup();
+      show("/settings");
+      await type(user, field(), "0");
+      expect(screen.getByText("Between 800 and 5,000.")).toBeTruthy();
+      await user.click(field());
+      await user.keyboard("9");
+      expect(screen.queryByText("Between 800 and 5,000.")).toBeNull();
+      await user.tab();
+      expect(screen.getByText("Between 800 and 5,000.")).toBeTruthy();
+      // Left as it is (no edit), it stays refused.
+      await user.click(field());
+      await user.tab();
+      expect(screen.getByText("Between 800 and 5,000.")).toBeTruthy();
+      expect(store.saved).toHaveLength(0);
+    });
+
+    it("its range is the schema's, from the one place it is written down", () => {
+      expect(MIN_CALORIES_RANGE).toEqual({ min: 800, max: 5000 });
+      const ok = (minCalories: number) => settingsSchema.safeParse({ ...base(), limits: { ...base().limits, minCalories } }).success;
+      expect([MIN_CALORIES_RANGE.min, MIN_CALORIES_RANGE.max].map(ok)).toEqual([true, true]);
+      expect([MIN_CALORIES_RANGE.min - 1, MIN_CALORIES_RANGE.max + 1].map(ok)).toEqual([false, false]);
+    });
+
+    it("takes a decimal as the whole number it shows", async () => {
+      const user = userEvent.setup();
+      show("/settings");
+      await type(user, field(), "1650.6");
+      expect(field().value).toBe("1,651");
+      expect(lastSaved().limits.minCalories).toBe(1651);
+      expect(field().getAttribute("aria-invalid")).toBeNull();
+    });
+
     it("is named in the message when the schema refuses a stored value", () => {
       const issue = (minCalories: number) => {
         const r = settingsSchema.safeParse({ ...base(), limits: { ...base().limits, minCalories } });
@@ -1275,6 +1323,52 @@ describe("Settings", () => {
       expect(issue(500)).toBe("Minimum calories must be at least 800.");
       expect(issue(9000)).toBe("Minimum calories can be at most 5,000.");
     });
+  });
+});
+
+describe("number settings: an out-of-range entry and the value typed back", () => {
+  /** Each field: where it lives, an entry out of its range, its message, and the value it has. */
+  const FIELDS = [
+    ["/settings", "Steps", "200000", "Between 0 and 100,000.", "15000", "15,000"],
+    ["/settings", "Max loss", "9", "Between 0% and 3%.", "1", "1"],
+    ["/settings", "Calories per lb", "10", "Between 1,000 and 6,000.", "3500", "3,500"],
+    ["/program", "Accessory increment", "99", null, "5", "5"],
+  ] as const;
+
+  it.each(FIELDS)(
+    "%s › %s: refused with a message, which goes when the saved value is typed back",
+    async (path, name, bad, message, back, shown) => {
+      const user = userEvent.setup();
+      show(path);
+      const field = () => screen.getByRole<HTMLInputElement>("textbox", { name });
+      expect(field().value).toBe(shown);
+      await type(user, field(), bad);
+      expect(field().getAttribute("aria-invalid")).toBe("true");
+      if (message) expect(screen.getByText(message)).toBeTruthy();
+      expect(store.saved).toHaveLength(0);
+      await type(user, field(), back);
+      expect(field().value).toBe(shown);
+      expect(field().getAttribute("aria-invalid")).toBeNull();
+      if (message) expect(screen.queryByText(message)).toBeNull();
+      expect(store.saved).toHaveLength(0);
+    },
+  );
+
+  it("an optional number left empty is still fine, and an in-range entry still saves", async () => {
+    const user = userEvent.setup();
+    show("/settings");
+    const estimate = () => screen.getByRole<HTMLInputElement>("textbox", { name: "Maintenance estimate" });
+    await type(user, estimate(), "500");
+    expect(screen.getByText("Between 800 and 10,000.")).toBeTruthy();
+    await user.clear(estimate());
+    await user.tab();
+    expect(screen.queryByText("Between 800 and 10,000.")).toBeNull();
+    expect(estimate().getAttribute("aria-invalid")).toBeNull();
+    await type(user, estimate(), "2600");
+    expect(lastSaved().nutrition.initialTdee).toBe(2600);
+    // Steps: a whole number, as typed or rounded to one.
+    await type(user, screen.getByRole("textbox", { name: "Steps" }), "12000.4");
+    expect(lastSaved().targets.steps).toBe(12000);
   });
 });
 

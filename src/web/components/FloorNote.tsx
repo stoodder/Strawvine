@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import type { Recommendation } from "../../shared/nutrition";
+import { isOnHold, type Recommendation } from "../../shared/nutrition";
 import { fmt, signed } from "../lib/format";
 
 type Floored = Pick<Recommendation, "floored" | "minCalories">;
@@ -7,11 +7,6 @@ type Floored = Pick<Recommendation, "floored" | "minCalories">;
 /** "Held at your 1,500 kcal minimum." — the one wording, wherever a held target is shown or shared. */
 export function floorNoteText(rec: Floored): string {
   return `Held at your ${fmt(rec.minCalories)} kcal minimum.`;
-}
-
-/** A cut held at a minimum that leaves no deficit (`recommend`): its rate prints as 0.0 lb/wk. */
-export function isOnHold(rec: Pick<Recommendation, "floored" | "direction" | "rateLbPerWeek">): boolean {
-  return rec.floored && rec.direction === "lose" && Math.abs(rec.rateLbPerWeek) < 0.05;
 }
 
 /**

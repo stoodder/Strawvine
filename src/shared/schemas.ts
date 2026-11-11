@@ -212,6 +212,13 @@ export type Program = z.infer<typeof programSchema>;
 
 const weekdayFlags = z.array(z.boolean()).length(7);
 
+/**
+ * The range of the minimum calorie target (`limits.minCalories`), kcal/day: the one place it is
+ * written down, for the schema and for the Settings field and its message. There is no "off": the
+ * backstop is always there.
+ */
+export const MIN_CALORIES_RANGE = { min: 800, max: 5000 } as const;
+
 export const settingsSchema = z.object({
   onboarded: z.boolean(),
   targets: z.object({
@@ -238,7 +245,7 @@ export const settingsSchema = z.object({
      * stored before it existed still validate; read it through `minCalories()` (defaults.ts), never
      * directly.
      */
-    minCalories: z.number().min(800).max(5000).optional(),
+    minCalories: z.number().min(MIN_CALORIES_RANGE.min).max(MIN_CALORIES_RANGE.max).optional(),
   }),
   weightGoal: z
     .object({

@@ -22,6 +22,8 @@ const target = async (page: Page) =>
       .evaluate((el) => el.firstChild!.textContent),
   );
 const note = (page: Page) => page.locator("[data-floor-note]");
+/** Goals: the projected date (or range) under "Projected". */
+const projected = (page: Page) => page.locator(".label", { hasText: /^Projected$/ }).locator("xpath=following-sibling::div[1]");
 const minimum = (page: Page) => page.getByRole("textbox", { name: "Minimum calories", exact: true });
 const serverMinimum = async (page: Page) => (await serverData(page)).settings.limits.minCalories;
 
@@ -57,6 +59,13 @@ test("Settings → Minimum calories is a floor under the target: Today shows the
   await expect(minimum(page)).toHaveAttribute("aria-invalid", "true");
   await expectSynced(page);
   expect(await serverMinimum(page)).toBe(1500);
+  // Typing back the value it had is nothing new to save, and the message doesn't outlive the bad entry.
+  await fillNumber(page, "Minimum calories", "1500");
+  await expect(minimum(page)).toHaveValue("1,500");
+  await expect(nutrition.getByText("Between 800 and 5,000.")).toHaveCount(0);
+  await expect(minimum(page)).not.toHaveAttribute("aria-invalid", "true");
+  await fillNumber(page, "Minimum calories", "500");
+  await expect(nutrition.getByText("Between 800 and 5,000.")).toBeVisible();
 
   // Above the day's own target: the minimum holds it up.
   const floor = own + 200;
@@ -138,14 +147,16 @@ test("a cut held at the minimum: the rate, the check-in and Goals all follow the
   expect(heldRate).toBeGreaterThan(paceRate);
 
   // Progress → Week: next week's target is the held one, with the same line; the verdict and the
-  // trend tile measure the week against the held rate, not the pace.
+  // trend tile measure the week against the held rate, not the pace. The seeded week lost more than
+  // 1.5 × that — which is the hold's doing, so it is on plan, not "Faster than plan".
   await page.getByRole("link", { name: "Progress" }).click();
   const nextWeek = page.getByText("Next week", { exact: true }).locator("xpath=..");
   await expect(nextWeek).toContainText(`${kcal(floor)}kcal/day`);
   await expect(nextWeek.locator("[data-floor-note]")).toHaveText(`Held at your ${kcal(floor)} kcal minimum.`);
   const verdict = page.locator("[data-verdict]");
   await expect(verdict).toContainText(`against ${heldRateText} lb`);
-  await expect(verdict).not.toHaveAttribute("data-verdict", "slower");
+  await expect(verdict).toHaveAttribute("data-verdict", "on-plan");
+  await expect(verdict).toHaveAttribute("data-tone", "good");
   await expect(page.getByText(`plan ${heldRateText}`)).toBeVisible();
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 700 });
@@ -160,8 +171,62 @@ test("a cut held at the minimum: the rate, the check-in and Goals all follow the
   await expect(note(page)).toHaveText(
     `Your calorie target is held at your ${kcal(floor)} kcal minimum, so it is built for ${heldRateText} lb/wk for now.`,
   );
+  // No date "at pace" while the target is held: the projection is the observed trend's, one date.
+  await expect(projected(page)).toHaveText(/^[A-Z][a-z]{2} \d{1,2}(, \d{4})?$/);
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 700 });
     expect(await pageOverflow(page), `${width}px, Goals`).toBeNull();
   }
+});
+
+test("a minimum a few kcal under the TDEE puts the cut on hold, and every screen says the same", async ({ page }) => {
+  await onboardedOn(page, MONDAY);
+  await seedHistory(page);
+  await page.goto("/");
+  const tile = targetTile(page);
+  await expect(tile).toContainText(/Cut · −\d\.\d lb\/wk/);
+  const tdee = num(await fuel(page).locator("span", { hasText: /^TDEE/ }).first().locator(".num").first().textContent());
+  // Standing on its own, the goal is projected as a range: at pace and at the observed trend.
+  await page.goto("/goals");
+  await expect(projected(page)).toHaveText(/ – /);
+
+  // Ten kcal under the TDEE: what is left of the rate would print as 0.0 lb/wk.
+  const floor = tdee - 10;
+  await setMinimum(page, floor);
+  const noMinusZero = async (where: string) => expect(await page.locator("#root").innerText(), where).not.toMatch(/[−-]0\.0/);
+
+  await page.getByRole("link", { name: "Back to Today" }).click();
+  await expect(note(page)).toHaveText(`Held at your ${kcal(floor)} kcal minimum.`);
+  await expect(tile).toContainText("Cut · on hold");
+  await noMinusZero("Today");
+
+  // Progress: a plan to hold — Maintaining, no plan beside the trend, never a week "against 0.0 lb".
+  await page.getByRole("link", { name: "Progress" }).click();
+  const verdict = page.locator("[data-verdict]");
+  await expect(verdict).toHaveAttribute("data-verdict", "maintaining");
+  await expect(verdict).toContainText(/Maintaining/);
+  await expect(verdict).not.toContainText("against");
+  const trend = page.locator(".label", { hasText: /^Trend weight$/ }).locator("xpath=..");
+  await expect(trend).toContainText("this week");
+  await expect(trend).not.toContainText("plan");
+  const nextWeek = page.getByText("Next week", { exact: true }).locator("xpath=..");
+  await expect(nextWeek.locator("[data-floor-note]")).toHaveText(`Held at your ${kcal(floor)} kcal minimum.`);
+  // The goal's date there is the observed trend's alone: one date, this year or next — not a range ending years out.
+  await expect(nextWeek).toContainText(/projected [A-Z][a-z]{2} \d{1,2}(, \d{4})?$/);
+  await noMinusZero("Progress");
+
+  // Goals: on hold in words, and the same single date.
+  await page.getByRole("link", { name: "Goals" }).click();
+  await expect(note(page)).toHaveText(`Your calorie target is held at your ${kcal(floor)} kcal minimum, so the cut is on hold for now.`);
+  await expect(projected(page)).toHaveText(/^[A-Z][a-z]{2} \d{1,2}(, \d{4})?$/);
+  await noMinusZero("Goals");
+
+  // Sixty under: a cut again (0.1 lb/wk), on Today and in the check-in alike.
+  await setMinimum(page, tdee - 60);
+  await page.getByRole("link", { name: "Back to Today" }).click();
+  await expect(tile).toContainText("Cut · −0.1 lb/wk");
+  await page.getByRole("link", { name: "Progress" }).click();
+  await expect(verdict).toContainText("against −0.1 lb");
+  await expect(verdict).toHaveAttribute("data-verdict", "on-plan");
+  await expect(trend).toContainText("plan −0.1");
 });

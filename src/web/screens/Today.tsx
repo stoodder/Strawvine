@@ -6,14 +6,14 @@ import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { CALIBRATION_DAYS } from "../../shared/energy";
 import { dayChecklist, isClosed } from "../../shared/gamify";
 import { targetsFor } from "../../shared/insights";
-import { overTarget, PROTEIN_OVER_TARGET_SCALE, remainingKcal, type OverTargetScale } from "../../shared/nutrition";
+import { isOnHold, overTarget, PROTEIN_OVER_TARGET_SCALE, remainingKcal, type OverTargetScale } from "../../shared/nutrition";
 import { cycleLabel, cyclePosition, programDayFor, type CyclePosition } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
 import { Bar, Section, severityClass, severityColor, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
-import { FloorNote, isOnHold } from "../components/FloorNote";
+import { FloorNote } from "../components/FloorNote";
 import { JournalText } from "../components/TextArea";
 import { DayChecklist } from "../components/today/Checklist";
 import { DateJump } from "../components/today/DateJump";
@@ -213,12 +213,13 @@ export function TodayScreen() {
                 sub={
                   <>
                     {/* The rate is the one the target is built for: slower than the pace while the
-                        minimum holds a cut's target up, and "on hold" when that leaves no deficit. */}
+                        minimum holds a cut's target up, and "on hold" when that leaves no deficit.
+                        "(capped)" is about the pace: not said beside a target the minimum set. */}
                     {rec.direction === "maintain"
                       ? "Maintenance"
                       : isOnHold(rec)
                         ? "Cut · on hold"
-                        : `${rec.direction === "lose" ? "Cut" : "Build"} · ${signed(rec.rateLbPerWeek, 1)} lb/wk${rec.paceCapped ? " (capped)" : ""}`}
+                        : `${rec.direction === "lose" ? "Cut" : "Build"} · ${signed(rec.rateLbPerWeek, 1)} lb/wk${rec.paceCapped && !rec.floored ? " (capped)" : ""}`}
                     <FloorNote rec={rec} className="mt-0.5" />
                   </>
                 }

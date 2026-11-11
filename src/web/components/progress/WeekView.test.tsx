@@ -277,6 +277,32 @@ describe("WeekView: next week's target held at the minimum calorie target", () =
     expect(tile("Trend weight").textContent).toContain("plan −1.0");
   });
 
+  it("a cut on hold (a minimum a few kcal under the TDEE) is a plan to hold: Maintaining, and no plan beside the trend", () => {
+    // 1,500 against a 1,510 TDEE: what is left of the rate prints as 0.0, so it is 0.
+    const next = recommend(cutting, 1510, 198.7);
+    expect(next).toMatchObject({ floored: true, rateLbPerWeek: 0 });
+    show(checkin({ next, targetRateLbPerWeek: next.rateLbPerWeek, rate: rate(-1.3, next), projection: null }));
+    expect(verdict().dataset.verdict).toBe("maintaining");
+    expect(verdict().textContent).toBe("Maintaining · trend −1.3 lb this week");
+    expect(tile("Trend weight").textContent).toBe("Trend weight198.7lb−1.3 lb this week");
+    expect(document.body.textContent).not.toMatch(/plan|against|[−-]0\.0/);
+    expect(nextWeek().querySelector("[data-floor-note]")!.textContent).toBe("Held at your 1,500 kcal minimum.");
+  });
+
+  it("a week far past the held rate is on plan, not faster than it: the hold made the plan small", () => {
+    // Held at 1,500 on a 1,700 TDEE the plan is 0.4 lb/week; the week lost 1.3.
+    const next = recommend(cutting, 1700, 198.7);
+    show(checkin({ next, targetRateLbPerWeek: next.rateLbPerWeek, rate: rate(-1.3, next), projection: null }));
+    expect(verdict().dataset.verdict).toBe("on-plan");
+    expect(verdict().dataset.tone).toBe("good");
+    expect(verdict().textContent).toBe("On plan · −1.3 lb this week against −0.4 lb");
+  });
+
+  it("a trend change that prints as zero has no sign", () => {
+    show(checkin({ weightChangeLb: -0.04, rate: rate(-0.04) }));
+    expect(tile("Trend weight").textContent).toBe("Trend weight198.7lb0.0 lb this week · plan −1.5");
+  });
+
   it("names the athlete's own minimum", () => {
     show(held(2000, { ...cutting, limits: { ...cutting.limits, minCalories: 1250 } }));
     expect(nextWeek().querySelector("[data-floor-note]")!.textContent).toBe("Held at your 1,250 kcal minimum.");

@@ -169,7 +169,7 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     avgRestingHr: mean(days.filter((d) => d.restingHrBpm != null).map((d) => d.restingHrBpm!)),
     vo2Max: vo2MaxTrend(data.days, to, from),
     next,
-    // With the plan: a target held at the minimum projects at the pace it is really built for.
+    // With the plan: a target held at the minimum has no date "at pace".
     projection: end?.avgWeight != null ? project(settings, today, end.avgWeight, weekAgo?.avgWeight ?? null, next) : null,
   };
 }
@@ -202,9 +202,16 @@ export interface WeeklyRate {
   /**
    * Signed lb/week the plan asks for (0 when maintaining). It is `recommend`'s rate, so while the
    * minimum calorie target holds a cut's target up it is the slower rate that target is built for:
-   * a week is never "slower than plan" against a pace the app itself held back.
+   * a week is never "slower than plan" against a pace the app itself held back. A cut on hold
+   * (`isOnHold`) is 0: the plan is to maintain.
    */
   planLb: number;
+  /**
+   * The plan's target is held up by the minimum calorie target (`Recommendation.floored`). The
+   * plan's rate is then smaller than the athlete's pace by the app's doing, so being well past it
+   * is not "faster than plan" / "ahead of plan": only a safety limit calls a held week fast.
+   */
+  held: boolean;
   /** The change is past a safety limit (Settings → limits), whatever the plan says. */
   overLimit: { direction: "loss" | "gain"; limitPct: number } | null;
   /** Logged days through the week's last day. */
@@ -221,16 +228,18 @@ export function weeklyRate(input: {
   trendWeight: number | null | undefined;
   weekAgoTrendWeight: number | null | undefined;
   loggedCount: number;
-  plan: Pick<Recommendation, "direction" | "rateLbPerWeek"> | null;
+  plan: (Pick<Recommendation, "direction" | "rateLbPerWeek"> & Partial<Pick<Recommendation, "floored">>) | null;
   limits: Settings["limits"];
 }): WeeklyRate {
   const { trendWeight, weekAgoTrendWeight, loggedCount, plan, limits } = input;
-  const planLb = plan && plan.direction !== "maintain" ? plan.rateLbPerWeek : 0;
+  // `|| 0`: a plan of −0 (a cut at no pace) is 0.
+  const planLb = (plan && plan.direction !== "maintain" ? plan.rateLbPerWeek : 0) || 0;
+  const held = !!plan?.floored;
   if (trendWeight == null || weekAgoTrendWeight == null)
-    return { kind: "no-data", changeLb: null, pctPerWeek: null, planLb, overLimit: null, loggedCount };
+    return { kind: "no-data", changeLb: null, pctPerWeek: null, planLb, held, overLimit: null, loggedCount };
   const changeLb = trendWeight - weekAgoTrendWeight;
   const pctPerWeek = (changeLb / weekAgoTrendWeight) * 100;
-  if (loggedCount < RATE_MIN_LOGGED_DAYS) return { kind: "no-data", changeLb, pctPerWeek, planLb, overLimit: null, loggedCount };
+  if (loggedCount < RATE_MIN_LOGGED_DAYS) return { kind: "no-data", changeLb, pctPerWeek, planLb, held, overLimit: null, loggedCount };
 
   const overLimit: WeeklyRate["overLimit"] =
     pctPerWeek < -limits.maxLossPctPerWeek
@@ -247,7 +256,7 @@ export function weeklyRate(input: {
   else if (shown !== 0 && Math.sign(shown) !== Math.sign(planLb)) kind = "wrong-way";
   else if (Math.sign(changeLb) === Math.sign(planLb) && Math.abs(changeLb) >= Math.abs(planLb) * ON_PLAN_MIN_SHARE) kind = "on-plan";
   else kind = "slower";
-  return { kind, changeLb, pctPerWeek, planLb, overLimit, loggedCount };
+  return { kind, changeLb, pctPerWeek, planLb, held, overLimit, loggedCount };
 }
 
 /*
@@ -263,7 +272,8 @@ export const FASTER_THAN_PLAN_SHARE = 1.5;
  * `weeklyRate`'s kinds as the verdict words them, plus two of its own:
  * - `flat`: the week prints as 0.0 lb, or as at most `FLAT_MAX_LB` against the plan — noise, not a direction;
  * - `drifting`: the plan is to hold and the trend is past a safety limit;
- * - `faster` also covers the planned way by more than `FASTER_THAN_PLAN_SHARE` × the plan, within the limit.
+ * - `faster` also covers the planned way by more than `FASTER_THAN_PLAN_SHARE` × the plan, within the limit
+ *   — unless the plan is held at the minimum calorie target (`WeeklyRate.held`): that week stays `on-plan`.
  */
 export type VerdictKind = RateKind | "flat" | "drifting";
 
@@ -303,11 +313,13 @@ function signedLb(n: number): string {
  * - against the plan by a change that prints within `FLAT_MAX_LB` (or a week that prints as 0.0)
  *   is "Flat this week", a note — "Wrong direction", a warning, starts beyond that;
  * - on plan by more than `FASTER_THAN_PLAN_SHARE` × the plan is "Faster than plan", a note (past
- *   the safety limit it already was, as a warning);
+ *   the safety limit it already was, as a warning) — except while the minimum calorie target holds
+ *   the plan's target up: the plan is small because the app held it, so only the limit calls it fast;
+ * - on plan with a change that prints as 0.0 (a plan of a tenth of a pound) is "Flat this week" too;
  * - holding with the trend past a safety limit is "Drifting", not a calm "Maintaining".
  */
 export function weeklyVerdict(checkin: Pick<WeeklyCheckin, "rate">): WeeklyVerdict {
-  const { kind: rateKind, changeLb, planLb, overLimit, loggedCount } = checkin.rate;
+  const { kind: rateKind, changeLb, planLb, held, overLimit, loggedCount } = checkin.rate;
   let kind: VerdictKind = rateKind;
   let tone: Insight["tone"] = "info";
   let detail: string;
@@ -321,9 +333,12 @@ export function weeklyVerdict(checkin: Pick<WeeklyCheckin, "rate">): WeeklyVerdi
     const printed = Number(Math.abs(changeLb).toFixed(1));
     if (rateKind === "maintaining") {
       if (overLimit) kind = "drifting";
-    } else if (!overLimit && ((rateKind === "slower" && printed === 0) || (rateKind === "wrong-way" && printed <= FLAT_MAX_LB)))
+    } else if (
+      !overLimit &&
+      (((rateKind === "slower" || rateKind === "on-plan") && printed === 0) || (rateKind === "wrong-way" && printed <= FLAT_MAX_LB))
+    )
       kind = "flat";
-    else if (rateKind === "on-plan" && Math.abs(changeLb) > Math.abs(planLb) * FASTER_THAN_PLAN_SHARE) kind = "faster";
+    else if (rateKind === "on-plan" && !held && Math.abs(changeLb) > Math.abs(planLb) * FASTER_THAN_PLAN_SHARE) kind = "faster";
 
     const limit = overLimit ? `, past your ${overLimit.limitPct}% weekly limit` : "";
     detail =
@@ -394,10 +409,12 @@ export function insights(data: AppData, series: ReadonlyArray<EnergyDay>, today:
         tone: "warn",
         text: `Trend is climbing ${pct.toFixed(1)}%/week — above your ${overLimit.limitPct}% limit.`,
       });
-    else if (rate.kind === "on-plan") {
+    // (A change that prints as 0.0 is the verdict's "Flat this week": nothing to say here.)
+    else if (rate.kind === "on-plan" && Number(Math.abs(change).toFixed(1)) !== 0) {
       // Well ahead of the plan (inside the limit) is a note, not "right on plan": the same band the
-      // weekly verdict calls "Faster than plan", so Today's signal and Progress never disagree.
-      const ahead = Math.abs(change) > Math.abs(rate.planLb) * FASTER_THAN_PLAN_SHARE;
+      // weekly verdict calls "Faster than plan", so Today's signal and Progress never disagree — and
+      // like the verdict, not while the minimum calorie target is what made the plan small.
+      const ahead = !rate.held && Math.abs(change) > Math.abs(rate.planLb) * FASTER_THAN_PLAN_SHARE;
       out.push({
         key: "on-rate",
         tone: ahead ? "info" : "good",

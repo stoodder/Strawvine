@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router";
 import { ChevronRight, Download, LogOut, RefreshCw, UserX } from "lucide-react";
 import { displayPrefs, minCalories } from "../../shared/defaults";
+import { MIN_CALORIES_RANGE } from "../../shared/schemas";
 import { programPathForSettingsHash } from "../components/program/sections";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { DayPicker, NumSetting } from "../components/settings/fields";
@@ -65,7 +66,6 @@ function SettingsBody() {
             value={s.targets.steps}
             min={0}
             max={100_000}
-            integer
             grouping
             onSave={(v) => v !== null && save({ ...s, targets: { ...s.targets, steps: v } })}
           />
@@ -178,10 +178,9 @@ function SettingsBody() {
             hint="Your daily target never goes below this, whatever the pace or the scale says"
             value={minCalories(s)}
             unit="kcal"
-            integer
             grouping
-            min={800}
-            max={5000}
+            min={MIN_CALORIES_RANGE.min}
+            max={MIN_CALORIES_RANGE.max}
             onSave={(v) => v !== null && save({ ...s, limits: { ...s.limits, minCalories: v } })}
           />
         </div>

@@ -14,7 +14,7 @@ import {
   weeklyRate,
   weeklyVerdict,
 } from "./insights";
-import { overTarget } from "./nutrition";
+import { isOnHold, overTarget, recommend } from "./nutrition";
 import { emptyDayLog, type DayLog, type Settings } from "./schemas";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -438,11 +438,159 @@ describe("the minimum calorie target across the model", () => {
       expect(unheld.insights.find((i) => i.key === "on-rate")).toBeUndefined();
     });
 
-    it("projects the goal at that rate, not at the chosen pace", () => {
-      const atPace = (m: typeof held) => m.checkin.projection!.atPace!;
-      expect(atPace(unheld).weeks).toBeCloseTo(11.7, 1);
-      expect(atPace(held).weeks).toBeGreaterThan(atPace(unheld).weeks * 1.8);
-      expect(held.checkin.projection!.range![1]).toBe(atPace(held).date);
+    it("projects the goal at the observed trend alone: no date at a pace the target isn't built for", () => {
+      expect(unheld.checkin.projection!.atPace!.weeks).toBeCloseTo(11.7, 1);
+      const p = held.checkin.projection!;
+      expect(p.atPace).toBeNull();
+      expect(p.observed).toEqual(unheld.checkin.projection!.observed);
+      expect(p.range).toEqual([p.observed!.date, p.observed!.date]);
+    });
+  });
+
+  describe("a minimum a few kcal under the TDEE: on hold, on every screen", () => {
+    // Forty flat days at 190 lb eating 1,510: a 1,510 kcal TDEE, ten over the minimum (0.02 lb/week).
+    const goal = { targetLb: 180, pacePctPerWeek: 0.75, setOn: addDays(today, -40), startLb: 200 };
+    const s = { ...settings, weightGoal: goal };
+    const flat = daysBefore(40, () => ({ weightLb: 190, calories: 1510 }));
+    const model = buildModel(data(flat, { settings: s }), today);
+    const rec = model.targets.recommendation!;
+    /** The week `changeLb` from 190 lb, judged against that plan. */
+    const week = (changeLb: number) =>
+      weeklyVerdict({
+        rate: weeklyRate({ trendWeight: 190 + changeLb, weekAgoTrendWeight: 190, loggedCount: 30, plan: rec, limits: s.limits }),
+      });
+
+    it("is a plan of exactly 0: what Today and Goals call on hold", () => {
+      expect(model.targets.tdee!.value).toBeCloseTo(1510, 5);
+      expect(rec).toMatchObject({ direction: "lose", floored: true, calories: 1500, rateLbPerWeek: 0, pacePctPerWeek: 0 });
+      expect(isOnHold(rec)).toBe(true);
+      expect(model.checkin.next).toMatchObject({ floored: true, rateLbPerWeek: 0 });
+      expect(model.checkin.targetRateLbPerWeek).toBe(0);
+    });
+
+    it("so the check-in's plan is to hold: Maintaining, never a week against 0.0 lb", () => {
+      expect(model.checkin.rate).toMatchObject({ kind: "maintaining", planLb: 0, held: true });
+      expect(week(-0.6).text).toBe("Maintaining · trend −0.6 lb this week");
+      expect(week(0.6)).toMatchObject({ kind: "maintaining", tone: "info", text: "Maintaining · trend +0.6 lb this week" });
+      // Past a safety limit it is drifting, as for any plan to hold.
+      expect(week(1.2)).toMatchObject({ kind: "drifting", tone: "warn" });
+      for (const change of [-2.5, -0.6, -0.04, 0, 0.04, 0.6, 1.2]) expect(week(change).text).not.toMatch(/against|[−-]0\.0/);
+    });
+
+    it("and no goal date is projected at pace (it would be years out)", () => {
+      expect(model.checkin.projection).toMatchObject({ direction: "lose", atPace: null, range: null });
+    });
+
+    it("one step further from the TDEE it is a cut again, on every screen at once", () => {
+      // 1,530: 30 kcal over the minimum, 0.06 lb/week — prints as −0.1.
+      const m = buildModel(
+        data(
+          daysBefore(40, () => ({ weightLb: 190, calories: 1530 })),
+          { settings: s },
+        ),
+        today,
+      );
+      const r = m.targets.recommendation!;
+      expect(r.floored).toBe(true);
+      expect(r.rateLbPerWeek).toBeCloseTo(-0.06, 5);
+      expect(isOnHold(r)).toBe(false);
+      expect(m.checkin.rate.planLb).toBeCloseTo(-0.06, 5);
+      expect(m.checkin.rate.kind).not.toBe("maintaining");
+    });
+  });
+
+  describe("a held week is never fast because of the hold", () => {
+    // 150 lb, cutting at 1 %/week on a 2,000 kcal TDEE: the pace asks 1,250. Held at 1,800 the plan is 0.4 lb/week.
+    const goal = { targetLb: 130, pacePctPerWeek: 1, setOn: addDays(today, -40), startLb: 160 };
+    const s = (min: number) => withMinimum({ ...settings, weightGoal: goal }, min);
+    const plan = (min: number) => recommend(s(min), 2000, 150);
+    const week = (changeLb: number, min: number) =>
+      weeklyRate({ trendWeight: 150 + changeLb, weekAgoTrendWeight: 150, loggedCount: 30, plan: plan(min), limits: s(min).limits });
+
+    it("far past the held rate, inside the safety limit: on plan, not faster", () => {
+      expect(plan(1800)).toMatchObject({ floored: true, calories: 1800 });
+      expect(plan(1800).rateLbPerWeek).toBeCloseTo(-0.4);
+      const rate = week(-1.0, 1800); // 2.5 × the held plan
+      expect(rate).toMatchObject({ kind: "on-plan", held: true, overLimit: null });
+      expect(weeklyVerdict({ rate })).toMatchObject({ kind: "on-plan", tone: "good", text: "On plan · −1.0 lb this week against −0.4 lb" });
+    });
+
+    it("the same week against a plan of the same size the athlete chose herself is faster than plan", () => {
+      // 0.4 lb/week as a pace (0.2667 %/week of 150 lb), nothing held.
+      const own = { ...s(800), weightGoal: { ...goal, pacePctPerWeek: 0.4 / 1.5 } };
+      const p = recommend(own, 2000, 150);
+      expect(p.floored).toBe(false);
+      expect(p.rateLbPerWeek).toBeCloseTo(-0.4);
+      const rate = weeklyRate({ trendWeight: 149, weekAgoTrendWeight: 150, loggedCount: 30, plan: p, limits: own.limits });
+      expect(rate.held).toBe(false);
+      expect(weeklyVerdict({ rate })).toMatchObject({ kind: "faster", tone: "info" });
+    });
+
+    it("only the safety limit calls a held week fast, as a warning", () => {
+      const rate = week(-1.8, 1800); // 1.2 % of 150 lb, past the 1 % limit
+      expect(rate).toMatchObject({ kind: "faster", held: true, overLimit: { direction: "loss", limitPct: 1 } });
+      expect(weeklyVerdict({ rate })).toMatchObject({
+        kind: "faster",
+        tone: "warn",
+        text: "Faster than plan · −1.8 lb this week against −0.4 lb, past your 1% weekly limit",
+      });
+    });
+
+    it("is still slower, flat or the wrong way when it is", () => {
+      expect(weeklyVerdict({ rate: week(-0.2, 1800) }).kind).toBe("slower");
+      expect(weeklyVerdict({ rate: week(0.1, 1800) }).kind).toBe("flat");
+      expect(weeklyVerdict({ rate: week(0.6, 1800) })).toMatchObject({ kind: "wrong-way", tone: "warn" });
+    });
+
+    it("Today's signal agrees: right on plan, not ahead of it", () => {
+      // Falling 1 lb/week at 1,500 kcal: a 2,000 kcal TDEE. Held at 1,800 the plan is 0.4 lb/week.
+      const days = daysBefore(40, (i) => ({ weightLb: Math.round((156 - i / 7) * 100) / 100, calories: 1500 }));
+      const signal = (min: number, pacePctPerWeek = 1) =>
+        buildModel(data(days, { settings: { ...s(min), weightGoal: { ...goal, pacePctPerWeek } } }), today);
+      const held = signal(1800);
+      expect(held.targets.recommendation).toMatchObject({ floored: true, calories: 1800 });
+      expect(weeklyVerdict(held.checkin)).toMatchObject({ kind: "on-plan", tone: "good" });
+      expect(held.insights.find((i) => i.key === "on-rate")).toMatchObject({
+        tone: "good",
+        text: expect.stringMatching(/right on plan\.$/),
+      });
+      // A pace of that size chosen by the athlete, nothing held: ahead of plan, a note.
+      const own = signal(800, 0.27);
+      expect(own.targets.recommendation!.floored).toBe(false);
+      expect(weeklyVerdict(own.checkin).kind).toBe("faster");
+      expect(own.insights.find((i) => i.key === "on-rate")).toMatchObject({
+        tone: "info",
+        text: expect.stringMatching(/ahead of plan\.$/),
+      });
+    });
+  });
+
+  describe("a plan of a tenth of a pound and a week that prints as 0.0", () => {
+    // Held 30 kcal under the TDEE: 0.06 lb/week. A week of −0.04 lb is two thirds of it.
+    const goal = { targetLb: 180, pacePctPerWeek: 0.75, setOn: addDays(today, -40), startLb: 200 };
+    const s = { ...settings, weightGoal: goal };
+    const plan = recommend(s, 1530, 190);
+    const rate = weeklyRate({ trendWeight: 189.96, weekAgoTrendWeight: 190, loggedCount: 30, plan, limits: s.limits });
+
+    it("is flat in the verdict, with no sign on the zero", () => {
+      expect(rate.kind).toBe("on-plan");
+      expect(weeklyVerdict({ rate })).toMatchObject({ kind: "flat", tone: "info", text: "Flat this week · 0.0 lb against −0.1 lb" });
+    });
+
+    it("and Today has no rate signal for it (never 'Trend moved -0.0 lb')", () => {
+      // The same through the model, with a plan that small whatever the TDEE does: a pace of 0.06 lb/week.
+      // Flat at 190 lb, then 0.2 lb lighter yesterday: the trend moved −0.04 lb, two thirds of the plan.
+      const tiny = { ...settings, weightGoal: { ...goal, pacePctPerWeek: (0.06 / 190) * 100 } };
+      const days = daysBefore(40, (i) => ({ weightLb: i === 39 ? 189.8 : 190, calories: 2600 }));
+      const m = buildModel(data(days, { settings: tiny }), today);
+      expect(m.checkin.weightChangeLb).toBeCloseTo(-0.04, 5);
+      expect(m.checkin.rate).toMatchObject({ kind: "on-plan", held: false });
+      expect(weeklyVerdict(m.checkin).text).toBe("Flat this week · 0.0 lb against −0.1 lb");
+      expect(m.insights.find((i) => i.key === "on-rate")).toBeUndefined();
+      for (const i of m.insights) expect(i.text).not.toMatch(/[−-]0\.0/);
+      // A week that prints (−0.1 lb, still on plan) does get its signal.
+      const more = daysBefore(40, (i) => ({ weightLb: i === 39 ? 189.6 : 190, calories: 2600 }));
+      expect(buildModel(data(more, { settings: tiny }), today).insights.find((i) => i.key === "on-rate")).toBeDefined();
     });
   });
 

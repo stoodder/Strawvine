@@ -321,6 +321,43 @@ describe("Goals: the pace while today's target is held at the minimum calorie ta
     expect(note()!.textContent).toBe("Your calorie target is held at your 1,500 kcal minimum, so the cut is on hold for now.");
   });
 
+  it("on hold from a minimum a few kcal under the TDEE too, where the rate would print as 0.0", () => {
+    eating(1510, fast);
+    show();
+    expect(note()!.textContent).toBe("Your calorie target is held at your 1,500 kcal minimum, so the cut is on hold for now.");
+    eating(1530, fast);
+    show();
+    expect([...document.querySelectorAll("[data-floor-note]")].at(-1)!.textContent).toBe(
+      "Your calorie target is held at your 1,500 kcal minimum, so it is built for −0.1 lb/wk for now.",
+    );
+    expect(document.body.textContent).not.toMatch(/[−-]0\.0/);
+  });
+
+  it("projects no date at pace while the target is held: only the observed trend's, when there is one", () => {
+    const projected = () => screen.queryByText("Projected")?.parentElement?.textContent ?? null;
+    // A flat trend has no observed date. Standing on its own, the pace gives one…
+    eating(2800, fast);
+    let view = show();
+    expect(projected()).toMatch(/^Projected[A-Z][a-z]{2} \d/);
+    view.unmount();
+    // …held, there is none to give: not at the pace, not years out at what the minimum leaves of it.
+    for (const kcal of [1900, 1530, 1510, 1400]) {
+      eating(kcal, fast);
+      view = show();
+      expect(projected(), `${kcal}`).toBeNull();
+      view.unmount();
+    }
+    // With a trend that is moving, its date stays, alone.
+    store.data = {
+      ...store.data,
+      settings: fast,
+      days: store.data.days.map((d, i) => ({ ...d, weightLb: 203 - i / 7, calories: 1400 })),
+    };
+    show();
+    expect(note()).not.toBeNull();
+    expect(projected()).toMatch(/^Projected[A-Z][a-z]{2} \d{1,2}(, \d{4})?actual −1\.0 lb\/wk$/);
+  });
+
   it("follows the pace: slowed until the target stands on its own, the line goes", () => {
     eating(1900, fast);
     show();

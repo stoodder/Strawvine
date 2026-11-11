@@ -13,22 +13,19 @@ import { formatRest, parseRest } from "./restTime";
 export const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
 
 /** Inline range check for a number setting; returns a message or null. */
-function rangeError(
-  v: number | null,
-  min: number,
-  max: number,
-  opts: { unit?: string; optional?: boolean; integer?: boolean } = {},
-): string | null {
+function rangeError(v: number | null, min: number, max: number, opts: { unit?: string; optional?: boolean } = {}): string | null {
   if (v === null) return opts.optional ? null : "Enter a number.";
   const u = opts.unit ?? "";
   if (v < min || v > max) return `Between ${fmt(min, min % 1 ? 1 : 0)}${u} and ${fmt(max, max % 1 ? 1 : 0)}${u}.`;
-  if (opts.integer && !Number.isInteger(v)) return "Whole numbers only.";
   return null;
 }
 
 /**
  * A Field with a BoxNumber that validates on commit: an out-of-range value stays visible with an
- * inline message (and isn't saved) until it's fixed.
+ * inline message (and isn't saved) until it's fixed. The message goes as soon as the entry is
+ * edited again — the input only commits a value that differs from the saved one, so typing the
+ * saved value back would otherwise leave the message standing beside a valid field. The entry is
+ * rounded to `decimals` before it gets here (a field without decimals only ever sees whole numbers).
  */
 export function NumSetting({
   label,
@@ -40,7 +37,6 @@ export function NumSetting({
   unit,
   decimals = 0,
   optional,
-  integer,
   placeholder,
   grouping,
   unitInMessage,
@@ -54,7 +50,6 @@ export function NumSetting({
   unit?: string;
   decimals?: number;
   optional?: boolean;
-  integer?: boolean;
   placeholder?: string;
   grouping?: boolean;
   unitInMessage?: string;
@@ -69,8 +64,9 @@ export function NumSetting({
         decimals={decimals}
         placeholder={placeholder}
         grouping={grouping}
+        onDraft={() => setError(null)}
         onCommit={(v) => {
-          const e = rangeError(v, min, max, { unit: unitInMessage, optional, integer });
+          const e = rangeError(v, min, max, { unit: unitInMessage, optional });
           setError(e);
           if (!e) onSave(v);
         }}

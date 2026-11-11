@@ -3,10 +3,12 @@ export function fmt(n: number | null | undefined, digits = 0): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
+/** "+1.3" / "−1.3", and no sign on what prints as zero: "0.0", never "−0.0" or "+0.0". */
 export function signed(n: number | null | undefined, digits = 1): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   const s = fmt(Math.abs(n), digits);
-  return n > 0 ? `+${s}` : n < 0 ? `−${s}` : s;
+  if (Number(s.replace(/,/g, "")) === 0) return s;
+  return n > 0 ? `+${s}` : `−${s}`;
 }
 
 export function minutesToHM(min: number | null | undefined): string {

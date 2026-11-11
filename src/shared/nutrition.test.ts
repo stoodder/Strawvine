@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
 import {
   goalDirection,
+  HOLD_BELOW_LB_PER_WEEK,
+  isOnHold,
   macrosFor,
   OVER_TARGET_SCALE,
   overTarget,
@@ -204,38 +206,111 @@ describe("recommend: the minimum calorie target", () => {
     // The pace alone: 1,504, shown as 1,500. A 1,502 minimum holds that up by 2 kcal.
     const r = recommend(withMinimum(cut, 1502), 2504, 200);
     expect(r).toMatchObject({ calories: 1502, floored: true });
-    expect(r.rateLbPerWeek).toBeCloseTo(-2);
+    // Exactly the pace's rate (what 1,502 implies is a hair more: −2.004).
+    expect(r.rateLbPerWeek).toBe(recommend(withMinimum(cut, 800), 2504, 200).rateLbPerWeek);
+    expect(r.rateLbPerWeek).toBe(-2);
+  });
+});
+
+describe("recommend: a held cut on hold (the rate would print as 0.0 lb/week)", () => {
+  const cut = withGoal(170, 1, 200);
+  /** A 1,500 kcal minimum `over` kcal under the TDEE: a rate of −over / 500 lb/week. */
+  const held = (over: number) => recommend(cut, 1500 + over, 200);
+
+  it("is decided at one decimal of lb/week, here and nowhere else", () => {
+    expect(HOLD_BELOW_LB_PER_WEEK).toBe(0.05);
+    // What a UI prints at one decimal: under the threshold it is 0.0, from it on 0.1.
+    expect((0.0499).toFixed(1)).toBe("0.0");
+    expect(HOLD_BELOW_LB_PER_WEEK.toFixed(1)).toBe("0.1");
+  });
+
+  it("snaps the rate to exactly 0 below the threshold, and leaves it alone from the threshold on", () => {
+    // 24 kcal under the TDEE is 0.048 lb/week: prints as 0.0, so it is 0.
+    for (const over of [1, 10, 24, 24.9]) {
+      const r = held(over);
+      expect(r).toMatchObject({ direction: "lose", floored: true, calories: 1500 });
+      expect(r.rateLbPerWeek, `${over} kcal`).toBe(0);
+      expect(r.pacePctPerWeek, `${over} kcal`).toBe(0);
+      expect(isOnHold(r), `${over} kcal`).toBe(true);
+    }
+    // 25 kcal is 0.05 lb/week: prints as −0.1. A cut, slow as it is.
+    for (const over of [25, 26, 50, 400]) {
+      const r = held(over);
+      expect(r.floored).toBe(true);
+      expect(r.rateLbPerWeek, `${over} kcal`).toBeCloseTo(-over / 500, 10);
+      expect(Math.abs(r.rateLbPerWeek).toFixed(1), `${over} kcal`).not.toBe("0.0");
+      expect(isOnHold(r), `${over} kcal`).toBe(false);
+    }
+    expect(held(25).rateLbPerWeek).toBe(-HOLD_BELOW_LB_PER_WEEK);
+  });
+
+  it("covers a minimum at or above the TDEE", () => {
+    for (const over of [0, -10, -400]) expect(isOnHold(held(over))).toBe(true);
+  });
+
+  it("is only ever a held cut: not a cut that stands on its own, not maintenance, not a build", () => {
+    expect(isOnHold(recommend(cut, 3200, 200))).toBe(false);
+    // A cut at no pace at all plans no change either, but nothing is holding it.
+    const noPace = recommend(withGoal(170, 0, 200), 3200, 200);
+    expect(noPace).toMatchObject({ direction: "lose", floored: false });
+    expect(Math.abs(noPace.rateLbPerWeek)).toBe(0);
+    expect(isOnHold(noPace)).toBe(false);
+    // Held maintenance, and a held build whose rate is 0 (no pace): held, but there is no cut to put on hold.
+    const maintenance = recommend(base, 1300, 200);
+    expect(maintenance).toMatchObject({ direction: "maintain", floored: true, rateLbPerWeek: 0 });
+    expect(isOnHold(maintenance)).toBe(false);
+    const build = recommend(withGoal(220, 0, 200), 1300, 200);
+    expect(build).toMatchObject({ direction: "gain", floored: true, rateLbPerWeek: 0 });
+    expect(isOnHold(build)).toBe(false);
+  });
+
+  it("is not applied to a rate the minimum didn't set: a slow pace that stands on its own keeps its rate", () => {
+    // 0.02 %/week at 200 lb is 0.04 lb/week: under the threshold, but it is the athlete's own pace.
+    const slow = recommend(withGoal(170, 0.02, 200), 3200, 200);
+    expect(slow.floored).toBe(false);
+    expect(slow.rateLbPerWeek).toBeCloseTo(-0.04, 10);
   });
 });
 
 describe("project: a plan held at the minimum calorie target", () => {
   const cut = withGoal(180, 1, 200);
-  const atPace = (tdee: number | null) =>
-    project(cut, "2026-11-01", 200, null, tdee === null ? undefined : recommend(cut, tdee, 200))?.atPace ?? null;
+  const projected = (tdee: number | null, weekAgo: number | null = null) =>
+    project(cut, "2026-11-01", 200, weekAgo, tdee === null ? undefined : recommend(cut, tdee, 200))!;
 
   it("is unchanged while the target stands on its own", () => {
-    expect(atPace(3200)).toEqual(atPace(null));
-    expect(atPace(null)?.weeks).toBeCloseTo(10.48, 1);
+    expect(projected(3200)).toEqual(projected(null));
+    expect(projected(null).atPace!.weeks).toBeCloseTo(10.48, 1);
+    expect(projected(2500).atPace).toEqual(projected(null).atPace); // a plan exactly on the minimum
   });
 
-  it("projects at the pace the held target is built for", () => {
-    // 1,500 against a 2,200 TDEE: 0.7%/week instead of 1%.
-    expect(atPace(2200)!.weeks).toBeCloseTo(weeksAtPct(200, 180, 0.7)!, 5);
-    expect(atPace(2200)!.weeks).toBeGreaterThan(atPace(null)!.weeks);
+  it("has no date at pace while the target is held: not at the pace, not at what the minimum leaves of it", () => {
+    // Half the deficit left, a sliver of it (which would project years out), none, and a minimum above the TDEE.
+    for (const tdee of [2200, 1560, 1530, 1510, 1500, 1400]) {
+      const p = projected(tdee);
+      expect(recommend(cut, tdee, 200).floored, `TDEE ${tdee}`).toBe(true);
+      expect(p.atPace, `TDEE ${tdee}`).toBeNull();
+      expect(p.range, `TDEE ${tdee}`).toBeNull();
+      // The date at the limit is a fact about the limits, not about the plan.
+      expect(p.atLimit, `TDEE ${tdee}`).toEqual(projected(null).atLimit);
+    }
   });
 
-  it("has no date at pace when the held target is no deficit", () => {
-    expect(atPace(1400)).toBeNull();
-    const p = project(cut, "2026-11-01", 200, 201, recommend(cut, 1400, 200))!;
-    expect(p.observed).not.toBeNull(); // the observed trend still projects
+  it("keeps the date at the observed trend, which is then the whole range", () => {
+    const p = projected(1510, 201);
+    expect(p.observed).toEqual(projected(null, 201).observed);
+    expect(p.observed).not.toBeNull();
     expect(p.range).toEqual([p.observed!.date, p.observed!.date]);
+    // Standing on its own, the same week has both dates.
+    expect(projected(3200, 201).range).toEqual([projected(null).atPace!.date, p.observed!.date].sort());
   });
 
-  it("leaves a held build's date at its own pace", () => {
-    const build = withGoal(201, 0.5, 190); // 1 lb to go at 1 lb/week
+  it("goes for a held build too", () => {
+    const build = withGoal(210, 0.5, 190);
     const held = recommend(build, 900, 200);
-    expect(held.floored).toBe(true);
-    expect(project(build, "2026-11-01", 200, null, held)!.atPace).toEqual(project(build, "2026-11-01", 200, null)!.atPace);
+    expect(held).toMatchObject({ direction: "gain", floored: true });
+    expect(project(build, "2026-11-01", 200, null)!.atPace).not.toBeNull();
+    expect(project(build, "2026-11-01", 200, null, held)!.atPace).toBeNull();
+    expect(project(build, "2026-11-01", 200, null, recommend(build, 3200, 200))!.atPace).not.toBeNull();
   });
 });
 

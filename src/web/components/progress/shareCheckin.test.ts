@@ -163,3 +163,23 @@ describe("checkinText: next week's target held at the minimum calorie target", (
     expect(checkinText({ ...held, daysLogged: 0 }, { today: "2026-11-02" })).not.toContain("minimum");
   });
 });
+
+describe("checkinText: a plan that prints as zero", () => {
+  it("has no plan beside the trend when the cut is on hold (a rate of 0), and never prints '−0.0'", () => {
+    const onHold = {
+      ...base,
+      targetRateLbPerWeek: 0,
+      next: { ...base.next!, calories: 1500, rateLbPerWeek: 0, pacePctPerWeek: 0, floored: true, minCalories: 1500 },
+    } as WeeklyCheckin;
+    const text = checkinText(onHold, { today: "2026-11-02" });
+    expect(text).toContain("trend 201.3 lb (−0.8 this week)");
+    expect(text).not.toMatch(/plan/);
+    expect(text).toContain("Held at your 1,500 kcal minimum.");
+  });
+
+  it("gives a change that prints as zero no sign", () => {
+    const text = checkinText({ ...base, weightChangeLb: -0.04 }, { today: "2026-11-02" });
+    expect(text).toContain("(0.0 this week, plan −1.0)");
+    expect(text).not.toMatch(/[−-]0\.0/);
+  });
+});
