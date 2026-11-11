@@ -70,10 +70,10 @@ test("a new measure applies from now on; the logged session keeps the old one", 
   await create(page, "Wall sit");
   await expect(chip(page, "Wall sit", 1)).toHaveAccessibleName(/10\s?reps\s*\(no load\)$/);
 
-  // From the session: the options sheet (Edit exercise first) → Edit exercise. Distance, as a carry, still weighted.
+  // From the session: the options sheet (Edit exercise near the end, just above Remove) → Edit exercise. Distance, as a carry, still weighted.
   await page.getByRole("button", { name: "Sled push options" }).click();
   const options = page.getByRole("dialog", { name: "Sled push" });
-  await expect(options.getByRole("button").nth(1)).toHaveAccessibleName(/^Edit exercise/); // after the sheet's Close
+  await expect(options.getByRole("button").last()).toHaveAccessibleName(/^Remove —/);
   await options.getByRole("button", { name: /^Edit exercise/ }).click();
   const sheet = page.getByRole("dialog", { name: "Edit Sled push" });
   await expect(sheet.getByRole("textbox", { name: "Name" })).toHaveValue("Sled push");

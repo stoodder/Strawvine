@@ -377,7 +377,7 @@ optional note.
     always comes first, holds the main lift alone and never joins a superset.
   - Moves are buttons (keyboard and screen-reader friendly; each move is announced with the new position), not drag:
     a swipe down closes the sheet (from its handle or title, or from content scrolled to its top; content otherwise
-    scrolls by touch both ways) and holding a set edits it. Limits as the server's: 6 exercises per superset (nothing
+    scrolls by touch both ways) and no gesture is hidden in a set (see set rows, below). Limits as the server's: 6 exercises per superset (nothing
     more can join a full one) and 30 blocks (nothing can be taken out while a session holds 30).
   - Structure and order are part of the session, so next week's pre-fill carries them (supersets, members' order, block
     order).
@@ -398,8 +398,19 @@ optional note.
     including to the session in progress. For an unweighted exercise, target loads on sets not yet logged are ignored
     (not shown, not counted; logging such a set records no load) but kept, so making it weighted again brings them
     back; loads already logged stay as data. An unweighted exercise's pre-filled and added sets carry no load.
-  - One tap logs a set at its targets — except a set of a weighted accessory with no load yet (none entered or
-    targeted), which opens the set editor instead, so a weighted set is never logged without a load by accident.
+  - **Set rows:** every set — main lift and accessory — is a row with two explicit controls and no hidden gesture: its
+    values (set number, then "170 × 6", "8 × 25 lb", "8 reps", "30 s · 25 lb", "40 m") open the set editor, and a check
+    at the right logs or unlogs it. Main-lift rows carry the big numerals, accessory rows are the same row, compact.
+    Open rows are bright and logged ones recede behind their check, showing what was logged. "+ Set" ends each
+    exercise's rows. A read-only preview shows the same rows without controls.
+  - The check logs a set at its targets in one tap — except an open AMRAP, which opens its rep counter, and a set of a
+    weighted accessory with no load yet (none entered or targeted), which opens the set editor instead, so a weighted
+    set is never logged without a load by accident.
+  - **Finish** is at the end of the page and, once a set is logged, also in the bottom dock ("Finish · 5/7 sets", nearest
+    the nav; it takes the accent when every set is logged): the same press either way — the unlogged-sets question
+    first, then the recap.
+  - **Exercise options** (⋯) list actions by how often they're used: log as planned, the sets (edit, delete), the
+    superset's actions, skip today, edit exercise, remove.
   - Volume counts weight × reps of rep-measured sets only; time and distance never count. A set's load is the one it
     was logged with (never a target it still holds), so a set logged without a load adds 0.
 - **Edit exercise:** every exercise can be edited — from its row in Program → Exercise library, or from its options in a

@@ -36,8 +36,7 @@ test("a weighted hold logs a load; an unweighted one has none", async ({ page })
   await expect(page.getByRole("button", { name: "Edit set 1: 30 seconds (no load)" })).toBeVisible();
   await page.keyboard.press("Escape");
 
-  await first.focus();
-  await page.keyboard.press("Shift+F10");
+  await page.getByRole("button", { name: /^Edit Weighted dead hang set 1:/ }).click(); // the row's values open the editor
   const editor = page.getByRole("dialog", { name: "Weighted dead hang · set 1" });
   await expect(editor.getByText("Load · lb")).toBeVisible();
   for (let i = 0; i < 5; i++) await editor.getByRole("button", { name: "Increase load" }).click();
@@ -49,8 +48,7 @@ test("a weighted hold logs a load; an unweighted one has none", async ({ page })
   await create(page, "Plank", "Time", false);
   const plank = page.getByRole("button", { name: /^Plank set 1: 30\s?s$/ });
   await expect(plank).toBeVisible();
-  await plank.focus();
-  await page.keyboard.press("Shift+F10");
+  await page.getByRole("button", { name: /^Edit Plank set 1:/ }).click();
   const plankEditor = page.getByRole("dialog", { name: "Plank · set 1" });
   await expect(plankEditor.getByText("Seconds", { exact: true })).toBeVisible();
   await expect(plankEditor.getByRole("button", { name: "Increase load" })).toHaveCount(0);

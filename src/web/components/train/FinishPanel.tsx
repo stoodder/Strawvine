@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useId, useRef, useState } from "react";
 import type { Session } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
-import { useDockHeight } from "../Dock";
+import { DOCK_PRIORITY, DockItem, useDockHeight } from "../Dock";
 import { afterLayout, useRevealAboveDock } from "./reveal";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -88,6 +88,7 @@ export function FinishPanel({
   onFinish,
   onReopen,
   allowEmpty = false,
+  dock = false,
 }: {
   session: Session;
   doneSets: number;
@@ -98,6 +99,12 @@ export function FinishPanel({
   onReopen: () => void;
   /** Finishing needs no logged set (the main lift was skipped today: the day can still close). */
   allowEmpty?: boolean;
+  /**
+   * Also offer Finish from the bottom dock once a set is logged ("Finish · 5/7 sets"), so it's
+   * within reach wherever the page is scrolled. Same press as the button here: the unlogged-sets
+   * question (this panel scrolls into view to ask it), then the recap.
+   */
+  dock?: boolean;
 }) {
   const [confirming, setConfirming] = useState(false);
   const hintId = useId();
@@ -125,6 +132,8 @@ export function FinishPanel({
     focusNext.current = "recap";
     onFinish();
   };
+  /** Finish pressed (here or in the dock): ask first while sets are unlogged. */
+  const press = () => (unlogged > 0 ? setConfirming(true) : finish());
   /** The recap's heading: take focus and centre the recap above the dock after a finish. */
   const recapHeading = (el: HTMLHeadingElement | null) => {
     if (!el || focusNext.current !== "recap") return;
@@ -268,13 +277,49 @@ export function FinishPanel({
               ref={finishButton}
               type="button"
               className="btn-primary w-full py-3.5 text-base"
-              onClick={() => (unlogged > 0 ? setConfirming(true) : finish())}
+              onClick={press}
             >
               Finish session
             </button>
           </motion.div>
         )}
       </AnimatePresence>
+      {/* Nearest the nav, below toasts and the rest pill: it never moves when those come and go,
+          so a tap meant for a leaving toast's Undo can't land on Finish. Quiet until every set is
+          logged, then it takes the accent. Gone while the question above is being asked. */}
+      {dock && doneSets > 0 && !confirming && (
+        <DockItem id="finish" priority={DOCK_PRIORITY.toast + 10}>
+          <motion.button
+            type="button"
+            // The visible text, spelled out with its spaces (the parts are separate flex items).
+            aria-label={`Finish · ${doneSets}/${totalSets} sets`}
+            onClick={press}
+            className={clsx(
+              // A very short screen (a phone at 200% zoom, landscape) keeps the dock for what can't
+              // wait — the rest pill, toasts — which Finish would otherwise squeeze out (the dock
+              // is capped at 40% of the height). Finish is still at the end of the page.
+              "[@media(max-height:30rem)]:hidden",
+              "tap hc-edge pointer-events-auto inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full px-5 text-sm font-medium whitespace-nowrap shadow-lg",
+              unlogged > 0
+                ? "bg-ink-800/90 text-fg ring-1 ring-white/[0.06] backdrop-blur-xl"
+                : "bg-accent text-accent-ink shadow-[0_0_32px_-8px_rgb(183_243_106/0.6)]",
+            )}
+            initial={{ y: 12, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            transition={{ type: "spring", stiffness: 420, damping: 34 }}
+          >
+            <span>Finish</span>
+            <span aria-hidden className="opacity-60">
+              ·
+            </span>
+            <span className={unlogged > 0 ? "text-fg-2" : undefined}>
+              <span className="num">{`${doneSets}/${totalSets}`}</span>
+              {/* On the very narrowest screens (200% zoom) the count alone has to do. */}
+              <span className="max-[259px]:hidden"> sets</span>
+            </span>
+          </motion.button>
+        </DockItem>
+      )}
     </div>
   );
 }

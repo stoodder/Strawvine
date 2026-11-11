@@ -69,6 +69,7 @@ const renderTrain = () =>
     </MemoryRouter>,
     { container: document.getElementById("root")! },
   );
+/** The sets' check controls (each row also has an "Edit Rows set N: …" values control). */
 const rows = () => screen.getAllByRole("button", { name: /^Rows set \d/ });
 
 beforeEach(() => {
@@ -84,7 +85,7 @@ describe("Train after a measure change", () => {
     ]);
     store.data = { settings, exercises, sessions: [lastWeek, today], maxEntries: [], seenAchievements: [] };
     renderTrain();
-    expect(rows().map((b) => b.textContent)).toEqual(["Rows set 1: 30s at 50 lb", "Rows set 2: 30s at 50 lb"]);
+    expect(rows().map((b) => b.getAttribute("aria-label"))).toEqual(["Rows set 1: 30s at 50 lb", "Rows set 2: 30s at 50 lb"]);
     // Nothing saved by looking, and no hint from last week's reps for a timed block.
     expect(store.save).not.toHaveBeenCalled();
     expect(screen.queryByText(/Last time/)).toBeNull();
@@ -104,7 +105,7 @@ describe("Train after a measure change", () => {
     const today = withRows(TODAY, [logged(12, 12, 50), blankSet({ targetReps: 12, targetWeight: 50 })]);
     store.data = { settings, exercises, sessions: [lastWeek, today], maxEntries: [], seenAchievements: [] };
     renderTrain();
-    expect(rows().map((b) => b.textContent)).toEqual(["Rows set 1: 12 reps at 50 lb", "Rows set 2: 12 reps at 50 lb"]);
+    expect(rows().map((b) => b.getAttribute("aria-label"))).toEqual(["Rows set 1: 12 reps at 50 lb", "Rows set 2: 12 reps at 50 lb"]);
     // Last week's reps say something about today's reps: all met at 50 → try 55.
     expect(screen.getByText(/Last time/).textContent).toMatch(/50 lb · all reps → try 55/);
   });
