@@ -202,7 +202,7 @@ test("logging today's weight and calories leaves Fuel's energy balance (and its 
     await fillNumber(page, field, value);
     await button.click(); // close the editor
   };
-  await log(/^Weigh-in/, "Morning weight", "197");
+  await log(/^Morning check-in/, "Morning weight", "197");
   await log(/^Nutrition/, "Calories", "450");
   await expectSynced(page);
   const today = (await serverData(page)).days.find((d) => d.date === "2026-10-26");
