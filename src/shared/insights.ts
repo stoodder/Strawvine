@@ -169,7 +169,8 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     avgRestingHr: mean(days.filter((d) => d.restingHrBpm != null).map((d) => d.restingHrBpm!)),
     vo2Max: vo2MaxTrend(data.days, to, from),
     next,
-    projection: end?.avgWeight != null ? project(settings, today, end.avgWeight, weekAgo?.avgWeight ?? null) : null,
+    // With the plan: a target held at the minimum projects at the pace it is really built for.
+    projection: end?.avgWeight != null ? project(settings, today, end.avgWeight, weekAgo?.avgWeight ?? null, next) : null,
   };
 }
 
@@ -198,7 +199,11 @@ export interface WeeklyRate {
   changeLb: number | null;
   /** The same change as % of the trend weight a week ago. */
   pctPerWeek: number | null;
-  /** Signed lb/week the plan asks for (0 when maintaining). */
+  /**
+   * Signed lb/week the plan asks for (0 when maintaining). It is `recommend`'s rate, so while the
+   * minimum calorie target holds a cut's target up it is the slower rate that target is built for:
+   * a week is never "slower than plan" against a pace the app itself held back.
+   */
   planLb: number;
   /** The change is past a safety limit (Settings → limits), whatever the plan says. */
   overLimit: { direction: "loss" | "gain"; limitPct: number } | null;

@@ -21,6 +21,7 @@ const PATH_NAMES: Array<[RegExp, string]> = [
   [/^nutrition\.kcalPerLb/, "Calories per lb"],
   [/^limits\.maxLoss/, "Max loss"],
   [/^limits\.maxGain/, "Max gain"],
+  [/^limits\.minCalories/, "Minimum calories"],
   [/^program\.name/, "Program name"],
   [/^program\.intensity/, "Working weight"],
   [/^program\.roundToLb/, "Rounding"],

@@ -13,6 +13,7 @@ import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
 import { Bar, Section, severityClass, severityColor, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
+import { FloorNote, isOnHold } from "../components/FloorNote";
 import { JournalText } from "../components/TextArea";
 import { DayChecklist } from "../components/today/Checklist";
 import { DateJump } from "../components/today/DateJump";
@@ -210,9 +211,16 @@ export function TodayScreen() {
                 tone="accent"
                 size="lg"
                 sub={
-                  rec.direction === "maintain"
-                    ? "Maintenance"
-                    : `${rec.direction === "lose" ? "Cut" : "Build"} · ${signed(rec.rateLbPerWeek, 1)} lb/wk${rec.paceCapped ? " (capped)" : ""}`
+                  <>
+                    {/* The rate is the one the target is built for: slower than the pace while the
+                        minimum holds a cut's target up, and "on hold" when that leaves no deficit. */}
+                    {rec.direction === "maintain"
+                      ? "Maintenance"
+                      : isOnHold(rec)
+                        ? "Cut · on hold"
+                        : `${rec.direction === "lose" ? "Cut" : "Build"} · ${signed(rec.rateLbPerWeek, 1)} lb/wk${rec.paceCapped ? " (capped)" : ""}`}
+                    <FloorNote rec={rec} className="mt-0.5" />
+                  </>
                 }
               />
               {/* Today: what's left to eat (the overage once past the tolerance, in the bar's colour and

@@ -9,6 +9,7 @@ import { goalDirection } from "../../shared/nutrition";
 import { currentMax } from "../../shared/program";
 import { newId } from "../../shared/session";
 import type { Settings } from "../../shared/schemas";
+import { FloorNote } from "../components/FloorNote";
 import { PaceSlider } from "../components/PaceSlider";
 import { formatProjectedRange } from "../components/projection";
 import { ScreenHeader } from "../components/ScreenHeader";
@@ -133,6 +134,9 @@ export function GoalsScreen() {
                   bodyweight={trend}
                   direction={direction}
                 />
+                {/* The slider is the pace that was chosen; while the minimum holds today's target up,
+                    say what the target is built for instead (the projected date above already does). */}
+                <FloorNote rec={model.targets.recommendation} pace className="mt-3" />
               </div>
             )}
             <button

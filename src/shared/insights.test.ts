@@ -403,6 +403,80 @@ describe("the week's rate against the plan (weeklyRate, weeklyVerdict)", () => {
   });
 });
 
+describe("the minimum calorie target across the model", () => {
+  const withMinimum = (s: Settings, minCalories: number): Settings => ({ ...s, limits: { ...s.limits, minCalories } });
+
+  describe("a pace the minimum holds back (a 2,000 kcal TDEE, cutting at 1%/week)", () => {
+    // Thirty days eating 1,500 and losing a steady 1 lb/week: a 2,000 kcal TDEE. The pace asks for
+    // 1.9 lb/week, which would be about 1,040 kcal.
+    const goal = { targetLb: 170, pacePctPerWeek: 1, setOn: addDays(today, -30), startLb: 195 };
+    const days = daysBefore(30, (i) => ({ weightLb: 195 - i / 7, calories: 1500 }));
+    const held = buildModel(data(days, { settings: { ...settings, weightGoal: goal } }), today);
+    const unheld = buildModel(data(days, { settings: withMinimum({ ...settings, weightGoal: goal }, 800) }), today);
+
+    it("holds today's target, next week's and each past day's at the minimum", () => {
+      expect(unheld.targets.recommendation).toMatchObject({ calories: 1040, floored: false });
+      expect(held.targets.recommendation).toMatchObject({ direction: "lose", calories: 1500, floored: true, minCalories: 1500 });
+      expect(held.checkin.next).toMatchObject({ calories: 1500, floored: true });
+      // Adherence: each day against the target it showed, which was the held one.
+      expect(held.checkin.calorieAdherence).toBe(1);
+      expect(unheld.checkin.calorieAdherence).toBe(0);
+    });
+
+    it("plans the rate the held target is built for, so a week at the minimum is on plan, not slower than it", () => {
+      expect(unheld.checkin.targetRateLbPerWeek).toBeCloseTo(-1.91, 1);
+      expect(weeklyVerdict(unheld.checkin).text).toBe("Slower than plan · −1.0 lb this week against −1.9 lb");
+
+      expect(held.targets.recommendation!.rateLbPerWeek).toBeCloseTo(-1);
+      expect(held.checkin.targetRateLbPerWeek).toBeCloseTo(-1);
+      expect(weeklyVerdict(held.checkin)).toMatchObject({
+        kind: "on-plan",
+        tone: "good",
+        text: "On plan · −1.0 lb this week against −1.0 lb",
+      });
+      expect(held.insights.find((i) => i.key === "on-rate")).toMatchObject({ tone: "good" });
+      expect(unheld.insights.find((i) => i.key === "on-rate")).toBeUndefined();
+    });
+
+    it("projects the goal at that rate, not at the chosen pace", () => {
+      const atPace = (m: typeof held) => m.checkin.projection!.atPace!;
+      expect(atPace(unheld).weeks).toBeCloseTo(11.7, 1);
+      expect(atPace(held).weeks).toBeGreaterThan(atPace(unheld).weeks * 1.8);
+      expect(held.checkin.projection!.range![1]).toBe(atPace(held).date);
+    });
+  });
+
+  describe("a scale jump that collapses the TDEE estimate (8 lb overnight)", () => {
+    const goal = { targetLb: 185, pacePctPerWeek: 1, setOn: addDays(today, -30), startLb: 200 };
+    const days = daysBefore(30, (i) => ({ weightLb: i === 29 ? 208 : 200, calories: 2600 }));
+    const model = buildModel(data(days, { settings: { ...settings, weightGoal: goal } }), today);
+
+    it("is caught by the minimum", () => {
+      expect(model.targets.tdee!.value).toBeLessThan(1500); // 2,600 the day before
+      expect(model.targets.recommendation).toMatchObject({ direction: "lose", calories: 1500, floored: true, rateLbPerWeek: 0 });
+      // Protein and fat for the day still come out of the held 1,500.
+      expect(model.targets.recommendation!.macros).toMatchObject({ proteinG: 202, fatG: 71, carbsG: 13 });
+      // Without it (the lowest minimum the settings allow): under 1,000 kcal.
+      const low = buildModel(data(days, { settings: withMinimum({ ...settings, weightGoal: goal }, 800) }), today);
+      expect(low.targets.recommendation!.calories).toBe(800);
+    });
+
+    it("judges the week as holding (there is no deficit to be behind on) and offers no date at pace", () => {
+      expect(model.checkin.rate).toMatchObject({ kind: "maintaining", planLb: 0 });
+      expect(model.checkin.targetRateLbPerWeek).toBe(0);
+      expect(model.checkin.projection).toMatchObject({ direction: "lose", atPace: null, range: null });
+    });
+  });
+
+  it("holds the first day's target too (no history: the starting estimate)", () => {
+    const first = data([{ ...emptyDayLog(today), weightLb: 120 }], {
+      settings: { ...settings, weightGoal: { targetLb: 110, pacePctPerWeek: 1, setOn: today, startLb: 120 } },
+    });
+    // 15 kcal/lb × 120 = 1,800; 1.2 lb/week off that is 1,200.
+    expect(buildModel(first, today).targets.recommendation).toMatchObject({ calories: 1500, floored: true });
+  });
+});
+
 describe("Zone 2 machine kcal", () => {
   // 40 days of a cut with varied intake and weight, Zone 2 on most of them; today half logged.
   const goal = { targetLb: 185, pacePctPerWeek: 0.75, setOn: addDays(today, -40), startLb: 204 };

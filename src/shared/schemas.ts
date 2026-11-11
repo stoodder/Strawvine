@@ -233,6 +233,12 @@ export const settingsSchema = z.object({
   limits: z.object({
     maxLossPctPerWeek: z.number().min(0).max(3),
     maxGainPctPerWeek: z.number().min(0).max(3),
+    /**
+     * The lowest daily calorie target the app will recommend, kcal (SPEC §4.4). Optional so settings
+     * stored before it existed still validate; read it through `minCalories()` (defaults.ts), never
+     * directly.
+     */
+    minCalories: z.number().min(800).max(5000).optional(),
   }),
   weightGoal: z
     .object({

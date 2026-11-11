@@ -1150,7 +1150,17 @@ describe("Settings", () => {
     expect(screen.queryByText("The rules")).toBeNull();
     expect(screen.getByRole("link", { name: "Back to Today" }).getAttribute("href")).toBe("/");
     expect(sectionHeadings()).toEqual(["Daily targets", "Schedule", "Nutrition", "Display", "Sync", "Data"]);
-    for (const name of ["Steps", "Zone 2", "Protein", "Fat", "Maintenance estimate", "Calories per lb", "Max loss", "Max gain"])
+    for (const name of [
+      "Steps",
+      "Zone 2",
+      "Protein",
+      "Fat",
+      "Maintenance estimate",
+      "Calories per lb",
+      "Max loss",
+      "Max gain",
+      "Minimum calories",
+    ])
       expect(screen.getByRole("textbox", { name })).toBeTruthy();
     expect(screen.getByRole("group", { name: "Metcon days" })).toBeTruthy();
     expect(screen.getByRole("group", { name: "Zone 2 days" })).toBeTruthy();
@@ -1189,6 +1199,82 @@ describe("Settings", () => {
     await user.click(within(screen.getByRole("group", { name: "Metcon days" })).getByRole("button", { name: "Sun" }));
     expect(lastSaved().schedule.metcon[0]).toBe(!before.schedule.metcon[0]);
     expect(lastSaved().program).toEqual(before.program);
+  });
+
+  describe("Minimum calories", () => {
+    const field = () => screen.getByRole<HTMLInputElement>("textbox", { name: "Minimum calories" });
+    /** The settings as stored before the field existed. */
+    const legacy = (): Settings => {
+      const { minCalories: _m, ...limits } = base().limits;
+      return { ...base(), limits };
+    };
+
+    it("sits with the other limits under Nutrition, and says what it does", () => {
+      show("/settings");
+      expect(field().closest("section")!.id).toBe("nutrition");
+      expect(field().value).toBe("1,500");
+      expect(described(field())).toBe("Your daily target never goes below this, whatever the pace or the scale says");
+    });
+
+    it("shows the default for settings stored before it existed, without saving anything", () => {
+      reset(legacy());
+      show("/settings");
+      expect(field().value).toBe("1,500");
+      expect(store.saved).toHaveLength(0);
+    });
+
+    it("saves only its own field, on a document with or without one", async () => {
+      for (const before of [base(), legacy()]) {
+        reset(before);
+        const user = userEvent.setup();
+        const view = show("/settings");
+        await type(user, field(), "1800");
+        expect(lastSaved()).toEqual({ ...before, limits: { ...before.limits, minCalories: 1800 } });
+        expect(settingsSchema.safeParse(lastSaved()).success).toBe(true);
+        expect(field().value).toBe("1,800");
+        view.unmount();
+      }
+    });
+
+    it("another field's save leaves a document without it as it was (the default is never written in passing)", async () => {
+      reset(legacy());
+      const user = userEvent.setup();
+      show("/settings");
+      await type(user, screen.getByRole("textbox", { name: "Max loss" }), "0.75");
+      expect(lastSaved().limits).toEqual({ maxLossPctPerWeek: 0.75, maxGainPctPerWeek: 0.5 });
+    });
+
+    it("refuses a value outside 800–5,000 or left empty, with a message by the field, and saves nothing", async () => {
+      const user = userEvent.setup();
+      show("/settings");
+      /** Everything the field is described by: its hint and, when refused, the message. */
+      const describedAll = () =>
+        field()
+          .getAttribute("aria-describedby")!
+          .split(" ")
+          .map((id) => document.getElementById(id)!.textContent);
+      for (const typed of ["500", "6000"]) {
+        await type(user, field(), typed);
+        expect(describedAll()).toContain("Between 800 and 5,000.");
+        expect(field().getAttribute("aria-invalid")).toBe("true");
+      }
+      await user.clear(field());
+      await user.tab();
+      expect(describedAll()).toContain("Enter a number.");
+      expect(store.saved).toHaveLength(0);
+      await type(user, field(), "800");
+      expect(lastSaved().limits.minCalories).toBe(800);
+      expect(field().getAttribute("aria-invalid")).toBeNull();
+    });
+
+    it("is named in the message when the schema refuses a stored value", () => {
+      const issue = (minCalories: number) => {
+        const r = settingsSchema.safeParse({ ...base(), limits: { ...base().limits, minCalories } });
+        return readableIssue(r.error!.issues[0] as unknown as Parameters<typeof readableIssue>[0]);
+      };
+      expect(issue(500)).toBe("Minimum calories must be at least 800.");
+      expect(issue(9000)).toBe("Minimum calories can be at most 5,000.");
+    });
   });
 });
 

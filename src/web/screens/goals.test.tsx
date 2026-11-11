@@ -295,3 +295,44 @@ describe("Goals consistency heatmap", () => {
     expect(fills(items[2]!)[0]).toBe("var(--color-accent)");
   });
 });
+
+describe("Goals: the pace while today's target is held at the minimum calorie target", () => {
+  /** Three weeks at 200 lb eating `kcal` every day: a TDEE of `kcal`. */
+  const eating = (kcal: number, settings: Settings) => {
+    store.data = { ...store.data, settings, days: store.data.days.map((d) => ({ ...d, calories: kcal })) };
+  };
+  const fast: Settings = { ...cutting, weightGoal: { ...cutting.weightGoal!, pacePctPerWeek: 1 } };
+  const note = () => document.querySelector<HTMLElement>("[data-floor-note]");
+
+  it("says under the slider what the target is built for instead: the slider still shows the pace that was chosen", () => {
+    eating(1900, fast);
+    show();
+    expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toContain("1.00% per week, about 2.0 lb");
+    expect(note()!.textContent).toBe("Your calorie target is held at your 1,500 kcal minimum, so it is built for −0.8 lb/wk for now.");
+    expect(note()!.className).toContain("text-mute");
+    expect(note()!.className).not.toMatch(/text-(warn|caution|gold|accent|faint)/);
+    // Right under the slider, in its block.
+    expect(note()!.parentElement!.querySelector('input[type="range"]')).not.toBeNull();
+  });
+
+  it("says the cut is on hold when the minimum leaves no deficit", () => {
+    eating(1400, fast);
+    show();
+    expect(note()!.textContent).toBe("Your calorie target is held at your 1,500 kcal minimum, so the cut is on hold for now.");
+  });
+
+  it("follows the pace: slowed until the target stands on its own, the line goes", () => {
+    eating(1900, fast);
+    show();
+    expect(note()).not.toBeNull();
+    // 0.2%/week at 200 lb is 0.4 lb/week, 200 kcal/day: a 1,700 kcal target.
+    act(() => void store.save({ ...fast, weightGoal: { ...fast.weightGoal!, pacePctPerWeek: 0.2 } }));
+    expect(note()).toBeNull();
+  });
+
+  it("says nothing while the target stands on its own", () => {
+    eating(2800, fast);
+    show();
+    expect(note()).toBeNull();
+  });
+});

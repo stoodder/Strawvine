@@ -53,6 +53,17 @@ export function trainingPrefs(settings: Settings | null | undefined): TrainingPr
   return { ...DEFAULT_TRAINING, ...settings?.training };
 }
 
+/** The minimum daily calorie target (kcal) for settings that don't carry one (SPEC §4.4). */
+export const DEFAULT_MIN_CALORIES = 1500;
+
+/**
+ * The minimum daily calorie target, kcal: the athlete's (`limits.minCalories`), or the default for
+ * settings stored before it existed (or saved by a build that doesn't know the field).
+ */
+export function minCalories(settings: Pick<Settings, "limits"> | null | undefined): number {
+  return settings?.limits.minCalories ?? DEFAULT_MIN_CALORIES;
+}
+
 /** Display preferences with defaults filled in. */
 export function displayPrefs(settings: Settings | null | undefined): DisplayPrefs {
   return { ...DEFAULT_DISPLAY, ...settings?.display };
@@ -68,7 +79,7 @@ export function defaultSettings(ids: SeedIds, today: ISODate): Settings {
       zone2: [false, true, true, true, true, true, false],
     },
     nutrition: { kcalPerLb: 3500, proteinGPerLb: 1, fatGPerLb: 0.35, initialTdee: null },
-    limits: { maxLossPctPerWeek: 1, maxGainPctPerWeek: 0.5 },
+    limits: { maxLossPctPerWeek: 1, maxGainPctPerWeek: 0.5, minCalories: DEFAULT_MIN_CALORIES },
     weightGoal: null,
     strengthTargets: [],
     program: {

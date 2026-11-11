@@ -126,6 +126,119 @@ describe("recommend", () => {
   });
 });
 
+describe("recommend: the minimum calorie target", () => {
+  /** A cut at 1%/week from 200 lb: 2 lb/week, 1,000 kcal/day under the TDEE. */
+  const cut = withGoal(170, 1, 200);
+  const withMinimum = (s: typeof base, minCalories: number) => ({ ...s, limits: { ...s.limits, minCalories } });
+
+  it("is 1,500 kcal in new settings, and for settings stored before the field existed", () => {
+    expect(base.limits.minCalories).toBe(1500);
+    const { minCalories: _m, ...limits } = cut.limits;
+    const legacy = { ...cut, limits };
+    expect(legacy.limits).not.toHaveProperty("minCalories");
+    expect(recommend(legacy, 2200, 200)).toMatchObject({ calories: 1500, floored: true, minCalories: 1500 });
+    expect(recommend(legacy, 3200, 200)).toMatchObject({ calories: 2200, floored: false, minCalories: 1500 });
+  });
+
+  it("holds a cut's target up, and says so", () => {
+    const r = recommend(cut, 2200, 200); // the pace alone: 1,200
+    expect(r).toMatchObject({ direction: "lose", calories: 1500, floored: true, minCalories: 1500, paceCapped: false });
+    // The rate is the one 1,500 kcal is built for: 700 kcal/day under a 2,200 TDEE = 1.4 lb/week, not the pace's 2.
+    expect(r.rateLbPerWeek).toBeCloseTo(-1.4);
+    expect(r.pacePctPerWeek).toBeCloseTo(-0.7);
+  });
+
+  it("builds the macros from the held target", () => {
+    const r = recommend(cut, 2200, 200);
+    expect(r.macros).toEqual(macrosFor(1500, 200, cut.nutrition));
+    expect(r.macros).toEqual({ proteinG: 200, fatG: 70, carbsG: 18 }); // from 1,200 the carbs would be 0
+  });
+
+  it("is not holding anything when the plan lands exactly on it, or above", () => {
+    expect(recommend(cut, 2500, 200)).toMatchObject({ calories: 1500, floored: false, rateLbPerWeek: expect.closeTo(-2) });
+    expect(recommend(cut, 2510, 200)).toMatchObject({ calories: 1510, floored: false });
+    const under = recommend(cut, 2490, 200);
+    expect(under).toMatchObject({ calories: 1500, floored: true });
+    expect(under.rateLbPerWeek).toBeCloseTo(-1.98);
+  });
+
+  it("is a backstop for a collapsed TDEE estimate: the 870 kcal target", () => {
+    // An overnight scale jump dragged the estimate down to 1,870; the pace took 1,000 more off it.
+    expect(recommend(withMinimum(cut, 800), 1870, 200)).toMatchObject({ calories: 870, floored: false });
+    const r = recommend(cut, 1870, 200);
+    expect(r).toMatchObject({ calories: 1500, floored: true });
+    expect(r.rateLbPerWeek).toBeCloseTo(-0.74);
+  });
+
+  it("a cut held at or above the TDEE plans no change: never a gain, never the pace", () => {
+    for (const tdee of [1500, 1300, 400]) {
+      const r = recommend(cut, tdee, 200);
+      expect(r).toMatchObject({ direction: "lose", calories: 1500, floored: true });
+      expect(r.rateLbPerWeek).toBe(0);
+      expect(r.pacePctPerWeek).toBe(0);
+    }
+  });
+
+  it("holds maintenance up too", () => {
+    expect(recommend(base, 1300, 200)).toMatchObject({ direction: "maintain", calories: 1500, floored: true, rateLbPerWeek: 0 });
+    expect(recommend(base, 1500, 200)).toMatchObject({ direction: "maintain", calories: 1500, floored: false });
+    // At the goal, or past it.
+    expect(recommend(withGoal(200, 1, 210), 1200, 199)).toMatchObject({ direction: "maintain", calories: 1500, floored: true });
+  });
+
+  it("holds a build up too, at the build's own rate", () => {
+    const build = withGoal(220, 0.5, 200); // +1 lb/week, +500 kcal/day
+    const r = recommend(build, 900, 200); // the pace alone: 1,400
+    expect(r).toMatchObject({ direction: "gain", calories: 1500, floored: true });
+    expect(r.rateLbPerWeek).toBeCloseTo(1);
+    expect(recommend(build, 1000, 200)).toMatchObject({ calories: 1500, floored: false });
+  });
+
+  it("follows the athlete's own minimum", () => {
+    expect(recommend(withMinimum(cut, 1800), 2700, 200)).toMatchObject({ calories: 1800, floored: true, minCalories: 1800 });
+    expect(recommend(withMinimum(cut, 1800), 2800, 200)).toMatchObject({ calories: 1800, floored: false });
+    expect(recommend(withMinimum(cut, 1000), 2200, 200)).toMatchObject({ calories: 1200, floored: false, minCalories: 1000 });
+  });
+
+  it("never reads as faster than the pace when the minimum sits inside the target's rounding", () => {
+    // The pace alone: 1,504, shown as 1,500. A 1,502 minimum holds that up by 2 kcal.
+    const r = recommend(withMinimum(cut, 1502), 2504, 200);
+    expect(r).toMatchObject({ calories: 1502, floored: true });
+    expect(r.rateLbPerWeek).toBeCloseTo(-2);
+  });
+});
+
+describe("project: a plan held at the minimum calorie target", () => {
+  const cut = withGoal(180, 1, 200);
+  const atPace = (tdee: number | null) =>
+    project(cut, "2026-11-01", 200, null, tdee === null ? undefined : recommend(cut, tdee, 200))?.atPace ?? null;
+
+  it("is unchanged while the target stands on its own", () => {
+    expect(atPace(3200)).toEqual(atPace(null));
+    expect(atPace(null)?.weeks).toBeCloseTo(10.48, 1);
+  });
+
+  it("projects at the pace the held target is built for", () => {
+    // 1,500 against a 2,200 TDEE: 0.7%/week instead of 1%.
+    expect(atPace(2200)!.weeks).toBeCloseTo(weeksAtPct(200, 180, 0.7)!, 5);
+    expect(atPace(2200)!.weeks).toBeGreaterThan(atPace(null)!.weeks);
+  });
+
+  it("has no date at pace when the held target is no deficit", () => {
+    expect(atPace(1400)).toBeNull();
+    const p = project(cut, "2026-11-01", 200, 201, recommend(cut, 1400, 200))!;
+    expect(p.observed).not.toBeNull(); // the observed trend still projects
+    expect(p.range).toEqual([p.observed!.date, p.observed!.date]);
+  });
+
+  it("leaves a held build's date at its own pace", () => {
+    const build = withGoal(201, 0.5, 190); // 1 lb to go at 1 lb/week
+    const held = recommend(build, 900, 200);
+    expect(held.floored).toBe(true);
+    expect(project(build, "2026-11-01", 200, null, held)!.atPace).toEqual(project(build, "2026-11-01", 200, null)!.atPace);
+  });
+});
+
 describe("macrosFor", () => {
   it("sets protein and fat per lb and fills carbs", () => {
     const m = macrosFor(3000, 200, base.nutrition);

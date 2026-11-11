@@ -2,7 +2,7 @@ import clsx from "clsx";
 import { useEffect, useId, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router";
 import { ChevronRight, Download, LogOut, RefreshCw, UserX } from "lucide-react";
-import { displayPrefs } from "../../shared/defaults";
+import { displayPrefs, minCalories } from "../../shared/defaults";
 import { programPathForSettingsHash } from "../components/program/sections";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { DayPicker, NumSetting } from "../components/settings/fields";
@@ -172,6 +172,17 @@ function SettingsBody() {
             max={3}
             unitInMessage="%"
             onSave={(v) => v !== null && save({ ...s, limits: { ...s.limits, maxGainPctPerWeek: v } })}
+          />
+          <NumSetting
+            label="Minimum calories"
+            hint="Your daily target never goes below this, whatever the pace or the scale says"
+            value={minCalories(s)}
+            unit="kcal"
+            integer
+            grouping
+            min={800}
+            max={5000}
+            onSave={(v) => v !== null && save({ ...s, limits: { ...s.limits, minCalories: v } })}
           />
         </div>
       </Section>

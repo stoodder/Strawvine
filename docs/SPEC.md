@@ -199,7 +199,7 @@ The same weighted formula applied to the last 7 daily TDEE values (skipping miss
 ### 4.4 Recommendation
 
 ```
-target calories = avgTDEE + (goal rate lb/week × 3500) / 7
+target calories = max(minimum calories, avgTDEE + (goal rate lb/week × 3500) / 7)
 ```
 
 - The user enters a **goal weight**; the rate is chosen as a pace (% bodyweight/week) within limits:
@@ -213,6 +213,40 @@ target calories = avgTDEE + (goal rate lb/week × 3500) / 7
 - **Target macros** are shown with target calories: protein from g/lb bodyweight, fat from g/lb,
   carbs fill the remaining calories (all ratios editable).
 
+#### Minimum calorie target
+
+Being nourished comes before the pace. The averages smooth the scale, but a wild reading can still drag the TDEE
+estimate down for a few days (an 8 lb overnight jump once produced an 870 kcal target), and an aggressive pace on a low
+TDEE can ask for too little on its own. So the target has a backstop:
+
+- **`limits.minCalories`** (kcal/day, 800–5,000; default **1,500**), edited in Settings → Nutrition as "Minimum
+  calories". The field is optional in the settings document: settings stored before it existed (or saved by a build
+  that doesn't know it) read as the default through `minCalories()` (`src/shared/defaults.ts`). Nothing is migrated and
+  the default is never written into a document in passing.
+- `recommend` applies it in **every direction** (cut, maintenance, build): the target is never below the minimum. The
+  recommendation says so (`floored`, with `minCalories`) only when the minimum is holding the target up — a plan that
+  lands exactly on it stands on its own. **Macros** are built from the held calories.
+- Like everything derived, it is recomputed: a past day's target (Today on that day, the intake strip, adherence in
+  §4.6) is held by the minimum as it is set now.
+- **The rate follows the calories.** A cut held at the minimum is a smaller deficit than the pace asked for, so the
+  recommendation's rate (`rateLbPerWeek`, `pacePctPerWeek`) becomes the one the held target is built for:
+  `(minimum − TDEE) × 7 / 3500`, never faster than the pace and never a gain — 0 when the minimum is at or above the
+  TDEE. Everything that reads the plan reads that rate: Today's "Cut · −0.8 lb/wk" ("Cut · on hold" at 0), the
+  check-in's "plan −0.8" and its verdict (§4.6: a week at the minimum is "On plan" against the held rate, never "Slower
+  than plan" against a pace the app itself held back; at 0 the plan is to hold, so the week reads "Maintaining" or
+  "Drifting"), the rate insights (§7), and the projected date "at pace" (none when the rate is 0; the date at the
+  observed trend is unaffected). A held maintenance or build keeps its own rate: the minimum is above the TDEE estimate
+  there, and the app plans no faster gain on it.
+- **Said quietly wherever the target is shown**, while it is held and only then: "Held at your 1,500 kcal minimum." —
+  under the target on Today's Fuel (today and past days), under next week's target in the check-in (§4.6) and as a line
+  of its shared text. On Goals (§5), under the pace slider — which keeps showing the pace that was chosen — it adds
+  what that does to the pace: "Your calorie target is held at your 1,500 kcal minimum, so it is built for −0.8 lb/wk
+  for now." ("…so the cut is on hold for now." at 0). It is reassurance, not a warning: the page's muted text, no
+  warning colour, no icon, no alert.
+- The existing safety limits are unchanged: max loss / max gain cap the _pace_; the minimum is a floor under the
+  _target_. Protein and fat alone can still add up to more than the target (carbs are then 0): the minimum doesn't
+  change that.
+
 ### 4.5 Calibration (ramp-up)
 
 The smoothed TDEE needs ~14 logged days. During calibration the app shows what it can (marked
@@ -224,7 +258,8 @@ into milestones (first weigh-in → averages online → first TDEE → calibrate
 Smoothed TDEE, actual vs target rate, adherence (each day's calories against the target that day showed, within
 ±10%), averages (intake, protein, steps, sleep, HRV, and resting HR once logged), the latest VO2 max with its change
 over ~30 days (§3.3), lifts / metcon / Zone 2 done against planned (Zone 2 with the week's total machine kcal once
-logged, §3.5), and next week's recommended calories & macros. The Zone 2 kcal total covers the same days as the count's
+logged, §3.5), and next week's recommended calories & macros (with "Held at your 1,500 kcal minimum." under them
+while the minimum is holding the target up, §4.4). The Zone 2 kcal total covers the same days as the count's
 "done": planned days with Zone 2 done; a reading on a day not done, or on an unplanned day, isn't in it.
 
 The card opens with a one-line **verdict**: the week's trend change against the plan (`weeklyRate` / `weeklyVerdict`,
@@ -246,6 +281,8 @@ e.g. "On plan · −1.3 lb this week against −1.5 lb", "Flat this week · +0.1
 +0.2 lb this week"; past a limit it adds ", past your 1% weekly limit" and is always a warning, whatever the verdict
 (a change past a limit is never "flat").
 
+- The **plan** is the recommendation's rate (§4.4): the chosen pace after the safety limit and the taper — and, while
+  the minimum calorie target holds a cut's target up, the slower rate that target is built for.
 - `weeklyRate` is the rule, shared with the rate-of-change insights in §7: on plan is at least 60 % of the planned
   change, the planned way, within the limit; past the limit that way is faster; against the plan by anything that
   prints is the wrong way. The insight reads it as is, with one refinement shared with the verdict: on plan by more
@@ -286,7 +323,8 @@ targets as read-only progress; targets are edited on Goals).
 
 ## 5. Goals
 
-- Goal weight with projected date range.
+- Goal weight with projected date range. While the minimum calorie target holds the target up (§4.4), the date "at
+  pace" is at the rate the held target is built for, and a quiet line under the pace slider says so.
 - The **pace slider** sets the calorie targets, so it is hard to nudge by accident and easy to take back: a change is
   saved once per gesture (when the finger, mouse or key lets go — not per tick) and announced with an undoable toast
   ("Pace set to −0.75%/wk · Undo"); further nudges while that toast is up fold into it, and its Undo returns to the pace

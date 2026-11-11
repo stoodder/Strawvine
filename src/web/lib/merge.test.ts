@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { defaultSettings } from "../../shared/defaults";
-import type { Bootstrap, Session, SetEntry } from "../../shared/schemas";
+import { DEFAULT_MIN_CALORIES, defaultSettings, minCalories } from "../../shared/defaults";
+import { settingsSchema, type Bootstrap, type Session, type SetEntry, type Settings } from "../../shared/schemas";
 import { blankSet } from "../../shared/session";
 import {
   ackEntry,
@@ -222,6 +222,69 @@ describe("mergeSettings", () => {
 
   it("without an ancestor, this device's values win", () => {
     expect(mergeFields(null, { a: 1, b: 2 }, { a: 5, c: 3 } as { a: number; b?: number; c?: number })).toEqual({ a: 1, b: 2, c: 3 });
+  });
+
+  describe("the minimum calorie target (limits.minCalories), a field older documents don't have", () => {
+    /** The settings as stored before the field existed. */
+    const { minCalories: _m, ...legacyLimits } = settings.limits;
+    const legacy: Settings = { ...settings, limits: legacyLimits };
+    const withMin = (s: Settings, minCalories: number): Settings => ({ ...s, limits: { ...s.limits, minCalories } });
+    const withLoss = (s: Settings, maxLossPctPerWeek: number): Settings => ({ ...s, limits: { ...s.limits, maxLossPctPerWeek } });
+
+    it("set here on a document that never had it, while the other device changed another limit: both survive", () => {
+      const m = mergeSettingsDetailed(legacy, withMin(legacy, 1800), withLoss(legacy, 0.75));
+      expect(m.value.limits).toEqual({ maxLossPctPerWeek: 0.75, maxGainPctPerWeek: 0.5, minCalories: 1800 });
+      expect(m.conflicts).toEqual([]);
+      expect(minCalories(m.value)).toBe(1800);
+    });
+
+    it("set on the other device, while this one changed something else: the other device's stands", () => {
+      for (const base of [legacy, settings]) {
+        const local = { ...withLoss(base, 0.75), targets: { ...base.targets, steps: 12_000 } };
+        const m = mergeSettingsDetailed(base, local, withMin(base, 1800));
+        expect(m.value.limits).toEqual({ maxLossPctPerWeek: 0.75, maxGainPctPerWeek: 0.5, minCalories: 1800 });
+        expect(m.value.targets.steps).toBe(12_000);
+        expect(m.conflicts).toEqual([]);
+      }
+    });
+
+    it("set on both to different values: this device's, like any single value (no list conflict to report)", () => {
+      for (const base of [legacy, settings]) {
+        const m = mergeSettingsDetailed(base, withMin(base, 1800), withMin(base, 1600));
+        expect(m.value.limits.minCalories).toBe(1800);
+        expect(m.conflicts).toEqual([]);
+      }
+      expect(mergeSettings(settings, withMin(settings, 1800), withMin(settings, 1800)).limits.minCalories).toBe(1800);
+    });
+
+    it("dropped by the other device's save (a build that doesn't know it): back to the default, unless this device changed it", () => {
+      const base = withMin(settings, 1800);
+      const dropped = withLoss(legacy, 0.75);
+      const untouched = mergeSettings(base, { ...base, onboarded: true }, dropped);
+      expect(untouched.limits).toEqual({ maxLossPctPerWeek: 0.75, maxGainPctPerWeek: 0.5 });
+      expect(minCalories(untouched)).toBe(DEFAULT_MIN_CALORIES);
+      expect(untouched.onboarded).toBe(true);
+
+      const changedHere = mergeSettings(base, withMin(base, 2000), dropped);
+      expect(changedHere.limits).toEqual({ maxLossPctPerWeek: 0.75, maxGainPctPerWeek: 0.5, minCalories: 2000 });
+    });
+
+    it("without an ancestor, this device's limits win whole, as every top-level key does: its value, or none (the default)", () => {
+      expect(mergeSettings(null, withMin(settings, 1800), withMin(settings, 1600)).limits.minCalories).toBe(1800);
+      // Nothing says what this device changed, so its `limits` replace the server's — the other limits too.
+      const m = mergeSettings(null, legacy, withLoss(withMin(settings, 1600), 0.75));
+      expect(m.limits).toEqual(legacy.limits);
+      expect(minCalories(m)).toBe(DEFAULT_MIN_CALORIES);
+    });
+
+    it("every merge is a document the server accepts", () => {
+      for (const m of [
+        mergeSettings(legacy, withMin(legacy, 1800), withLoss(legacy, 0.75)),
+        mergeSettings(withMin(settings, 1800), withMin(settings, 1800), legacy),
+        mergeSettings(null, legacy, withMin(settings, 1600)),
+      ])
+        expect(settingsSchema.parse(m)).toEqual(m);
+    });
   });
 });
 

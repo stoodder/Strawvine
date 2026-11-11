@@ -144,3 +144,22 @@ describe("shareText", () => {
     expect(await shareText("hi", "t")).toBe("failed");
   });
 });
+
+describe("checkinText: next week's target held at the minimum calorie target", () => {
+  const held = { ...base, next: { ...base.next!, calories: 1500, floored: true, minCalories: 1500 } } as WeeklyCheckin;
+
+  it("says so on its own line, right under the target, in the words the check-in uses", () => {
+    const lines = checkinText(held, { today: "2026-11-02", goalLb: 185 }).split("\n");
+    const at = lines.findIndex((l) => l.startsWith("Next week 1,500 kcal/day"));
+    expect(at).toBeGreaterThan(0);
+    expect(lines[at + 1]).toBe("Held at your 1,500 kcal minimum.");
+    expect(lines[at + 2]).toMatch(/^Goal 185 lb projected /);
+  });
+
+  it("says nothing while the target stands on its own, or when the week has no target line", () => {
+    const standing = { ...base, next: { ...base.next!, floored: false, minCalories: 1500 } } as WeeklyCheckin;
+    expect(checkinText(standing, { today: "2026-11-02" })).not.toContain("minimum");
+    expect(checkinText(base, { today: "2026-11-02" })).not.toContain("minimum");
+    expect(checkinText({ ...held, daysLogged: 0 }, { today: "2026-11-02" })).not.toContain("minimum");
+  });
+});

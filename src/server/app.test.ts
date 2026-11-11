@@ -356,6 +356,26 @@ describe("settings preferences", () => {
     expect((await req("/api/settings", json("PUT", { ...prefs, display: { highContrast: "yes" } }))).status).toBe(400);
   });
 
+  it("round-trips the minimum calorie target, and settings stored before it existed", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    // A fresh database is seeded with the default.
+    expect(b.settings.limits.minCalories).toBe(1500);
+    const { minCalories: _m, ...limits } = b.settings.limits;
+    const legacy = { ...b.settings, limits };
+    expect((await req("/api/settings", json("PUT", legacy))).status).toBe(200);
+    let after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    // Stored as sent: nothing is written into a document that doesn't carry the field.
+    expect(after.settings.limits).toEqual(limits);
+
+    const put = (minCalories: unknown) => req("/api/settings", json("PUT", { ...legacy, limits: { ...limits, minCalories } }));
+    expect((await put(1800)).status).toBe(200);
+    after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.settings.limits).toEqual({ ...limits, minCalories: 1800 });
+    for (const bad of [799, 5001, "1800", null]) expect((await put(bad)).status).toBe(400);
+    after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.settings.limits.minCalories).toBe(1800);
+  });
+
   it("stores correction max entries", async () => {
     const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
     const bench = b.exercises.find((e) => e.name === "Bench press")!;

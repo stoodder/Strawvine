@@ -2,6 +2,7 @@
  * Calorie & macro recommendations and goal-weight projections. See docs/SPEC.md §4.4.
  */
 import { addDays, type ISODate } from "./dates";
+import { minCalories } from "./defaults";
 import type { Settings } from "./schemas";
 
 export type Direction = "lose" | "gain" | "maintain";
@@ -17,14 +18,23 @@ export interface Macros {
 
 export interface Recommendation {
   direction: Direction;
-  /** Signed lb/week the target calories are built for. */
+  /**
+   * Signed lb/week the target calories are built for. While the minimum holds a cut's target up
+   * (`floored`) that is what the minimum leaves of the chosen pace: slower than it, and 0 once the
+   * minimum is at or above the TDEE.
+   */
   rateLbPerWeek: number;
-  /** Signed % bodyweight/week actually used (after capping and the approach taper). */
+  /** Signed % bodyweight/week actually used (after capping, the approach taper and the minimum). */
   pacePctPerWeek: number;
   /** The chosen pace exceeds the safety limit for this direction (never set while maintaining). */
   paceCapped: boolean;
   tdee: number;
+  /** The day's target: what the plan asks for, never below `minCalories`. */
   calories: number;
+  /** The minimum is holding the target up: the plan alone asked for less than `minCalories`. */
+  floored: boolean;
+  /** The minimum calorie target in force, kcal/day (Settings → `limits.minCalories`, see `minCalories()`). */
+  minCalories: number;
   macros: Macros;
 }
 
@@ -74,9 +84,20 @@ export function recommend(
   // Taper: never plan a week's change larger than what is left to go, so the target eases into
   // maintenance near the goal instead of jumping from full pace to zero.
   const remainingLb = goal ? Math.abs(goal.targetLb - trendWeight) : 0;
-  const rateLbPerWeek = sign * Math.min((pace / 100) * trendWeight, remainingLb);
+  const paceRate = sign * Math.min((pace / 100) * trendWeight, remainingLb);
+  const { kcalPerLb } = settings.nutrition;
+  const planned = Math.round((tdee + (paceRate * kcalPerLb) / 7) / 10) * 10;
+  // The backstop: being nourished comes before the pace, and before a TDEE estimate that a wild
+  // scale reading has dragged down. Whatever the direction, the target never goes under the minimum.
+  const floor = minCalories(settings);
+  const floored = planned < floor;
+  const calories = floored ? floor : planned;
+  // A cut held at the minimum is a smaller deficit than the pace asked for: the rate is the one
+  // these calories are built for (never a gain), so nothing downstream measures the week against
+  // a pace the target isn't asking for. A floored maintenance or build keeps its rate: the minimum
+  // is above the TDEE estimate there, and the app doesn't plan a faster gain on that.
+  const rateLbPerWeek = floored && direction === "lose" ? Math.min(0, Math.max(paceRate, ((calories - tdee) * 7) / kcalPerLb)) : paceRate;
   const pacePctPerWeek = trendWeight > 0 ? (rateLbPerWeek / trendWeight) * 100 : 0;
-  const calories = Math.round((tdee + (rateLbPerWeek * settings.nutrition.kcalPerLb) / 7) / 10) * 10;
   return {
     direction,
     rateLbPerWeek,
@@ -84,6 +105,8 @@ export function recommend(
     paceCapped: capped,
     tdee,
     calories,
+    floored,
+    minCalories: floor,
     macros: macrosFor(calories, trendWeight, settings.nutrition),
   };
 }
@@ -96,7 +119,10 @@ export interface ProjectionPoint {
 export interface Projection {
   direction: Direction;
   remainingLb: number;
-  /** At the chosen (capped) pace. */
+  /**
+   * At the chosen (capped) pace; while the minimum calorie target holds the plan back, at the pace
+   * the target is built for instead (null when that is no deficit at all).
+   */
   atPace: ProjectionPoint | null;
   /** At the fastest pace the limits allow. */
   atLimit: ProjectionPoint | null;
@@ -126,6 +152,8 @@ export function project(
   today: ISODate,
   trendWeight: number,
   weekAgoTrendWeight: number | null,
+  /** The current recommendation: while it is `floored`, "at pace" is at its pace, not the chosen one. */
+  plan?: Pick<Recommendation, "floored" | "pacePctPerWeek"> | null,
 ): Projection | null {
   const goal = settings.weightGoal;
   if (!goal) return null;
@@ -135,7 +163,9 @@ export function project(
     return { direction, remainingLb, atPace: null, atLimit: null, observed: null, observedRateLbPerWeek: null, range: null };
   }
   const { pace, limit } = cappedPace(settings, direction, goal.pacePctPerWeek);
-  const atPace = point(today, weeksAtPct(trendWeight, goal.targetLb, pace));
+  // Only a cut is slowed by the minimum (`recommend`): a held build keeps its pace.
+  const heldCut = direction === "lose" && plan?.floored;
+  const atPace = point(today, weeksAtPct(trendWeight, goal.targetLb, heldCut ? Math.min(pace, Math.abs(plan.pacePctPerWeek)) : pace));
   const atLimit = point(today, weeksAtPct(trendWeight, goal.targetLb, limit));
 
   const observedRateLbPerWeek = weekAgoTrendWeight === null ? null : trendWeight - weekAgoTrendWeight;

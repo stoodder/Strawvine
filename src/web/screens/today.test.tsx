@@ -121,6 +121,90 @@ function renderDay(data: AppData, path = "/") {
 
 const num = (text: string | null | undefined) => Number((text ?? "").replace(/[^\d.-]/g, ""));
 
+describe("Today's Fuel: a target held at the minimum calorie target", () => {
+  /** A cut at 1%/week (2 lb/week at 200 lb, 1,000 kcal/day under the TDEE), with `limits` on top. */
+  const cutting = (limits: Partial<AppData["settings"]["limits"]> = {}): AppData["settings"] => ({
+    ...settings,
+    limits: { ...settings.limits, ...limits },
+    weightGoal: { targetLb: 180, pacePctPerWeek: 1, setOn: addDays(TODAY, -21), startLb: 200 },
+  });
+  /** Three weeks at 200 lb eating `kcal` a day: a TDEE of `kcal`. */
+  const eating = (kcal: number, s: AppData["settings"] = cutting()): AppData => ({ ...history({}, { calories: kcal }), settings: s });
+  const target = (fuelSection: HTMLElement) => within(fuelSection).getByText("Target").parentElement!;
+  const note = (el: HTMLElement) => el.querySelector<HTMLElement>("[data-floor-note]");
+
+  it("shows the minimum as the target, with one quiet line saying so", () => {
+    // A 1,900 kcal TDEE: the pace alone would be 900.
+    const fuelSection = renderDay(eating(1900)).section("Fuel");
+    expect(target(fuelSection).textContent).toBe("Target1,500kcalCut · −0.8 lb/wkHeld at your 1,500 kcal minimum.");
+    expect(note(fuelSection)!.textContent).toBe("Held at your 1,500 kcal minimum.");
+    // What is left to eat is counted from the held target.
+    expect(fuelSection.querySelector("[data-fuel-side]")!.textContent).toBe("1,500 kcalleft");
+  });
+
+  it("is reassurance, not a warning: the page's muted text, no alert, no warning colour, no icon", () => {
+    const fuelSection = renderDay(eating(1900)).section("Fuel");
+    const line = note(fuelSection)!;
+    expect(line.tagName).toBe("P");
+    expect(line.className).toContain("text-mute");
+    expect(line.className).not.toMatch(/text-(warn|caution|gold|accent|faint)/);
+    expect(line.closest("[role=alert], [role=status]")).toBeNull();
+    expect(line.querySelector("svg")).toBeNull();
+  });
+
+  it("gives the rate the held target is built for, not the pace it was held back from", () => {
+    // 1,500 against 1,900 is 400 kcal/day: 0.8 lb/week, where the pace asked for 2.
+    expect(target(renderDay(eating(1900)).section("Fuel")).textContent).toContain("Cut · −0.8 lb/wk");
+  });
+
+  it("says the cut is on hold when the minimum leaves no deficit (a collapsed TDEE estimate)", () => {
+    const fuelSection = renderDay(eating(1400)).section("Fuel");
+    expect(target(fuelSection).textContent).toBe("Target1,500kcalCut · on holdHeld at your 1,500 kcal minimum.");
+  });
+
+  it("builds the macro targets from the held calories", () => {
+    // 200 g protein and 70 g fat are 1,430 kcal: 18 g of carbs fit under 1,500 (none would under 900).
+    const fuelSection = renderDay(eating(1900)).section("Fuel");
+    expect(within(fuelSection).getByText("Carbs").parentElement!.textContent).toContain("/ 18g");
+  });
+
+  it("says nothing while the target stands on its own: above the minimum, or exactly on it", () => {
+    for (const kcal of [3000, 2500]) {
+      const view = renderDay(eating(kcal));
+      const fuelSection = view.section("Fuel");
+      expect(target(fuelSection).textContent).toBe(`Target${(kcal - 1000).toLocaleString("en-US")}kcalCut · −2.0 lb/wk`);
+      expect(note(fuelSection)).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it("names the athlete's own minimum, and the default for settings stored before the field existed", () => {
+    let view = renderDay(eating(1900, cutting({ minCalories: 1800 })));
+    expect(note(view.section("Fuel"))!.textContent).toBe("Held at your 1,800 kcal minimum.");
+    expect(target(view.section("Fuel")).textContent).toContain("Target1,800kcalCut · −0.2 lb/wk");
+    view.unmount();
+
+    const { minCalories: _m, ...legacyLimits } = settings.limits;
+    view = renderDay(eating(1900, { ...cutting(), limits: legacyLimits }));
+    expect(note(view.section("Fuel"))!.textContent).toBe("Held at your 1,500 kcal minimum.");
+    view.unmount();
+
+    // Lowered far enough, the pace's own number shows again.
+    view = renderDay(eating(1900, cutting({ minCalories: 800 })));
+    expect(target(view.section("Fuel")).textContent).toBe("Target900kcalCut · −2.0 lb/wk");
+    expect(note(view.section("Fuel"))).toBeNull();
+  });
+
+  it("holds maintenance too, and a past day's target as it is recomputed", () => {
+    let view = renderDay(eating(1300, settings));
+    expect(target(view.section("Fuel")).textContent).toBe("Target1,500kcalMaintenanceHeld at your 1,500 kcal minimum.");
+    view.unmount();
+
+    view = renderDay(eating(1900), `/day/${addDays(TODAY, -2)}`);
+    expect(target(view.section("Fuel")).textContent).toBe("Target1,500kcalCut · −0.8 lb/wkHeld at your 1,500 kcal minimum.");
+  });
+});
+
 describe("Today's Fuel: what's left", () => {
   /** The day's calorie target, as shown. */
   const target = (fuelSection: HTMLElement) => num(within(fuelSection).getByText("Target").nextElementSibling!.firstChild!.textContent);

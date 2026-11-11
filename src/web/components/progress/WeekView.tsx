@@ -7,6 +7,7 @@ import type { AppData } from "../../../shared/gamify";
 import { weeklyVerdict, type WeeklyCheckin, type WeeklyVerdict } from "../../../shared/insights";
 import { fmt, minutesToHM, signed } from "../../lib/format";
 import { Calibration } from "../Calibration";
+import { FloorNote } from "../FloorNote";
 import { formatProjectedRange } from "../projection";
 import { useToast } from "../Toast";
 import { Bar, Section, Stat } from "../ui";
@@ -244,6 +245,7 @@ export function WeekView({
               <span className="whitespace-nowrap">F {fmt(c.next.macros.fatG)}</span>
             </div>
           </div>
+          <FloorNote rec={c.next} className="mt-3" />
           {c.projection?.range && goal && (
             <p className="mt-3 text-xs text-mute">
               {goal.targetLb} lb projected <span className="text-fg-2">{formatProjectedRange(c.projection.range, today)}</span>

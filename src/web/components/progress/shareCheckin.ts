@@ -2,6 +2,7 @@ import { formatShortDate, type ISODate } from "../../../shared/dates";
 import type { WeeklyCheckin } from "../../../shared/insights";
 import type { Vo2Trend } from "../../../shared/recovery";
 import { fmt, minutesToHM, signed } from "../../lib/format";
+import { floorNoteText } from "../FloorNote";
 import { formatProjectedRange } from "../projection";
 
 /**
@@ -15,6 +16,7 @@ import { formatProjectedRange } from "../projection";
  *   VO2 max 52.3 (+1.2 since Oct 2)
  *   Lifts 3/4 · Metcon 2/3 · Zone 2 1/2 (640 kcal on the machine)
  *   Next week 2,400 kcal/day · P 200 · C 220 · F 70
+ *   Held at your 1,500 kcal minimum.                      (only while the minimum holds the target up)
  *   Goal 185 lb projected Dec 19 – Jan 8, 2027
  */
 export function checkinText(c: WeeklyCheckin, opts: { today: ISODate; goalLb?: number | null }): string {
@@ -55,6 +57,7 @@ export function checkinText(c: WeeklyCheckin, opts: { today: ISODate; goalLb?: n
     lines.push(
       `Next week ${fmt(c.next.calories)} kcal/day · P ${fmt(c.next.macros.proteinG)} · C ${fmt(c.next.macros.carbsG)} · F ${fmt(c.next.macros.fatG)}`,
     );
+  if (c.next?.floored && c.daysLogged > 0) lines.push(floorNoteText(c.next));
   if (c.projection?.range && opts.goalLb != null)
     lines.push(`Goal ${fmt(opts.goalLb, opts.goalLb % 1 ? 1 : 0)} lb projected ${formatProjectedRange(c.projection.range, opts.today)}`);
   return lines.filter(Boolean).join("\n");

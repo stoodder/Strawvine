@@ -55,6 +55,9 @@ const checkin = (patch: Partial<WeeklyCheckin> = {}): WeeklyCheckin => ({
   ...patch,
 });
 
+/** A cut at 1%/week from 198.7 lb: about 2 lb/week, 1,000 kcal/day under the TDEE. */
+const cutting = { ...settings, weightGoal: { targetLb: 180, pacePctPerWeek: 1, setOn: "2026-10-01", startLb: 200 } };
+
 const show = (c: WeeklyCheckin, loggedCount = 30) => render(<WeekView data={data} today={TODAY} checkin={c} loggedCount={loggedCount} />);
 const verdict = () => document.querySelector<HTMLElement>("[data-verdict]")!;
 const tile = (label: string) => screen.getByText(label, { exact: true }).parentElement!;
@@ -245,5 +248,43 @@ describe("WeekView: the tiles", () => {
     show(checkin({ daysLogged: 1, tdee: null, next: null }), 1);
     expect(screen.queryByText(/Your first check-in builds itself/)).toBeNull();
     expect(screen.getByRole("button", { name: "Share check-in" })).toBeTruthy();
+  });
+});
+
+describe("WeekView: next week's target held at the minimum calorie target", () => {
+  const nextWeek = () => screen.getByText("Next week").parentElement!;
+  /** The check-in as `weeklyCheckin` builds it for a 2,000 kcal TDEE: the plan and the verdict come from `next`. */
+  const held = (tdee = 2000, s = cutting) => {
+    const next = recommend(s, tdee, 198.7);
+    return checkin({ next, targetRateLbPerWeek: next.rateLbPerWeek, rate: rate(-1.0, next), projection: null });
+  };
+
+  it("says so in one quiet line under the number", () => {
+    show(held());
+    expect(nextWeek().textContent).toContain("1,500kcal/day");
+    const note = nextWeek().querySelector<HTMLElement>("[data-floor-note]")!;
+    expect(note.textContent).toBe("Held at your 1,500 kcal minimum.");
+    expect(note.className).toContain("text-mute");
+    expect(note.className).not.toMatch(/text-(warn|caution|gold|accent|faint)/);
+    expect(note.querySelector("svg")).toBeNull();
+  });
+
+  it("judges the week against the rate the held target is built for: on plan, not slower than a pace it was held back from", () => {
+    // 1,500 against a 2,000 kcal TDEE is 1 lb/week; the pace asked for about 2.
+    show(held());
+    expect(verdict().dataset.verdict).toBe("on-plan");
+    expect(verdict().textContent).toBe("On plan · −1.0 lb this week against −1.0 lb");
+    expect(tile("Trend weight").textContent).toContain("plan −1.0");
+  });
+
+  it("names the athlete's own minimum", () => {
+    show(held(2000, { ...cutting, limits: { ...cutting.limits, minCalories: 1250 } }));
+    expect(nextWeek().querySelector("[data-floor-note]")!.textContent).toBe("Held at your 1,250 kcal minimum.");
+  });
+
+  it("says nothing while the target stands on its own", () => {
+    show(checkin({ next: recommend(cutting, 2800, 198.7) }));
+    expect(nextWeek().textContent).toContain("1,810kcal/day");
+    expect(document.querySelector("[data-floor-note]")).toBeNull();
   });
 });
