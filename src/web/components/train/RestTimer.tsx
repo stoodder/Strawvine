@@ -9,7 +9,8 @@ import { DOCK_PRIORITY, DockItem } from "../Dock";
 const FROM_KEY = "strawvine:rest-from";
 const TARGET_KEY = "strawvine:rest-target";
 const BASE_KEY = "strawvine:rest-base";
-/** Tap-to-cycle steps for the current rest (plus the Settings value it started at). */
+const BY_KEY = "strawvine:rest-by";
+/** Tap-to-cycle steps for the current rest (plus the Program → Rules value it started at). */
 const TARGETS = [60, 90, 120, 180] as const;
 const DEFAULT_TARGET_S = 90;
 /**
@@ -26,7 +27,7 @@ function read(key: string): number | null {
     return null;
   }
 }
-function write(key: string, v: number | null) {
+function write(key: string, v: number | string | null) {
   try {
     if (v === null) window.localStorage.removeItem(key);
     else window.localStorage.setItem(key, String(v));
@@ -34,11 +35,20 @@ function write(key: string, v: number | null) {
     /* storage unavailable: the timer just won't survive a tab switch */
   }
 }
+function readText(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key) || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The current rest: its start time and target, kept in localStorage so they survive switching
- * tabs / reloading the PWA. `start(targetS)` begins a rest at the target the logged set calls
- * for (main lift vs accessory, from Settings); `setTarget` overrides it for this rest only.
+ * tabs / reloading the PWA. `start(targetS, by)` begins a rest at the target the logged set calls
+ * for (main lift vs accessory, from Program → Rules); `setTarget` overrides it for this rest only.
+ * `by` is the id of the set whose logging started it (none for a rest several sets started at
+ * once): unlogging that set ends the rest it began — `stopIfStartedBy`.
  */
 export function useRestTimer() {
   const [target, setTargetState] = useState<number>(() => read(TARGET_KEY) ?? DEFAULT_TARGET_S);
@@ -47,28 +57,37 @@ export function useRestTimer() {
     const v = read(FROM_KEY);
     return v !== null && Date.now() - v < restLimitS(read(TARGET_KEY) ?? DEFAULT_TARGET_S) * 1000 ? v : null;
   });
-  const start = useCallback((targetS: number) => {
+  const start = useCallback((targetS: number, by: string | null = null) => {
     const now = Date.now();
     write(FROM_KEY, now);
     write(TARGET_KEY, targetS);
     write(BASE_KEY, targetS);
+    write(BY_KEY, by);
     setFrom(now);
     setTargetState(targetS);
     setBase(targetS);
   }, []);
   const stop = useCallback(() => {
     write(FROM_KEY, null);
+    write(BY_KEY, null);
     setFrom(null);
   }, []);
+  /** End the rest if `setId` is the set that started it (kept in storage: it survives a reload). */
+  const stopIfStartedBy = useCallback(
+    (setId: string) => {
+      if (readText(BY_KEY) === setId) stop();
+    },
+    [stop],
+  );
   const setTarget = useCallback((targetS: number) => {
     write(TARGET_KEY, targetS);
     setTargetState(targetS);
   }, []);
-  return { from, target, base, start, stop, setTarget };
+  return { from, target, base, start, stop, stopIfStartedBy, setTarget };
 }
 
 /**
- * The next tap-to-cycle step after `t`, wrapping: the defaults plus `base` (the Settings value
+ * The next tap-to-cycle step after `t`, wrapping: the defaults plus `base` (the Program → Rules value
  * this rest started at), so an off-list target can always be cycled back to.
  */
 export function nextTarget(t: number, base: number): number {
@@ -146,7 +165,7 @@ function NextPlates({ load }: { load: NonNullable<ReturnType<typeof nextLoad>> }
 
 /**
  * Rest pill in the bottom dock: counts down to the rest's target (tap to cycle 60/90/120/180 s
- * and the Settings value for this rest), then flips to "Ready" with a check and counts the overtime.
+ * and the Program → Rules value for this rest), then flips to "Ready" with a check and counts the overtime.
  */
 export function RestTimer({
   from,
@@ -159,7 +178,7 @@ export function RestTimer({
 }: {
   from: number | null;
   target: number;
-  /** The target this rest started at (Settings), kept in the tap cycle. */
+  /** The target this rest started at (Program → Rules), kept in the tap cycle. */
   base: number;
   onTarget: (s: number) => void;
   onDismiss: () => void;

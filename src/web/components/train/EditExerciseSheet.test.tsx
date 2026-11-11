@@ -1,14 +1,16 @@
 /**
- * The Edit exercise sheet, opened from Settings' exercise library: prefilled from the exercise,
+ * The Edit exercise sheet, opened from Program's exercise library: prefilled from the exercise,
  * sends only what changed, keeps a program's main lift intact, archives with an undo.
  */
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultSettings } from "../../../shared/defaults";
 import type { Exercise, Settings } from "../../../shared/schemas";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { LiftsEditor } from "../program/LiftsEditor";
+import { EditExerciseSheet } from "./EditExerciseSheet";
 
 const store = vi.hoisted(() => ({
   exercises: [] as Exercise[],
@@ -70,7 +72,7 @@ const open = async (name: string) => {
 };
 const pressed = (group: HTMLElement, name: string) => within(group).getByRole("button", { name }).getAttribute("aria-pressed");
 
-describe("Settings' exercise library", () => {
+describe("Program's exercise library", () => {
   it("lists each exercise with its tag, archived ones on request", async () => {
     const user = userEvent.setup();
     renderLibrary();
@@ -280,5 +282,55 @@ describe("Edit exercise", () => {
     const again = within(screen.getByRole("dialog", { name: "Edit Pull-up" }));
     expect(pressed(again.getByRole("group", { name: "Category" }), "Accessory")).toBe("true");
     expect(store.edit).not.toHaveBeenCalled();
+  });
+});
+
+describe("the locked lift's link to the weekly layout", () => {
+  /** A page that opens the sheet for the bench press (as Train's exercise options do), and where the router is. */
+  function Opener() {
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button type="button" onClick={() => setOpen(true)}>
+          Edit exercise
+        </button>
+        <EditExerciseSheet exercise={store.exercises[0]!} open={open} onClose={() => setOpen(false)} />
+      </>
+    );
+  }
+  function Where() {
+    const { pathname, hash, state } = useLocation();
+    return (
+      <output data-testid="where" data-state={JSON.stringify(state)}>
+        {pathname + hash}
+      </output>
+    );
+  }
+  const openAt = async (path: string) => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/train/:date" element={<Opener />} />
+          <Route path="/program" element={<h1>Program</h1>} />
+        </Routes>
+        <Where />
+      </MemoryRouter>,
+      { container: root() },
+    );
+    await user.click(screen.getByRole("button", { name: "Edit exercise" }));
+    return user;
+  };
+
+  it("goes to Program's weekly layout, says where it came from, and closes the sheet", async () => {
+    const user = await openAt("/train/2026-11-10");
+    const link = within(screen.getByRole("dialog", { name: "Edit Bench press" })).getByRole("link", { name: "weekly layout" });
+    await user.click(link);
+    const where = screen.getByTestId("where");
+    expect(where.textContent).toBe("/program#layout");
+    // Program's back control reads this to return to the day the sheet was opened on.
+    expect(JSON.parse(where.getAttribute("data-state")!)).toEqual({ from: "/train/2026-11-10" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Program");
   });
 });

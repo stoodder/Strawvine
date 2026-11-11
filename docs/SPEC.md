@@ -429,14 +429,24 @@ optional note.
   - **Set rows:** every set — main lift and accessory — is a row with two explicit controls and no hidden gesture: its
     values (set number, then "170 × 6", "8 × 25 lb", "8 reps", "30 s · 25 lb", "40 m") open the set editor, and a check
     at the right logs or unlogs it. Main-lift rows carry the big numerals, accessory rows are the same row, compact.
-    Open rows are bright and logged ones recede behind their check, showing what was logged. "+ Set" ends each
-    exercise's rows. A read-only preview shows the same rows without controls.
+    Mid-session, open rows are bright and logged ones recede behind their check, showing what was logged; on a
+    finished session or a day that isn't today the logged rows are the page's content and read a step brighter. "+ Set"
+    ends each exercise's rows (that row is also the gap to the next exercise). A read-only preview shows the same rows
+    without controls.
   - The check logs a set at its targets in one tap — except an open AMRAP, which opens its rep counter, and a set of a
-    weighted accessory with no load yet (none entered or targeted), which opens the set editor instead, so a weighted
-    set is never logged without a load by accident.
-  - **Finish** is at the end of the page and, once a set is logged, also in the bottom dock ("Finish · 5/7 sets", nearest
-    the nav; it takes the accent when every set is logged): the same press either way — the unlogged-sets question
-    first, then the recap.
+    weighted accessory with no load yet (none entered or targeted), which opens the set editor instead (the sheet says
+    so: "No load yet — set it to log this set"), so a weighted set is never logged without a load by accident.
+  - A check leaves no toast — the same check undoes it — and unlogging the set that started the current rest stops
+    that rest. Undo toasts are for edits with no other undo: an editor save that changed a value, deleting a set,
+    logging the remaining sets / a round, skip, remove, superset edits.
+  - **Finish** is at the end of the page. Once every set is logged it is also offered from the bottom dock ("Finish ·
+    7/7 sets", in the accent, nearest the nav) while the page's own button is off screen — never both at once. With
+    sets still open the dock is left to the workout (the rest pill, an Undo) and the page's button asks the
+    unlogged-sets question first; then the recap.
+  - Train's header always links to Program: the week in words ("Week 1 of 5"; on screens under 360 px "Week 1",
+    "Deload", "Cycle 2 · Week 1"), or before the first cycle when it starts ("Starts Mon Nov 2"). Before the first
+    cycle a lifting day says "Your program starts Monday, Nov 2" in place of its main lift; once the cycle runs, a
+    lift without a max asks for it.
   - **Exercise options** (⋯) list actions by how often they're used: log as planned, the sets (edit, delete), the
     superset's actions, skip today, edit exercise, remove.
   - Volume counts weight × reps of rep-measured sets only; time and distance never count. A set's load is the one it

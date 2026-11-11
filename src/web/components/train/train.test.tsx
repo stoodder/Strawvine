@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { Block, BlockExercise, Session, SetEntry } from "../../../shared/schemas";
 import { recapLines } from "./FinishPanel";
-import { plateChips } from "./RestTimer";
-import { describeSet, nextOpenSet, replaceSetAndPropagate, resolveExRef, resolveSetRef } from "./sessionEdit";
+import { plateChips, useRestTimer } from "./RestTimer";
+import { describeSet, editorChange, nextOpenSet, replaceSetAndPropagate, resolveExRef, resolveSetRef } from "./sessionEdit";
 
 let n = 0;
 const set = (o: Partial<SetEntry> = {}): SetEntry => ({
@@ -140,6 +141,89 @@ describe("replaceSetAndPropagate", () => {
     const prev = e.sets[0]!;
     const out = replaceSetAndPropagate(e, prev, { ...prev, targetReps: 4 });
     expect(out.sets.map((x) => x.targetReps)).toEqual([4, 6, 5]);
+  });
+});
+
+describe("editorChange (does a save from the set editor need its own Undo?)", () => {
+  const open = () => set({ targetReps: 10, targetWeight: 50 });
+  const done = () => set({ targetReps: 10, targetWeight: 50, done: true, reps: 10, weight: 50 });
+
+  it("nothing changed: none", () => {
+    expect(editorChange(open(), open(), true)).toBe("none");
+    expect(editorChange(done(), done(), true)).toBe("none");
+  });
+
+  it("logged as it stood — what the row's check does: check", () => {
+    const s = open();
+    expect(editorChange(s, { ...s, done: true, reps: 10, weight: 50 }, true)).toBe("check");
+    // An unweighted exercise's set is logged without the target load it still holds.
+    expect(editorChange(s, { ...s, done: true, reps: 10, weight: null }, false)).toBe("check");
+    expect(editorChange(s, { ...s, done: true, reps: 10, weight: 50 }, false)).toBe("values");
+  });
+
+  it("logged with other reps or another load: values", () => {
+    const s = open();
+    expect(editorChange(s, { ...s, done: true, reps: 9, weight: 50 }, true)).toBe("values");
+    expect(editorChange(s, { ...s, done: true, reps: 10, weight: 55 }, true)).toBe("values");
+    // A load set on a set that had none (the check sent it to the editor).
+    const bare = set({ targetReps: 10, targetWeight: null });
+    expect(editorChange(bare, { ...bare, done: true, reps: 10, weight: 20 }, true)).toBe("values");
+  });
+
+  it("a new target, or a logged set updated: values", () => {
+    const s = open();
+    expect(editorChange(s, { ...s, targetReps: 8 }, true)).toBe("values");
+    expect(editorChange(s, { ...s, targetWeight: 55 }, true)).toBe("values");
+    const d = done();
+    expect(editorChange(d, { ...d, reps: 11 }, true)).toBe("values");
+    expect(editorChange(d, { ...d, weight: 45 }, true)).toBe("values");
+  });
+});
+
+describe("useRestTimer: the set that started the rest", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("stops for the set that started it, and only for that one", () => {
+    const { result } = renderHook(() => useRestTimer());
+    act(() => result.current.start(90, "a"));
+    expect(result.current.from).not.toBeNull();
+    act(() => result.current.stopIfStartedBy("b"));
+    expect(result.current.from).not.toBeNull();
+    act(() => result.current.stopIfStartedBy("a"));
+    expect(result.current.from).toBeNull();
+  });
+
+  it("the latest set to start a rest is the one that owns it", () => {
+    const { result } = renderHook(() => useRestTimer());
+    act(() => result.current.start(90, "a"));
+    act(() => result.current.start(180, "b"));
+    act(() => result.current.stopIfStartedBy("a"));
+    expect(result.current.from).not.toBeNull();
+    expect(result.current.target).toBe(180);
+    act(() => result.current.stopIfStartedBy("b"));
+    expect(result.current.from).toBeNull();
+  });
+
+  it("a rest no single set started (several logged at once) is nobody's to stop", () => {
+    const { result } = renderHook(() => useRestTimer());
+    act(() => result.current.start(90, "a"));
+    act(() => result.current.start(90));
+    act(() => result.current.stopIfStartedBy("a"));
+    expect(result.current.from).not.toBeNull();
+  });
+
+  it("survives a reload, and a dismissed rest forgets its set", () => {
+    const first = renderHook(() => useRestTimer());
+    act(() => first.result.current.start(90, "a"));
+    first.unmount();
+    const second = renderHook(() => useRestTimer());
+    expect(second.result.current.from).not.toBeNull();
+    act(() => second.result.current.stop());
+    expect(second.result.current.from).toBeNull();
+    // A new rest started by nothing in particular isn't stopped by the old set.
+    act(() => second.result.current.start(90));
+    act(() => second.result.current.stopIfStartedBy("a"));
+    expect(second.result.current.from).not.toBeNull();
   });
 });
 

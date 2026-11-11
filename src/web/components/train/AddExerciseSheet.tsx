@@ -40,7 +40,7 @@ export function AddExerciseSheet({
   const [category, setCategory] = useState<ExerciseCategory>("accessory");
   const [measure, setMeasure] = useState<Measure>("reps");
   // Follows the measure and category (defaultWeighted) until the person picks; null = not picked.
-  // A barbell lift is always weighted, like a main lift in Settings: no choice shown.
+  // A barbell lift is always weighted, like a main lift in the exercise library: no choice shown.
   const [weightedPick, setWeightedPick] = useState<boolean | null>(null);
   const loadChoice = !isMainLift({ tracksMax: false, category });
   const weighted = !loadChoice || (weightedPick ?? defaultWeighted(measure, category));

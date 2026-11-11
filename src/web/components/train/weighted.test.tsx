@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Exercise, SetEntry } from "../../../shared/schemas";
 import { AddExerciseSheet } from "./AddExerciseSheet";
 import { AccessorySetRow } from "./SetControls";
-import { SetEditSheet } from "./SetSheets";
+import { Plates, SetEditSheet } from "./SetSheets";
 import { describeSet } from "./sessionEdit";
 
 const root = () => document.getElementById("root")!;
@@ -285,5 +285,51 @@ describe("set editor", () => {
     expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({ targetWeight: null, weight: null }));
     await user.click(screen.getByRole("button", { name: "Log set" }));
     expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({ done: true, weight: null }));
+  });
+
+  it("says nothing about why it opened unless told to", () => {
+    editor(set(), true);
+    expect(root().querySelector("[data-editor-hint]")).toBeNull();
+    expect(screen.getByRole("button", { name: "Log set" }).hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("a hint is one line at the top that describes Log set, and stays put while the load is set", async () => {
+    const user = userEvent.setup();
+    const hint = "No load yet — set it to log this set";
+    render(
+      <SetEditSheet open onClose={() => {}} title="Hang · set 1" set={set()} measure="seconds" weighted hint={hint} onSave={() => {}} />,
+      { container: root() },
+    );
+    const dialog = screen.getByRole("dialog", { name: "Hang · set 1" });
+    const line = within(dialog).getByText(hint);
+    expect(line.tagName).toBe("P");
+    // Before the steppers.
+    expect(line.compareDocumentPosition(screen.getByRole("button", { name: "Increase seconds" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Log set", description: hint })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save target" }).hasAttribute("aria-describedby")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Increase load" }));
+    expect(within(dialog).getByText(hint)).toBeTruthy();
+  });
+});
+
+describe("the plates row's label", () => {
+  const plates = (label?: string) => {
+    render(<Plates weight={170} label={label} />, { container: root() });
+    return screen.getByRole("img");
+  };
+
+  it("names the set and “per side”; the second part is the one that gives way below 360 px", () => {
+    const row = plates("Set 3 · per side");
+    expect(row.getAttribute("aria-label")).toBe("Plates, Set 3, per side: 45, 10, 5, 2.5");
+    const label = row.querySelector(".label")!;
+    expect(label.textContent).toBe("Set 3 · per side");
+    expect([...label.querySelectorAll("span")].map((s) => [s.textContent, s.className])).toEqual([[" · per side", "max-[359px]:hidden"]]);
+  });
+
+  it("a one-part label is shown whole at any width", () => {
+    const row = plates();
+    expect(row.getAttribute("aria-label")).toBe("Plates per side: 45, 10, 5, 2.5");
+    expect(row.querySelector(".label")!.textContent).toBe("per side");
+    expect(row.querySelector(".label span")).toBeNull();
   });
 });
