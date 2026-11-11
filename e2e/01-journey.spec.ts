@@ -47,8 +47,8 @@ test("sign in, onboard and close the first day", async ({ page }) => {
   await expect(nav).toBeVisible();
   await expect(page.getByRole("link", { name: "Today" })).toHaveAttribute("aria-current", "page");
 
-  // Weigh-in was logged during onboarding; add sleep.
-  await page.getByRole("button", { name: /Weigh-in/ }).click();
+  // The weight was logged during onboarding; add sleep.
+  await page.getByRole("button", { name: /Morning check-in/ }).click();
   const weight = page.getByRole("textbox", { name: "Morning weight" });
   await expect(weight).toHaveValue(/200/);
   const sleep = page.getByRole("textbox", { name: "Sleep duration, hours and minutes" });
@@ -79,6 +79,6 @@ test("sign in, onboard and close the first day", async ({ page }) => {
 
   // Everything survives a reload (it reached the server).
   await page.reload();
-  await page.getByRole("button", { name: /Weigh-in/ }).click();
+  await page.getByRole("button", { name: /Morning check-in/ }).click();
   await expect(page.getByRole("textbox", { name: "Morning weight" })).toHaveValue(/200/);
 });

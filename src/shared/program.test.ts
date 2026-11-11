@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
-import { cyclePosition, currentMax, mainLiftSets, platesPerSide, progressionGain, repMaxPct } from "./program";
+import { cycleLabel, cyclePosition, currentMax, mainLiftSets, platesPerSide, progressionGain, repMaxPct } from "./program";
 import type { MaxEntry } from "./schemas";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -69,6 +69,35 @@ describe("cyclePosition", () => {
     const p = cyclePosition(program, "2026-12-07")!;
     expect([p.cycle, p.weekIndex]).toEqual([2, 0]);
     expect(cyclePosition(program, "2026-11-10")!.cycleEnd).toBe("2026-12-06");
+  });
+});
+
+describe("cycleLabel", () => {
+  const n = program.weeks.length;
+  const at = (date: string, opts?: { short?: boolean }) => cycleLabel(cyclePosition(program, date)!, n, opts);
+
+  it("names the week within the cycle, without the cycle number in the first cycle", () => {
+    expect(n).toBe(5);
+    expect(at("2026-11-02")).toBe("Week 1 of 5");
+    expect(at("2026-11-10")).toBe("Week 2 of 5");
+  });
+  it("calls the deload week by name", () => {
+    expect(at("2026-11-30")).toBe("Deload week");
+    expect(at("2026-11-30", { short: true })).toBe("Deload");
+  });
+  it("leads with the cycle from the second cycle on", () => {
+    expect(at("2026-12-07")).toBe("Cycle 2 · Week 1 of 5");
+    expect(at("2027-01-04")).toBe("Cycle 2 · Deload week");
+    expect(at("2026-12-07", { short: true })).toBe("Cycle 2 · Week 1");
+  });
+  it("short drops the cycle length", () => {
+    expect(at("2026-11-10", { short: true })).toBe("Week 2");
+  });
+  it("follows the program's own length, and never claims more weeks than it was told", () => {
+    const three = { ...program, weeks: program.weeks.slice(0, 3) };
+    expect(cycleLabel(cyclePosition(three, "2026-11-16")!, three.weeks.length)).toBe("Week 3 of 3");
+    expect(cycleLabel(cyclePosition(three, "2026-11-23")!, three.weeks.length)).toBe("Cycle 2 · Week 1 of 3");
+    expect(cycleLabel({ cycle: 1, weekIndex: 3, week: program.weeks[3]! }, 2)).toBe("Week 4");
   });
 });
 

@@ -218,3 +218,19 @@ export function overTarget(
   const severity = overTargetSeverity(eaten, target, scale);
   return { severity, over: severity > 0 ? Math.round(eaten! - target!) : 0 };
 }
+
+/**
+ * What's left of a day's calorie target while the day is still being eaten (Today's Fuel, SPEC
+ * §3.1): `left` is the whole kcal still to eat (the full target before anything is logged, never
+ * below 0); `over` and `severity` are `overTarget`'s reading, so the day only reads as over past
+ * the tolerance — within it, it is simply at 0 left. All zeros without a target.
+ */
+export function remainingKcal(
+  eaten: number | null | undefined,
+  target: number | null | undefined,
+  scale: OverTargetScale = OVER_TARGET_SCALE,
+): { left: number; over: number; severity: number } {
+  if (target === null || target === undefined || !Number.isFinite(target) || target <= 0) return { left: 0, over: 0, severity: 0 };
+  const had = eaten !== null && eaten !== undefined && Number.isFinite(eaten) ? eaten : 0;
+  return { left: Math.max(0, Math.round(target - had)), ...overTarget(eaten, target, scale) };
+}

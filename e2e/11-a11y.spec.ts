@@ -99,7 +99,7 @@ test.describe("axe: no serious or critical violations", () => {
 
   // The checklist is an accordion (one editor open at a time): each editor on its own.
   for (const [row, field] of [
-    ["Weigh-in", "Morning weight"],
+    ["Morning check-in", "Morning weight"],
     ["Nutrition", "Calories"],
     ["Steps", "Steps"],
   ] as const)

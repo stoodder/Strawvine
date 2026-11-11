@@ -41,7 +41,7 @@ test("a macro over target turns yellow, then red, and says how far over", async 
   await login(page);
 
   // A weigh-in gives the day its targets.
-  await page.getByRole("button", { name: /Weigh-in/ }).click();
+  await page.getByRole("button", { name: /Morning check-in/ }).click();
   await fillNumber(page, "Morning weight", "200");
   await page.getByRole("button", { name: /Nutrition/ }).click();
 
@@ -98,11 +98,13 @@ test("a macro over target turns yellow, then red, and says how far over", async 
   expect(kcalTarget).toBeGreaterThan(1000);
   const kcalBar = section.locator("[data-severity]").first();
   const kcalBg = () => kcalBar.evaluate((el) => getComputedStyle(el).backgroundColor);
-  const kcalNote = section.getByText("kcal over").locator("xpath=..");
+  // Today, the overage is the right-hand number ("+N" over "over"), in the bar's colour.
+  const kcalNote = section.locator('[data-fuel-side="over"] > :first-child');
   await fillNumber(page, "Calories", String(Math.round(kcalTarget * 1.15)));
   await expect(kcalBar).toHaveAttribute("data-severity", /^0\.(4[5-9]|5|5[0-5])$/);
   await expect.poll(async () => [accent, warn].includes(await kcalBg())).toBe(false);
-  await expect(kcalNote).toHaveText(`+${(Math.round(kcalTarget * 1.15) - kcalTarget).toLocaleString("en-US")} kcal over`);
+  await expect(kcalNote).toHaveText(`+${(Math.round(kcalTarget * 1.15) - kcalTarget).toLocaleString("en-US")} kcal`);
+  await expect(section.locator("[data-fuel-side]")).toContainText("over");
   await expect.poll(async () => (await kcalNote.evaluate((el) => getComputedStyle(el).color)) === (await kcalBg())).toBe(true);
   await fillNumber(page, "Calories", String(Math.round(kcalTarget * 1.3)));
   await expect(kcalBar).toHaveAttribute("data-severity", "1");
@@ -110,7 +112,7 @@ test("a macro over target turns yellow, then red, and says how far over", async 
   await expect.poll(async () => kcalNote.evaluate((el) => getComputedStyle(el).color)).toBe(warn);
   await fillNumber(page, "Calories", String(kcalTarget));
   await expect(kcalBar).toHaveAttribute("data-severity", "0");
-  await expect(section.getByText("kcal over")).toHaveCount(0);
+  await expect(section.locator("[data-fuel-side]")).toHaveText("0 kcalleft");
 
   // Protein is lenient: 20 % over is still on target.
   const protein = macro(page, "Protein");

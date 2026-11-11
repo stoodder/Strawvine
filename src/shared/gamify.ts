@@ -59,7 +59,8 @@ export function checklist(
     return item;
   };
 
-  add("morning", "Weigh-in", day?.weightLb != null);
+  // The key and the done rule (a weight) are unchanged; the row also holds sleep and recovery.
+  add("morning", "Morning check-in", day?.weightLb != null);
   add("fuel", "Nutrition", day?.calories != null);
   const steps = day?.steps ?? 0;
   const stepTarget = settings.targets.steps;

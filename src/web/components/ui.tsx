@@ -626,8 +626,8 @@ export function Stepper({
 }
 
 /**
- * 1–5 scale rendered as dots. A radio group: arrow keys move (roving tabindex), Escape / Delete
- * clears, tapping the selected dot again clears it — and the clear is announced.
+ * 1–5 scale rendered as numbered discs. A radio group: arrow keys move (roving tabindex), Escape /
+ * Delete clears, tapping the selected disc again clears it — and the clear is announced.
  */
 export function DotScale({
   value,
@@ -680,9 +680,11 @@ export function DotScale({
           </button>
         )}
       </div>
-      <div className="-my-1.5 flex items-center" role="radiogroup" aria-labelledby={labelId}>
+      {/* Five numbered buttons (44px targets, 32px discs), filled up to the chosen one: the scale reads as
+          tappable before anything is chosen, and the choice is the solid disc with its number. */}
+      <div className="-mx-1.5 -my-1.5 flex w-[220px] max-w-[calc(100%+0.75rem)] items-center" role="radiogroup" aria-labelledby={labelId}>
         {[1, 2, 3, 4, 5].map((n) => {
-          const on = value !== null && n <= value;
+          const state = value === null || n > value ? "off" : n === value ? "chosen" : "under";
           return (
             <button
               key={n}
@@ -696,24 +698,26 @@ export function DotScale({
               tabIndex={n === focusable ? 0 : -1}
               onClick={() => set(value === n ? null : n)}
               onKeyDown={(e) => onKey(e, n)}
-              className="tap grid h-11 w-10 place-items-center"
+              className="tap grid h-11 min-w-0 flex-1 place-items-center"
             >
-              <motion.span
-                className="block rounded-full"
-                initial={false}
-                animate={{
-                  width: on ? 12 : 8,
-                  height: on ? 12 : 8,
-                  backgroundColor: on ? "var(--color-accent)" : "rgba(255,255,255,0.35)",
-                }}
-                transition={{ type: "spring", stiffness: 500, damping: 30 }}
-              />
+              <span
+                aria-hidden
+                data-state={state}
+                className={clsx(
+                  "num grid h-8 w-8 place-items-center rounded-full text-sm transition-colors duration-200",
+                  state === "chosen" && "bg-accent font-semibold text-accent-ink shadow-[0_0_14px_-2px_rgb(183_243_106/0.55)]",
+                  state === "under" && "bg-accent/25 text-fg",
+                  state === "off" && "bg-white/[0.08] text-fg-2",
+                )}
+              >
+                {n}
+              </span>
             </button>
           );
         })}
       </div>
       {(lowLabel || highLabel) && (
-        <div className="mt-1 flex w-[200px] justify-between text-2xs text-mute">
+        <div className="mt-2 flex w-[208px] max-w-full justify-between text-xs text-mute">
           <span>{lowLabel}</span>
           <span>{highLabel}</span>
         </div>

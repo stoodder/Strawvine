@@ -1,13 +1,13 @@
 import clsx from "clsx";
-import { useCallback, useMemo, useRef } from "react";
+import { Fragment, useCallback, useMemo, useRef } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { ChevronLeft, ChevronRight, Flame, Settings2, Sparkles, TriangleAlert, Info } from "lucide-react";
+import { ChevronLeft, ChevronRight, Flame, Settings2 } from "lucide-react";
 import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { CALIBRATION_DAYS } from "../../shared/energy";
 import { dayChecklist, isClosed } from "../../shared/gamify";
 import { targetsFor } from "../../shared/insights";
-import { overTarget, PROTEIN_OVER_TARGET_SCALE, type OverTargetScale } from "../../shared/nutrition";
-import { cyclePosition, programDayFor } from "../../shared/program";
+import { overTarget, PROTEIN_OVER_TARGET_SCALE, remainingKcal, type OverTargetScale } from "../../shared/nutrition";
+import { cycleLabel, cyclePosition, programDayFor } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
@@ -20,7 +20,8 @@ import { DayRing } from "../components/today/DayRing";
 import { NextSession } from "../components/today/NextSession";
 import { PendingSyncChip } from "../components/today/PendingSyncChip";
 import { SavedTick, useSavedFlash } from "../components/today/saved";
-import { fmt, minutesToHM, signed } from "../lib/format";
+import { Signals } from "../components/today/Signals";
+import { fmt, signed } from "../lib/format";
 import { success } from "../lib/haptics";
 import { useData, usePendingDates, useSaveDay } from "../lib/store";
 import { useTitle } from "../components/useTitle";
@@ -82,7 +83,9 @@ export function TodayScreen() {
     day.weightLb !== null && day.calories === null ? "calories" : day.calories !== null && day.weightLb === null ? "weight" : null;
   const trendDelta = energy?.avgWeight != null && prevEnergy?.avgWeight != null ? energy.avgWeight - prevEnergy.avgWeight : null;
   // 0 within 5 % of the target, then lime → caution yellow → warn as the day runs further over (SPEC §3.1).
-  const { severity: kcalSeverity, over: overKcal } = overTarget(day.calories, rec?.calories);
+  // Today counts down what's left; `over` and `severity` are `overTarget`'s, so a past day reads them the same.
+  const { left: leftKcal, severity: kcalSeverity, over: overKcal } = remainingKcal(day.calories, rec?.calories);
+  const overStyle = { className: severityClass(kcalSeverity, "text"), style: { color: severityColor(kcalSeverity) } };
 
   return (
     <div>
@@ -124,7 +127,8 @@ export function TodayScreen() {
           <h1 className="text-[clamp(1.75rem,11vw,2.75rem)] leading-none font-light tracking-tight">
             {isToday ? "Today" : weekdayName(date)}
           </h1>
-          <p className="mt-3 text-sm text-mute">
+          {/* Balanced, so a wrap doesn't leave the "·" dangling at the end of the first line. */}
+          <p className="mt-3 text-sm text-balance text-mute">
             {closed ? (
               <span className="text-accent">Day closed. Nicely done.</span>
             ) : (
@@ -132,12 +136,16 @@ export function TodayScreen() {
                 <span className="num text-fg-2">{items.length - doneCount}</span> left to close the day
               </>
             )}
-            {pos && (
-              <span className="whitespace-nowrap">
-                {" "}
-                · C{pos.cycle} {pos.week.deload ? "Deload" : `W${pos.weekIndex + 1}`}
-              </span>
-            )}
+            {/* "Week 2 of 5" · "Deload week" · "Cycle 2 · Week 1 of 5": breaks between its parts, never inside one. */}
+            {pos &&
+              cycleLabel(pos, data.settings.program.weeks.length)
+                .split(" · ")
+                .map((part) => (
+                  <Fragment key={part}>
+                    {" · "}
+                    <span className="whitespace-nowrap">{part}</span>
+                  </Fragment>
+                ))}
           </p>
           {!isToday && (
             // Same as Train's: 44px tall, without pushing the hero down.
@@ -164,11 +172,14 @@ export function TodayScreen() {
         </div>
       </div>
 
+      {/* What the app makes of the last days: first, where it can still change today. */}
+      {isToday && <Signals insights={model.insights} />}
+
       {/* Fuel */}
       <Section label="Fuel" right={targets.tdee?.provisional ? <span className="label text-mute">provisional</span> : null}>
         {rec ? (
           <>
-            {/* Wraps (eaten under the target) when zoomed in or very narrow. */}
+            {/* Wraps (the right-hand number under the target) when zoomed in or very narrow. */}
             <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
               <Stat
                 label="Target"
@@ -182,19 +193,50 @@ export function TodayScreen() {
                     : `${rec.direction === "lose" ? "Cut" : "Build"} · ${signed(rec.rateLbPerWeek, 1)} lb/wk${rec.paceCapped ? " (capped)" : ""}`
                 }
               />
-              <div className="pb-1 text-right">
-                <div className="num text-2xl font-light">{day.calories !== null ? fmt(day.calories) : "—"}</div>
-                <div className="label mt-1">{isToday ? "so far" : "eaten"}</div>
+              {/* Today: what's left to eat (the overage once past the tolerance, in the bar's colour and
+                  in words). A past day: what was eaten — "left" means nothing in hindsight. */}
+              <div className="pb-1 text-right" data-fuel-side={!isToday ? "eaten" : overKcal > 0 ? "over" : "left"}>
+                {!isToday ? (
+                  <>
+                    <div className="num text-2xl font-light">{day.calories !== null ? fmt(day.calories) : "—"}</div>
+                    <div className="label mt-1">eaten</div>
+                  </>
+                ) : overKcal > 0 ? (
+                  <>
+                    <div className={clsx("num text-2xl font-light", overStyle.className)} style={overStyle.style}>
+                      +{fmt(overKcal)}
+                      <span className="sr-only"> kcal</span>
+                    </div>
+                    <div className="label mt-1">over</div>
+                  </>
+                ) : (
+                  <>
+                    <div className="num text-2xl font-light">
+                      {fmt(leftKcal)}
+                      <span className="sr-only"> kcal</span>
+                    </div>
+                    <div className="label mt-1">left</div>
+                  </>
+                )}
               </div>
             </div>
             <Bar className="mt-4" value={day.calories ? day.calories / rec.calories : 0} severity={kcalSeverity} />
-            {kcalSeverity > 0 && (
-              <div
-                className={clsx("num mt-1.5 text-right text-xs", severityClass(kcalSeverity, "text"))}
-                style={{ color: severityColor(kcalSeverity) }}
-              >
-                +{fmt(overKcal)} <span className="text-mute">kcal over</span>
+            {isToday ? (
+              <div className="num mt-1.5 text-xs text-mute" data-fuel-eaten="">
+                {day.calories !== null ? (
+                  <>
+                    <span className="text-fg-2">{fmt(day.calories)}</span> eaten
+                  </>
+                ) : (
+                  "Nothing logged yet"
+                )}
               </div>
+            ) : (
+              kcalSeverity > 0 && (
+                <div className={clsx("num mt-1.5 text-right text-xs", overStyle.className)} style={overStyle.style}>
+                  +{fmt(overKcal)} <span className="text-mute">kcal over</span>
+                </div>
+              )
             )}
             <div className="mt-5 grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
               <Macro label="Protein" eaten={day.proteinG} target={rec.macros.proteinG} scale={PROTEIN_OVER_TARGET_SCALE} />
@@ -256,9 +298,6 @@ export function TodayScreen() {
         {upcoming && <NextSession next={upcoming} today={today} />}
       </Section>
 
-      {/* Recovery snapshot */}
-      <Recovery day={day} />
-
       {/* Journal */}
       <Section label="Journal" right={<SavedTick show={saved.shown === "journal"} />}>
         <JournalText
@@ -274,52 +313,8 @@ export function TodayScreen() {
           minRows={4}
         />
       </Section>
-
-      {/* Insights */}
-      {isToday && model.insights.length > 0 && (
-        <Section label="Signals">
-          <ul className="space-y-4">
-            {model.insights.map((i) => (
-              <li key={i.key} className="flex gap-3 text-sm leading-relaxed">
-                <span
-                  className={clsx("mt-0.5 shrink-0", i.tone === "good" ? "text-accent" : i.tone === "warn" ? "text-warn" : "text-mute")}
-                >
-                  {i.tone === "good" ? <Sparkles size={15} /> : i.tone === "warn" ? <TriangleAlert size={15} /> : <Info size={15} />}
-                </span>
-                <span className="text-fg-2">{trueMinus(i.text)}</span>
-              </li>
-            ))}
-          </ul>
-        </Section>
-      )}
     </div>
   );
-}
-
-/**
- * The morning's recovery numbers. Resting HR and VO2 max are optional extras: shown only when
- * logged. (Days cached by an older build may lack those fields: read with `!= null`.)
- */
-export function Recovery({ day }: { day: DayLog }) {
-  const any = [day.sleepMinutes, day.sleepScore, day.hrvMs, day.restingHrBpm, day.vo2Max, day.energy, day.soreness].some((v) => v != null);
-  if (!any) return null;
-  return (
-    <Section label="Recovery">
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
-        <Stat label="Sleep" value={day.sleepMinutes != null ? minutesToHM(day.sleepMinutes) : "—"} size="sm" />
-        <Stat label="Score" value={fmt(day.sleepScore)} size="sm" />
-        <Stat label="HRV" value={fmt(day.hrvMs)} unit={day.hrvMs != null ? "ms" : undefined} size="sm" />
-        {day.restingHrBpm != null && <Stat label="Resting HR" value={fmt(day.restingHrBpm)} unit="bpm" size="sm" />}
-        {/* No unit here: "mL/kg/min" wraps onto a line of its own at 360 px (Progress's check-in keeps it). */}
-        {day.vo2Max != null && <Stat label="VO2 max" value={fmt(day.vo2Max, 1)} size="sm" />}
-      </div>
-    </Section>
-  );
-}
-
-/** Typographic minus for negative numbers in copy ("-0.8 lb" → "−0.8 lb"), matching `signed()`. */
-function trueMinus(text: string): string {
-  return text.replace(/(^|[\s(])-(?=\d)/g, "$1\u2212");
 }
 
 export function Macro({
