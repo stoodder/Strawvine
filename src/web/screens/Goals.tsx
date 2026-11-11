@@ -17,6 +17,9 @@ import { useTitle } from "../components/useTitle";
 import { fmt, signed } from "../lib/format";
 import { useData, useSaveSettings } from "../lib/store";
 
+/** How long a pace change's Undo stays up (a toast with an action), and so how long nudges fold into one. */
+const PACE_UNDO_MS = 7000;
+
 export function GoalsScreen() {
   const { data, today, model } = useData();
   const saveSettings = useSaveSettings();
@@ -44,6 +47,34 @@ export function GoalsScreen() {
       action: { label: "Undo", onAction: () => void saveSettings({ ...latest.current, ...undo(latest.current) }) },
     });
   };
+  // The pace sets the calorie targets, so a change is announced and can be taken back. One toast per
+  // gesture (the slider commits on release); nudging again while that toast is still up replaces it,
+  // and its Undo goes back to the pace from before the first nudge.
+  const paceUndo = useRef<{ id: number; from: number; at: number } | null>(null);
+  const commitPace = (pace: number) => {
+    if (!goal) return;
+    const now = Date.now();
+    const prev = paceUndo.current && now - paceUndo.current.at < PACE_UNDO_MS ? paceUndo.current : null;
+    if (prev) toast.dismiss(prev.id);
+    const from = prev ? prev.from : goal.pacePctPerWeek;
+    save({ weightGoal: { ...goal, pacePctPerWeek: pace } });
+    paceUndo.current = null;
+    if (pace === from) return; // back where it started: nothing to undo
+    const sign = direction === "gain" ? "+" : direction === "lose" ? "−" : "";
+    const id = toast.show({
+      message: `Pace set to ${sign}${pace.toFixed(2)}%/wk`,
+      duration: PACE_UNDO_MS,
+      action: {
+        label: "Undo",
+        onAction: () => {
+          paceUndo.current = null;
+          const s = latest.current;
+          if (s.weightGoal) void saveSettings({ ...s, weightGoal: { ...s.weightGoal, pacePctPerWeek: from } });
+        },
+      },
+    });
+    paceUndo.current = { id, from, at: now };
+  };
   const goalValue = goalDraft ?? goalInput;
   const goalValid = goalValue !== null && goalValue >= 50 && goalValue <= 1000;
 
@@ -61,8 +92,9 @@ export function GoalsScreen() {
   return (
     <div>
       <header className="pt-2">
-        <div className="label text-fg-2">Goals</div>
-        <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">The why</h1>
+        {/* The title matches the tab; the tagline is the eyebrow. */}
+        <div className="label text-fg-2">The why</div>
+        <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">Goals</h1>
       </header>
 
       {/* Weight goal */}
@@ -108,7 +140,7 @@ export function GoalsScreen() {
               <div className="mt-7">
                 <PaceSlider
                   value={goal.pacePctPerWeek}
-                  onChange={(v) => save({ weightGoal: { ...goal, pacePctPerWeek: v } })}
+                  onCommit={commitPace}
                   limit={direction === "gain" ? settings.limits.maxGainPctPerWeek : settings.limits.maxLossPctPerWeek}
                   bodyweight={trend}
                   direction={direction}
@@ -451,18 +483,7 @@ function Heatmap() {
           <div key={i} className="flex min-w-0 flex-1 flex-col" style={{ gap: HEAT_GAP }}>
             {col.map((c, d) => {
               const idx = i * 7 + d;
-              const style = {
-                background:
-                  c.v < 0
-                    ? "transparent"
-                    : c.v >= 1
-                      ? "var(--color-accent)"
-                      : c.v > 0
-                        ? // Partial days start a clear step above empty ones (1.4.11) and fade in by progress.
-                          `rgb(183 243 106 / ${0.16 + c.v * 0.26})`
-                        : "rgba(255,255,255,0.06)",
-                boxShadow: c.v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
-              };
+              const style = heatStyle(c.v);
               const motionProps = { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { delay: i * 0.02 } };
               // Today's ring is drawn by ::after, so the focus outline (:focus-visible) still shows on it.
               const cls = clsx(
@@ -497,7 +518,64 @@ function Heatmap() {
           </div>
         ))}
       </div>
+      <HeatLegend />
     </div>
+  );
+}
+
+/** A heatmap cell's fill for a day `v` done (0…1; below 0: a day still to come). */
+function heatStyle(v: number): { background: string; boxShadow?: string } {
+  return {
+    background:
+      v < 0
+        ? "transparent"
+        : v >= 1
+          ? "var(--color-accent)"
+          : v > 0
+            ? // Partial days start a clear step above empty ones (1.4.11) and fade in by progress.
+              `rgb(183 243 106 / ${0.16 + v * 0.26})`
+            : "rgba(255,255,255,0.06)",
+    boxShadow: v >= 1 ? "0 0 8px -1px rgb(183 243 106 / 0.6)" : undefined,
+  };
+}
+
+/**
+ * What the cells' shades mean, in words beside a sample of each (drawn by the same `heatStyle`):
+ * nothing logged, partly done (brighter the more of the day's list is done), closed, and today's ring.
+ */
+function HeatLegend() {
+  const swatch = "relative grid h-2.5 w-2.5 shrink-0 place-items-center rounded-[2px]";
+  return (
+    <ul data-heat-legend="" aria-label="Legend" className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-[0.6875rem] leading-none text-mute">
+      <li className="flex items-center gap-1.5">
+        <span aria-hidden className={swatch} style={heatStyle(0)} />
+        Nothing logged
+      </li>
+      <li className="flex items-center gap-1.5">
+        {/* Two steps of the fade, so "partly" doesn't read as one fixed shade. */}
+        <span aria-hidden className={swatch} style={heatStyle(0.25)} />
+        <span aria-hidden className={clsx(swatch, "-ml-0.5")} style={heatStyle(0.75)} />
+        Partly done
+      </li>
+      <li className="flex items-center gap-1.5">
+        <span aria-hidden className={swatch} style={heatStyle(1)} />
+        Closed
+      </li>
+      <li className="flex items-center gap-1.5">
+        <span
+          aria-hidden
+          className={clsx(
+            swatch,
+            "mx-0.5",
+            "after:pointer-events-none after:absolute after:-inset-[2px] after:rounded-[4px] after:border after:border-white/60 after:content-['']",
+          )}
+          style={heatStyle(0)}
+        >
+          <span className="h-0.5 w-0.5 rounded-full bg-fg" />
+        </span>
+        Today
+      </li>
+    </ul>
   );
 }
 

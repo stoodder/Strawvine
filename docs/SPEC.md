@@ -67,6 +67,11 @@ over", and staying there beyond.
   calorie bar.
 - Past the tolerance the bar is labelled "+N kcal over" / "+Ng over" in the same colour (not colour alone); the lime
   glow is kept for an on-target bar.
+- **Today reads what is left** (`remainingKcal`, `src/shared/nutrition.ts`): beside the target, the calories still to
+  eat — target − eaten, never below 0, the whole target before anything is logged — labelled "left", with "N eaten"
+  under the bar. Past the tolerance that number becomes the overage ("+N", labelled "over") in the bar's over-target
+  colour, and is said once: no second note under the bar. Within the tolerance the day is at "0 left". A **past day**
+  keeps "eaten" beside the target and the "+N kcal over" note under the bar — "left" means nothing in hindsight.
 - **Minimum overage**: the note shows the overage rounded to a whole unit, so a bar counts as over only once that
   rounded overage is at least 1 g / 1 kcal (`MIN_OVERAGE`). A 4 g fat target with 4.3 g eaten stays lime with no note,
   never "+0g over"; the note and the tint always appear together (`overTarget`).
@@ -107,9 +112,13 @@ tile.
   HRV (0–500 ms) and the sleep score (0–100) refuse a value outside their range instead of clamping it — "5" for resting
   HR would otherwise save a believable 20 bpm that then feeds the baseline: the field keeps its previous value, is
   marked invalid and says the range under it ("20–220 bpm", announced politely) until the next accepted entry.
-- Today's Recovery section shows them once logged (resting HR with its unit; VO2 max as the number alone, which keeps
-  the tile on one line on a narrow phone); the Weigh-in row's summary adds "RHR 48" after sleep and HRV (it truncates on
-  a narrow screen; screen readers hear "resting heart rate").
+- Today shows everything the morning check-in holds in that row's summary — there is no separate Recovery section. The
+  weight is the row's value; under the label, two short lines that each fit a 320 px phone carry what was logged: the
+  night's readings ("7h 12m · score 81 · HRV 62 · RHR 49"), then VO2 max and the ratings ("VO2 51.6 · energy 4/5 ·
+  soreness 2/5"). Nothing logged: the prompt "Weight · sleep · HRV". Screen readers hear "sleep score" and "resting
+  heart rate". A past day (`/day/:date`) shows the same row.
+- Energy and soreness are 1–5 scales of numbered buttons (44 px targets), filled up to the chosen one; tapping the
+  chosen one again clears it.
 - The weekly check-in (§4.6) shows the week's average resting HR and the latest VO2 max with its change over about a
   month (`vo2MaxTrend`, `src/shared/recovery.ts`): latest value on or before the week's last day (none logged in the 90
   days up to it: not shown), compared with the oldest value logged in the 30 days before that latest one ("+1.2 since
@@ -256,6 +265,13 @@ targets as read-only progress; targets are edited on Goals).
 ## 5. Goals
 
 - Goal weight with projected date range.
+- The **pace slider** sets the calorie targets, so it is hard to nudge by accident and easy to take back: a change is
+  saved once per gesture (when the finger, mouse or key lets go — not per tick) and announced with an undoable toast
+  ("Pace set to −0.75%/wk · Undo"); further nudges while that toast is up fold into it, and its Undo returns to the pace
+  from before the first of them. On touch the thumb moves only for a drag along the track or a tap on it — a touch that
+  turns into a vertical scroll changes nothing and scrolls the page.
+- The **consistency heatmap** has a legend under it, in words beside a sample of each shade: nothing logged, partly
+  done (brighter the more of the day's list is done), closed, and today's ring.
 - Strength targets per lift (e.g. Deadlift 600). A target is hit by a max entry at or above it dated on/after the day
   the target was set — never by a _correction_ alone.
 - PR tracking (max increases, AMRAP rep PRs, benchmark metcon bests).
@@ -466,15 +482,18 @@ links to the sections that moved (`/settings#program`, `/settings#training`) red
 
 ## 7. Gamification & feedback
 
-- **Close the day**: today's checklist (weigh-in, nutrition, steps target, zone 2, metcon, lift as
-  scheduled or moved — see "Do this session today") — closing every item extends the streak.
+- **Close the day**: today's checklist (morning check-in — done by the weigh-in alone — nutrition, steps target,
+  zone 2, metcon, lift as scheduled or moved — see "Do this session today") — closing every item extends the streak.
+- Today's header places the day in the program in words (`cycleLabel`, `src/shared/program.ts`): "Week 2 of 5",
+  "Deload week", and from the second cycle on "Cycle 2 · Week 2 of 5".
 - Streaks, PR moments, cycle completions, calibration milestones, strength-target hits, goal weight.
 - Each achievement is celebrated once. A max gain the screen already showed (applying an AMRAP bump) is filed as seen
   in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or
   only after the device comes back online.
 - Rule-based insights (protein adherence, sleep, recovery trend from HRV and resting HR — one insight at most, §3.3 —
   steps, rate-of-change safety). Today's Signals list warnings first, then notes, then good news (in that order within
-  each).
+  each). They sit directly under Today's header, above Fuel: the first one on its own, the rest behind a quiet
+  "+N more" that opens them in place; with none, nothing is rendered. (Today only — not on a past day.)
 - Tasteful motion: smooth fills, a satisfying check, a restrained glow for PRs. Haptics where available.
 - Optional **high-contrast "outdoor" mode** (brighter secondary text, thicker chart lines) for gym glare.
 

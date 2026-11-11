@@ -9,6 +9,7 @@ import {
   project,
   PROTEIN_OVER_TARGET_SCALE,
   recommend,
+  remainingKcal,
   weeksAtPct,
 } from "./nutrition";
 
@@ -218,5 +219,39 @@ describe("overTargetSeverity", () => {
   it("treats a degenerate scale as a step", () => {
     expect(overTargetSeverity(211, 200, { tolerance: 0.05, full: 0.05 })).toBe(1);
     expect(OVER_TARGET_SCALE.full).toBeGreaterThan(OVER_TARGET_SCALE.tolerance);
+  });
+});
+
+describe("remainingKcal (Today's Fuel)", () => {
+  it("is the whole target before anything is logged", () => {
+    expect(remainingKcal(null, 2390)).toEqual({ left: 2390, over: 0, severity: 0 });
+    expect(remainingKcal(undefined, 2390)).toEqual({ left: 2390, over: 0, severity: 0 });
+    expect(remainingKcal(0, 2390)).toEqual({ left: 2390, over: 0, severity: 0 });
+  });
+
+  it("counts down as the day is eaten, in whole kcal", () => {
+    expect(remainingKcal(1480, 2390)).toEqual({ left: 910, over: 0, severity: 0 });
+    expect(remainingKcal(1480.4, 2390)).toEqual({ left: 910, over: 0, severity: 0 });
+    expect(remainingKcal(2390, 2390)).toEqual({ left: 0, over: 0, severity: 0 });
+  });
+
+  it("never goes below zero, and within the tolerance the day is at 0 left, not over", () => {
+    // 2,450 on 2,390 is 2.5 % over: on target by the Fuel scale.
+    expect(remainingKcal(2450, 2390)).toEqual({ left: 0, over: 0, severity: 0 });
+  });
+
+  it("past the tolerance it reads as over, with overTarget's severity and overage", () => {
+    const r = remainingKcal(2700, 2390);
+    expect(r).toEqual({ left: 0, ...overTarget(2700, 2390) });
+    expect(r.over).toBe(310);
+    expect(r.severity).toBeGreaterThan(0);
+    expect(remainingKcal(4000, 2390).severity).toBe(1);
+    // A wider scale keeps the same day on target.
+    expect(remainingKcal(2700, 2390, PROTEIN_OVER_TARGET_SCALE)).toEqual({ left: 0, over: 0, severity: 0 });
+  });
+
+  it("has nothing to say without a target", () => {
+    for (const target of [null, undefined, 0, -100, Number.NaN])
+      expect(remainingKcal(1200, target)).toEqual({ left: 0, over: 0, severity: 0 });
   });
 });

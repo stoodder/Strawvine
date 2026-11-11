@@ -3,7 +3,7 @@
 A futuristic training journal — training, fuel and recovery in one calm, fast, installable web app.
 Built to be dogfooded daily by one athlete; see [`docs/SPEC.md`](docs/SPEC.md) for the full product spec.
 
-- **Today** — close the day: weigh-in & recovery, nutrition vs. calorie/macro targets, steps, zone 2, metcon, lift.
+- **Today** — close the day: morning check-in (weight, sleep, recovery), nutrition vs. calorie/macro targets, steps, zone 2, metcon, lift.
 - **Train** — the main lift calculated from your max (90% of the N-rep max, rounded to 5 lb), AMRAP last set with one-tap
   max progression, accessories & supersets carried over from last week, rest timer, plate math.
 - **Progress** — weekly check-in, weighted-average weight trend, measured TDEE vs. intake, max history.

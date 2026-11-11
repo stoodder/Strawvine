@@ -38,7 +38,7 @@ export interface LiftSummary {
  * editor (and every field in it) belongs to exactly one day.
  *
  * Row anatomy — the dot is only a real control where it is a plain toggle (metcon, zone 2).
- * Derived items (weigh-in, nutrition, steps) are done by entering their value, so their dot is
+ * Derived items (morning check-in, nutrition, steps) are done by entering their value, so their dot is
  * status, and tapping it opens the editor just like the row. The lift row is a link to Train.
  */
 export function DayChecklist({
@@ -106,8 +106,12 @@ export function DayChecklist({
   );
 }
 
-/** `note`: an extra line under `sub` (the Nutrition row's "Also today" flags). */
-type Summary = { value: ReactNode; sub?: ReactNode; note?: string };
+/**
+ * `sub` and `note` are one line each under the label, the full width of the row (the value sits
+ * up beside the label): the Nutrition row's macros and "Also today" flags, the morning check-in's
+ * readings and ratings.
+ */
+type Summary = { value: ReactNode; sub?: ReactNode; note?: ReactNode };
 
 /** Value column: light numerals, unit in mute — the same for every row. */
 function Value({ n, unit }: { n: ReactNode; unit?: string }) {
@@ -119,25 +123,45 @@ function Value({ n, unit }: { n: ReactNode; unit?: string }) {
   );
 }
 
-/** "7h 30m · HRV 55 · RHR 48"; "RHR" is read out as "resting heart rate" (VoiceOver spells the letters). */
-function morningSub(day: DayLog): ReactNode {
-  const parts: ReactNode[] = [];
-  if (day.sleepMinutes != null) parts.push(minutesToHM(day.sleepMinutes));
-  if (day.hrvMs != null) parts.push(`HRV ${fmt(day.hrvMs)}`);
-  if (day.restingHrBpm != null)
-    parts.push(
-      <>
-        <span aria-hidden>RHR</span>
-        <span className="sr-only">resting heart rate</span> {fmt(day.restingHrBpm)}
-      </>,
-    );
-  if (!parts.length) return "Weight · sleep · HRV";
-  return parts.map((p, i) => (
+const dotted = (parts: ReactNode[]): ReactNode =>
+  parts.map((p, i) => (
     <Fragment key={i}>
       {i > 0 && " · "}
       {p}
     </Fragment>
   ));
+
+/**
+ * Everything the morning check-in holds besides the weight (the row's value), in two short lines
+ * that each fit a 320 px phone: the night's readings — "7h 30m · score 81 · HRV 55 · RHR 48" —
+ * then the slower and the felt ones — "VO2 51.6 · energy 4/5 · soreness 2/5". Only what was logged
+ * (`!= null`: a day cached by an older build lacks the newer fields); nothing logged, the prompt.
+ * "RHR" is read out as "resting heart rate" and "score" as "sleep score" (VoiceOver spells letters).
+ */
+function morningSummary(day: DayLog): { sub: ReactNode; note?: ReactNode } {
+  const night: ReactNode[] = [];
+  if (day.sleepMinutes != null) night.push(minutesToHM(day.sleepMinutes));
+  if (day.sleepScore != null)
+    night.push(
+      <>
+        <span className="sr-only">sleep</span> score {fmt(day.sleepScore)}
+      </>,
+    );
+  if (day.hrvMs != null) night.push(`HRV ${fmt(day.hrvMs)}`);
+  if (day.restingHrBpm != null)
+    night.push(
+      <>
+        <span aria-hidden>RHR</span>
+        <span className="sr-only">resting heart rate</span> {fmt(day.restingHrBpm)}
+      </>,
+    );
+  const felt: ReactNode[] = [];
+  if (day.vo2Max != null) felt.push(`VO2 ${fmt(day.vo2Max, 1)}`);
+  if (day.energy != null) felt.push(`energy ${day.energy}/5`);
+  if (day.soreness != null) felt.push(`soreness ${day.soreness}/5`);
+  const lines = [night, felt].filter((l) => l.length > 0).map(dotted);
+  if (lines.length === 0) return { sub: "Weight · sleep · HRV" };
+  return { sub: lines[0], note: lines[1] };
 }
 
 function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: LiftSummary): Summary {
@@ -145,7 +169,7 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
     case "morning":
       return {
         value: day.weightLb !== null ? <Value n={fmt(day.weightLb, 1)} unit="lb" /> : null,
-        sub: morningSub(day),
+        ...morningSummary(day),
       };
     case "fuel":
       return {
@@ -227,20 +251,21 @@ function StatusDot({ done, onActivate }: { done: boolean; onActivate?: () => voi
 
 function RowText({ item, summary, srState, saved = false }: { item: ChecklistItem; summary: Summary; srState: boolean; saved?: boolean }) {
   return (
-    <>
-      <span className="block min-w-0 flex-1">
-        <span className={clsx("block text-[0.9375rem]", item.done ? "text-fg" : "text-fg-2")}>
+    <span className="block min-w-0 flex-1">
+      {/* The value sits beside the label, so the lines under them have the row's whole width. */}
+      <span className="flex items-baseline gap-4">
+        <span className={clsx("block min-w-0 flex-1 text-[0.9375rem]", item.done ? "text-fg" : "text-fg-2")}>
           {item.label}
           {srState && <span className="sr-only">{item.done ? ", done" : ", not done"}</span>}
           {/* Announced once by the checklist's status region, not from inside the button. */}
           <SavedTick show={saved} live={false} className="ml-2.5 inline-block align-[1px]" />
         </span>
-        {summary.sub && <span className="mt-0.5 block truncate text-xs text-mute">{summary.sub}</span>}
-        {summary.note && <span className="mt-0.5 block truncate text-xs text-mute">{summary.note}</span>}
-        {item.key === "steps" && !item.done && item.progress > 0 && <Bar className="mt-2 w-32" value={item.progress} />}
+        {summary.value && <span className="num shrink-0 text-right text-lg leading-6 font-light">{summary.value}</span>}
       </span>
-      {summary.value && <span className="num shrink-0 text-right text-lg font-light">{summary.value}</span>}
-    </>
+      {summary.sub && <span className="mt-0.5 block truncate text-xs text-mute">{summary.sub}</span>}
+      {summary.note && <span className="mt-0.5 block truncate text-xs text-mute">{summary.note}</span>}
+      {item.key === "steps" && !item.done && item.progress > 0 && <Bar className="mt-2 w-32" value={item.progress} />}
+    </span>
   );
 }
 

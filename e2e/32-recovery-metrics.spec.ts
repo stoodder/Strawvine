@@ -1,6 +1,6 @@
 /**
  * Optional recovery metrics and the "Also today" flags (SPEC §3.3, §3.4): resting HR and VO2 max
- * are logged in the morning editor, shown on Today (Recovery, the Weigh-in summary) and averaged /
+ * are logged in the morning editor, shown on Today (the Morning check-in summary) and averaged /
  * trended in the weekly check-in; alcohol, nicotine, THC and caffeine are tracking-only chips in
  * the Nutrition editor (three states: a tap cycles not recorded → none, lime → had, coral → not
  * recorded). Readings out of range are refused, not clamped. Neither closes the day. Nothing overflows
@@ -13,7 +13,7 @@ import { dismissCelebrations, expect, expectSynced, fillNumber, login, pageOverf
 const FRIDAY = new Date(2026, 9, 30, 10, 0, 0);
 const TODAY = "2026-10-30";
 
-const morningRow = (page: Page) => page.getByRole("button", { name: /^Weigh-in/ });
+const morningRow = (page: Page) => page.getByRole("button", { name: /^Morning check-in/ });
 const nutritionRow = (page: Page) => page.getByRole("button", { name: /^Nutrition/ });
 /** A Stat tile (label, value, unit, sub) by its label. */
 const stat = (scope: Page | Locator, label: string) => scope.getByText(label, { exact: true }).locator("xpath=..");
@@ -75,15 +75,20 @@ test("resting HR and VO2 max from the morning editor show on Today and in the ch
   expect(server.days.find((d) => d.date === "2026-10-29")).toMatchObject({ restingHrBpm: 50, vo2Max: 51.2 });
   expect(server.days.find((d) => d.date === TODAY)).toMatchObject({ restingHrBpm: 49, vo2Max: 51.5, weightLb: null });
 
-  // Today: in the Recovery stats (VO2 max without its unit, which would wrap here), and in the
-  // Weigh-in row's summary — which they don't close.
-  const recovery = page.locator("section").filter({ has: page.getByRole("heading", { name: "Recovery", exact: true }) });
-  await expect(stat(recovery, "Resting HR")).toHaveText("Resting HR49bpm");
-  await expect(stat(recovery, "VO2 max")).toHaveText("VO2 max51.5");
+  // Today: in the Morning check-in row's summary (there is no separate Recovery section) — which
+  // they don't close. Each of its lines fits a 320 px phone without truncating.
+  await expect(page.getByRole("heading", { name: "Recovery", exact: true })).toHaveCount(0);
   await expect(morningRow(page)).toContainText("RHR");
+  await expect(morningRow(page)).toContainText("VO2 51.5");
   await expect(page.getByRole("button", { name: /resting heart rate 49/ })).toHaveCount(1);
   await expect(morningRow(page)).toContainText("not done");
+  expect(await morningRow(page).evaluate((row) => [...row.querySelectorAll(".truncate")].some((l) => l.scrollWidth > l.clientWidth + 0.5))).toBe(false);
   expect(await pageOverflow(page)).toBeNull();
+  // A past day shows them the same way.
+  await page.goto("/day/2026-10-29");
+  await expect(morningRow(page)).toContainText("VO2 51.2");
+  await expect(page.getByRole("button", { name: /resting heart rate 50/ })).toHaveCount(1);
+  await page.goto("/");
 
   // The check-in (Oct 23–29): the week's average resting HR, the latest VO2 max and its change.
   await page.getByRole("link", { name: "Progress" }).click();

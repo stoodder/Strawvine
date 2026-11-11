@@ -88,6 +88,27 @@ export function cyclePosition(program: Program, date: ISODate): CyclePosition | 
   };
 }
 
+/**
+ * Where a day sits in the program, in words: "Week 2 of 5", "Deload week", and from the second
+ * cycle on "Cycle 2 · Week 2 of 5". `weeksCount` is the cycle's length (`program.weeks.length`).
+ * `short` drops the cycle length and the word after Deload ("Week 2", "Deload") for tight spots.
+ */
+export function cycleLabel(
+  pos: Pick<CyclePosition, "cycle" | "weekIndex" | "week">,
+  weeksCount: number,
+  opts: { short?: boolean } = {},
+): string {
+  const n = pos.weekIndex + 1;
+  const week = pos.week.deload
+    ? opts.short
+      ? "Deload"
+      : "Deload week"
+    : opts.short || weeksCount < n
+      ? `Week ${n}`
+      : `Week ${n} of ${weeksCount}`;
+  return pos.cycle > 1 ? `Cycle ${pos.cycle} · ${week}` : week;
+}
+
 export function programDayFor(program: Program, date: ISODate): ProgramDay | null {
   return program.days[String(weekdayOf(date))] ?? null;
 }

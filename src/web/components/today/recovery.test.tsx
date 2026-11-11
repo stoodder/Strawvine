@@ -1,6 +1,6 @@
 /**
  * The morning editor's resting HR and VO2 max, the Nutrition editor's "Also today" chips, and how
- * Today shows them (Recovery section, checklist summaries).
+ * Today shows them (the Morning check-in and Nutrition rows of the checklist).
  */
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -9,7 +9,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChecklistItem } from "../../../shared/gamify";
 import { emptyDayLog } from "../../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
-import { Recovery } from "../../screens/Today";
 import { ToastProvider } from "../Toast";
 import { DayChecklist } from "./Checklist";
 import { FuelEditor, MorningEditor } from "./editors";
@@ -213,93 +212,147 @@ describe("Also today chips", () => {
   });
 });
 
-describe("Today", () => {
-  it("Recovery shows resting HR and VO2 max with units once logged", () => {
-    const { container, rerender } = render(<Recovery day={{ ...emptyDayLog(DATE), hrvMs: 55 }} />);
-    expect(container.textContent).toContain("HRV55ms");
-    expect(screen.queryByText("Resting HR")).toBeNull();
-    expect(screen.queryByText("VO2 max")).toBeNull();
+describe("Today's checklist: the Morning check-in row carries the recovery numbers", () => {
+  const items: ChecklistItem[] = [
+    { key: "morning", label: "Morning check-in", done: false, progress: 0 },
+    { key: "fuel", label: "Nutrition", done: false, progress: 0 },
+  ];
+  const lift = { href: "/train", label: undefined, primaryName: null, setsDone: 0, setsTotal: 0 };
+  const props = { items, patch: vi.fn(), stepTarget: 15000, zone2Minutes: 30, lift };
+  const morning = () => screen.getByRole("button", { name: /^Morning check-in/ });
+  const fuel = () => screen.getByRole("button", { name: /^Nutrition/ });
+  /** The summary lines under the row's label, as shown (each is one truncating line). */
+  const lines = (row: HTMLElement) => [...row.querySelectorAll(".truncate")].map((el) => el.textContent);
 
-    rerender(<Recovery day={{ ...emptyDayLog(DATE), restingHrBpm: 48, vo2Max: 52 }} />);
-    expect(screen.getByText("Resting HR").parentElement!.textContent).toBe("Resting HR48bpm");
-    // No unit on Today (it would wrap onto a line of its own on a narrow phone).
-    expect(screen.getByText("VO2 max").parentElement!.textContent).toBe("VO2 max52.0");
-
-    rerender(<Recovery day={emptyDayLog(DATE)} />);
-    expect(container.textContent).toBe("");
+  it("prompts for what it holds while nothing is logged", () => {
+    render(<DayChecklist {...props} day={emptyDayLog(DATE)} />);
+    expect(lines(morning())).toEqual(["Weight · sleep · HRV"]);
+    expect(lines(fuel())).toEqual(["Daily totals"]);
+    // The weight alone is the row's value, and still leaves the prompt.
+    expect(morning().textContent).not.toContain("lb");
   });
 
-  it("Recovery appears for resting HR alone, or VO2 max alone", () => {
-    const { container, rerender } = render(<Recovery day={{ ...emptyDayLog(DATE), restingHrBpm: 48 }} />);
-    expect(screen.getByRole("heading", { name: "Recovery" })).toBeTruthy();
-    expect(screen.getByText("Resting HR")).toBeTruthy();
-    expect(screen.queryByText("VO2 max")).toBeNull();
-    rerender(<Recovery day={{ ...emptyDayLog(DATE), vo2Max: 51.5 }} />);
-    expect(screen.getByRole("heading", { name: "Recovery" })).toBeTruthy();
-    expect(screen.getByText("VO2 max").parentElement!.textContent).toBe("VO2 max51.5");
-    expect(screen.queryByText("Resting HR")).toBeNull();
-    expect(container.textContent).not.toBe("");
-  });
-
-  it("a day cached by an older build (no resting HR / VO2 fields) shows its HRV and nothing of the rest", () => {
-    const { restingHrBpm: _r, vo2Max: _v, alcohol: _a, nicotine: _n, thc: _t, caffeine: _c, ...rest } = emptyDayLog(DATE);
-    const day = { ...rest, hrvMs: 55, sleepMinutes: 450 } as DayLog;
-    const { container } = render(<Recovery day={day} />);
-    expect(container.textContent).toContain("HRV55ms");
-    expect(container.textContent).not.toContain("Resting HR");
-    expect(container.textContent).not.toContain("VO2");
-    container.remove();
-
-    const items: ChecklistItem[] = [
-      { key: "morning", label: "Weigh-in", done: false, progress: 0 },
-      { key: "fuel", label: "Nutrition", done: false, progress: 0 },
-    ];
-    const lift = { href: "/train", label: undefined, primaryName: null, setsDone: 0, setsTotal: 0 };
-    render(<DayChecklist items={items} patch={vi.fn()} stepTarget={15000} zone2Minutes={30} lift={lift} day={day} />);
-    const morning = screen.getByRole("button", { name: /^Weigh-in/ });
-    expect(morning.textContent).toContain("7h 30m · HRV 55");
-    expect(morning.textContent).not.toContain("RHR");
-    expect(morning.textContent).not.toContain("resting heart rate");
-    expect(screen.getByRole("button", { name: /^Nutrition/ }).textContent).toContain("Daily totals");
-  });
-
-  it("checklist rows summarise RHR and the Also today flags (the Weigh-in stays the weight alone)", () => {
-    const items: ChecklistItem[] = [
-      { key: "morning", label: "Weigh-in", done: false, progress: 0 },
-      { key: "fuel", label: "Nutrition", done: false, progress: 0 },
-    ];
-    const lift = { href: "/train", label: undefined, primaryName: null, setsDone: 0, setsTotal: 0 };
-    const props = { items, patch: vi.fn(), stepTarget: 15000, zone2Minutes: 30, lift };
-    const { rerender } = render(<DayChecklist {...props} day={emptyDayLog(DATE)} />);
-    const morning = () => screen.getByRole("button", { name: /^Weigh-in/ });
-    const fuel = () => screen.getByRole("button", { name: /^Nutrition/ });
-    expect(morning().textContent).toContain("Weight · sleep · HRV");
-    expect(fuel().textContent).toContain("Daily totals");
-
-    rerender(
+  it("with everything logged: the night's readings on one line, VO2 max and the ratings on the next", () => {
+    render(
       <DayChecklist
         {...props}
         day={{
           ...emptyDayLog(DATE),
+          weightLb: 197.8,
           sleepMinutes: 450,
+          sleepScore: 81,
           hrvMs: 55,
           restingHrBpm: 48,
-          vo2Max: 52,
-          caffeine: true,
-          alcohol: true,
-          nicotine: false,
+          vo2Max: 51.6,
+          energy: 4,
+          soreness: 2,
         }}
       />,
     );
-    // "RHR" on screen; "resting heart rate" for a screen reader (which spells the abbreviation out).
+    expect(lines(morning())).toEqual(["7h 30m · sleep score 81 · HRV 55 · RHRresting heart rate 48", "VO2 51.6 · energy 4/5 · soreness 2/5"]);
+    // The weight stays the row's right-hand value, beside the label.
+    expect(morning().querySelector(".num")!.textContent).toBe("197.8 lb");
+    // "RHR" on screen, "resting heart rate" for a screen reader (which spells the abbreviation out);
+    // "score" alone on screen, "sleep score" read out.
     const rhr = within(morning()).getByText("RHR");
     expect(rhr.getAttribute("aria-hidden")).toBe("true");
     expect(rhr.nextElementSibling).toMatchObject({ className: "sr-only", textContent: "resting heart rate" });
-    expect(morning().textContent).toContain("7h 30m · HRV 55 · RHRresting heart rate 48");
-    expect(screen.getByRole("button", { name: /HRV 55 · resting heart rate 48/ })).toBe(morning());
-    expect(fuel().textContent).toContain("Had alcohol and caffeine · No nicotine");
-    expect(screen.getByRole("button", { name: /Had alcohol and caffeine · No nicotine/ })).toBe(fuel());
-    // Still not done: neither counts toward closing the day.
+    expect(within(morning()).getByText("sleep").className).toBe("sr-only");
+    expect(screen.getByRole("button", { name: /sleep score 81 · HRV 55 · resting heart rate 48/ })).toBe(morning());
+    expect(screen.getByRole("button", { name: /VO2 51.6 · energy 4\/5 · soreness 2\/5/ })).toBe(morning());
+    // Neither closes the item: that is the weight's.
     expect(morning().textContent).toContain("not done");
   });
+
+  it("shows only what was logged, on as few lines as it takes", () => {
+    const { rerender } = render(<DayChecklist {...props} day={{ ...emptyDayLog(DATE), sleepMinutes: 432, hrvMs: 62 }} />);
+    expect(lines(morning())).toEqual(["7h 12m · HRV 62"]);
+    // Ratings alone take the first line.
+    rerender(<DayChecklist {...props} day={{ ...emptyDayLog(DATE), energy: 3 }} />);
+    expect(lines(morning())).toEqual(["energy 3/5"]);
+    rerender(<DayChecklist {...props} day={{ ...emptyDayLog(DATE), sleepScore: 0, vo2Max: 52, soreness: 5 }} />);
+    expect(lines(morning())).toEqual(["sleep score 0", "VO2 52.0 · soreness 5/5"]);
+    rerender(<DayChecklist {...props} day={{ ...emptyDayLog(DATE), restingHrBpm: 48 }} />);
+    expect(lines(morning())).toEqual(["RHRresting heart rate 48"]);
+  });
+
+  it("a day cached by an older build (newer fields undefined) shows what it has and nothing else", () => {
+    const {
+      restingHrBpm: _r,
+      vo2Max: _v,
+      energy: _e,
+      soreness: _s,
+      sleepScore: _sc,
+      alcohol: _a,
+      nicotine: _n,
+      thc: _t,
+      caffeine: _c,
+      ...rest
+    } = emptyDayLog(DATE);
+    const { rerender } = render(<DayChecklist {...props} day={{ ...rest, hrvMs: 55, sleepMinutes: 450 } as DayLog} />);
+    expect(lines(morning())).toEqual(["7h 30m · HRV 55"]);
+    expect(morning().textContent).not.toMatch(/RHR|resting heart rate|VO2|energy|soreness|score|undefined|NaN/);
+    expect(lines(fuel())).toEqual(["Daily totals"]);
+    // With nothing at all, the prompt — not an empty line.
+    rerender(<DayChecklist {...props} day={rest as DayLog} />);
+    expect(lines(morning())).toEqual(["Weight · sleep · HRV"]);
+  });
+
+  it("the Nutrition row still lists the Also today flags on a line of its own", () => {
+    render(<DayChecklist {...props} day={{ ...emptyDayLog(DATE), caffeine: true, alcohol: true, nicotine: false }} />);
+    expect(lines(fuel())).toEqual(["Daily totals", "Had alcohol and caffeine · No nicotine"]);
+    expect(screen.getByRole("button", { name: /Had alcohol and caffeine · No nicotine/ })).toBe(fuel());
+  });
+
+  it("opens the morning editor from the row, named after it", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <DayChecklist {...props} day={emptyDayLog(DATE)} />
+      </ToastProvider>,
+    );
+    expect(morning().getAttribute("aria-expanded")).toBe("false");
+    await user.click(morning());
+    expect(morning().getAttribute("aria-expanded")).toBe("true");
+    const panel = screen.getByRole("group", { name: "Morning check-in details" });
+    expect(within(panel).getByRole("textbox", { name: "Morning weight" })).toBeTruthy();
+    expect(within(panel).getByRole("radiogroup", { name: "Energy" })).toBeTruthy();
+  });
 });
+
+describe("MorningEditor's 1–5 scales read as tappable and show the choice", () => {
+  /** Each option's visible disc: its number and whether it is off, under the choice, or the choice. */
+  const discs = (name: string) =>
+    within(screen.getByRole("radiogroup", { name }))
+      .getAllByRole("radio")
+      .map((r) => {
+        const disc = r.querySelector<HTMLElement>("[data-state]")!;
+        return `${disc.textContent}:${disc.dataset.state}`;
+      });
+
+  it("shows five numbered buttons before anything is chosen", () => {
+    harness(MorningEditor);
+    expect(discs("Energy")).toEqual(["1:off", "2:off", "3:off", "4:off", "5:off"]);
+    const radios = within(screen.getByRole("radiogroup", { name: "Soreness" })).getAllByRole("radio");
+    expect(radios.map((r) => r.getAttribute("aria-checked"))).toEqual(["false", "false", "false", "false", "false"]);
+    // 44px-tall targets; the ends say what 1 and 5 mean.
+    for (const r of radios) expect(r.className).toContain("h-11");
+    expect(screen.getByText("drained")).toBeTruthy();
+    expect(screen.getByText("very sore")).toBeTruthy();
+  });
+
+  it("fills up to the chosen value, the choice itself solid; the values saved are the same 1–5", async () => {
+    const user = userEvent.setup();
+    const patches = harness(MorningEditor, { soreness: 2 });
+    expect(discs("Soreness")).toEqual(["1:under", "2:chosen", "3:off", "4:off", "5:off"]);
+    await user.click(screen.getByRole("radio", { name: "Energy 4 of 5" }));
+    expect(patches).toEqual([{ energy: 4 }]);
+    expect(discs("Energy")).toEqual(["1:under", "2:under", "3:under", "4:chosen", "5:off"]);
+    expect(screen.getByRole("radio", { name: "Energy 4 of 5" }).getAttribute("aria-checked")).toBe("true");
+    // Tapping the choice again clears it.
+    await user.click(screen.getByRole("radio", { name: "Energy 4 of 5" }));
+    expect(patches.at(-1)).toEqual({ energy: null });
+    expect(discs("Energy")).toEqual(["1:off", "2:off", "3:off", "4:off", "5:off"]);
+  });
+});
+

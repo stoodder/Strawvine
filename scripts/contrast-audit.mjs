@@ -49,7 +49,7 @@ const AUDIT_AT = new Date(2026, 9, 26, 10, 0, 0);
 const SCREENS = [
   ["Today", "/", null],
   // The checklist is an accordion: one editor open at a time.
-  ...["Weigh-in", "Nutrition", "Steps", "Metcon", "Zone 2"].map((row) => [
+  ...["Morning check-in", "Nutrition", "Steps", "Metcon", "Zone 2"].map((row) => [
     `Today (${row} open)`,
     "/",
     async (page) => {

@@ -98,12 +98,13 @@ describe("Zone 2 row", () => {
 
     const done = [{ ...items[0]!, done: true, progress: 1 }];
     rerender(<DayChecklist {...props} items={done} day={{ ...emptyDayLog(DATE), zone2Done: true, zone2Minutes: 30, zone2Kcal: 1320 }} />);
-    expect(row().textContent).toBe("Zone 2Cycling · 1,320 kcal30 min");
+    // The minutes sit beside the label (read first), the summary line under both.
+    expect(row().textContent).toBe("Zone 230 minCycling · 1,320 kcal");
 
     // Without a reading (or a day cached by an older build): as before.
     const { zone2Kcal: _z, ...legacy } = { ...emptyDayLog(DATE), zone2Done: true, zone2Minutes: 30 };
     rerender(<DayChecklist {...props} items={done} day={legacy as DayLog} />);
-    expect(row().textContent).toBe("Zone 2Cycling30 min");
+    expect(row().textContent).toBe("Zone 230 minCycling");
     expect(row().textContent).not.toContain("kcal");
   });
 
