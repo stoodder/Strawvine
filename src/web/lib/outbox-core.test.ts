@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { defaultSettings } from "../../shared/defaults";
 import type { Bootstrap, Session, Settings } from "../../shared/schemas";
 import {
   ackEntry,
@@ -10,6 +11,7 @@ import {
   emptyOutbox,
   ensureIdempotencyKeys,
   failEntry,
+  markSending,
   mergeOutbox,
   nextSendable,
   opLabel,
@@ -18,7 +20,9 @@ import {
   pruneAcked,
   queueWeightedFixes,
   request,
+  resolveConflict,
   retryFailed,
+  savedAlready,
   validateOp,
   type OutboxState,
   type OverlayCache,
@@ -511,5 +515,109 @@ describe("a rejected edit under a newer one", () => {
     const shown = overlay(applyAcked(b0, s.entries), s.entries, cache);
     expect(shown.days[0]).toMatchObject({ journal: "later", steps: 99 });
     expect(overlay(applyAcked(b0, s.entries), s.entries, cache, shown)).toBe(shown);
+  });
+});
+
+/**
+ * A whole-document save whose answer never arrived may be on the server. Coalescing a later edit
+ * into it used to leave that edit on the base from *before* the save; the retry's 409 then
+ * carried this device's own save, and the merge kept it over every field the later edit had put
+ * back (base == mine: "not changed here") — an Undo, silently dropped.
+ */
+describe("a save that went out and was never answered", () => {
+  const S0: Settings = {
+    ...defaultSettings({ bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 }, "2026-10-26"),
+    onboarded: true,
+  };
+  const start = (s: Settings, cycleStartDate: string): Settings => ({ ...s, program: { ...s.program, cycleStartDate } });
+  const steps = (s: Settings, n: number): Settings => ({ ...s, targets: { ...s.targets, steps: n } });
+  const delayed = start(S0, "2026-11-02");
+  const save = (settings: Settings, baseRev = "r0", base = S0) => ({ kind: "settings", settings, baseRev, base }) as const;
+  const docs = (s: OutboxState) => s.entries.map((e) => (e.op as { settings: Settings }).settings);
+  /** "Delay a week" is sent; the connection drops before the answer (the sender clears its marker and backs off). */
+  const sentAndLost = (): OutboxState => {
+    let s = addOp(emptyOutbox(), save(delayed), null);
+    s = markSending(s, s.entries[0]!.seq, 1000);
+    return { ...s, inflight: null };
+  };
+
+  it("is left as it was sent: the Undo queues behind it, and later edits coalesce into the Undo", () => {
+    let s = sentAndLost();
+    expect(s.entries[0]).toMatchObject({ state: "pending", tried: true });
+    s = addOp(s, save(S0), null); // Undo, made on the same server copy
+    expect(docs(s)).toEqual([delayed, S0]);
+    s = addOp(s, save(steps(S0, 12000)), null);
+    expect(docs(s)).toEqual([delayed, steps(S0, 12000)]);
+    expect(s.entries.map((e) => e.tried ?? false)).toEqual([true, false]);
+  });
+
+  it("the retry's 409 with this very document is its answer: acked, and the Undo re-based on it", () => {
+    let s = addOp(sentAndLost(), save(S0), null);
+    const [first, undo] = s.entries;
+    const conflict = { current: delayed, rev: "r1" };
+    expect(savedAlready(first!.op, conflict)).toBe(true);
+    s = ackEntry(s, first!.seq, conflict.current, { srev: conflict.rev });
+    expect(s.entries.find((e) => e.seq === undo!.seq)!.op).toEqual(save(S0, "r1", delayed));
+    expect(request(nextSendable(s.entries)!.op).headers).toEqual({ "If-Match": '"r1"' });
+  });
+
+  it("a 409 with anything else is merged with the right ancestor: the Undo still takes the date back", () => {
+    let s = addOp(sentAndLost(), save(steps(S0, 12000)), null); // Undo + a new steps target
+    const first = s.entries[0]!;
+    // The server has this device's save, and another device's Zone 2 target on top.
+    const theirs = { ...delayed, targets: { ...delayed.targets, zone2Minutes: 45 } };
+    expect(savedAlready(first.op, { current: theirs, rev: "r2" })).toBe(false);
+    const r = resolveConflict(s, first.seq, { current: theirs, rev: "r2" }, true);
+    expect(r.kind).toBe("retry");
+    s = (r as { state: OutboxState }).state;
+    expect(docs(s)).toEqual([theirs, { ...steps(S0, 12000), targets: { ...S0.targets, steps: 12000, zone2Minutes: 45 } }]);
+    expect(s.entries.map((e) => (e.op as { baseRev: string }).baseRev)).toEqual(["r2", "r2"]);
+  });
+
+  it("a 409 proves the request wasn't applied: its merged copy takes later edits again", () => {
+    let s = sentAndLost();
+    const seq = s.entries[0]!.seq;
+    const theirs = steps(S0, 9000); // another device's save; this device's never arrived
+    s = (resolveConflict(s, seq, { current: theirs, rev: "r1" }, true) as { state: OutboxState }).state;
+    expect(s.entries[0]!.tried).toBeUndefined();
+    s = addOp(s, { kind: "settings", settings: theirs, baseRev: "r1", base: theirs }, null); // Undo of the delay
+    expect(s.entries).toHaveLength(1);
+    expect(s.entries[0]!.op).toEqual({ kind: "settings", settings: theirs, baseRev: "r1", base: theirs });
+  });
+
+  it("an outbox from a build without the mark: the entry a killed window was sending is left alone too", () => {
+    let s = addOp(emptyOutbox(), save(delayed), null);
+    s = { ...s, inflight: { seq: s.entries[0]!.seq, at: 1000 } }; // as stored by that build; long expired
+    s = addOp(s, save(S0), null);
+    expect(docs(s)).toEqual([delayed, S0]);
+  });
+
+  it("workouts alike — and a delete behind a create that may have landed is kept, to be sent at its revision", () => {
+    const D = "2026-01-01";
+    const doc = session(D, 1, "a");
+    let s = addOp(emptyOutbox(), { kind: "session", date: D, doc, baseRev: null, base: null }, null);
+    s = { ...markSending(s, s.entries[0]!.seq, 1000), inflight: null };
+    s = addOp(s, { kind: "session", date: D, doc: null, baseRev: null, base: null }, null);
+    expect(s.entries.map((e) => (e.op as { doc: Session | null }).doc)).toEqual([doc, null]);
+    // The create is on the server (the retry's 409 says so): the delete goes out for that revision.
+    expect(savedAlready(s.entries[0]!.op, { current: doc, rev: "r1" })).toBe(true);
+    s = ackEntry(s, s.entries[0]!.seq, doc, { srev: "r1" });
+    expect(request(nextSendable(s.entries)!.op)).toMatchObject({ method: "DELETE", headers: { "If-Match": '"r1"' } });
+  });
+
+  it("day and exercise patches aren't version-checked: they still coalesce, and carry no mark", () => {
+    let s = addOp(emptyOutbox(), { kind: "day", date: "2026-01-01", patch: { steps: 1 } }, null);
+    const before = s.entries[0]!;
+    s = { ...markSending(s, before.seq, 1000), inflight: null };
+    expect(s.entries[0]).toBe(before);
+    s = addOp(s, { kind: "day", date: "2026-01-01", patch: { steps: null } }, null);
+    expect(s.entries.map((e) => e.op)).toEqual([{ kind: "day", date: "2026-01-01", patch: { steps: null } }]);
+  });
+
+  it("the mark travels to another window's copy of the entry", () => {
+    const a = addOp(emptyOutbox(), save(delayed), null);
+    const b = markSending(a, a.entries[0]!.seq, 1000);
+    expect(mergeOutbox(a, b).entries[0]!.tried).toBe(true);
+    expect(mergeOutbox(b, a).entries[0]!.tried).toBe(true);
   });
 });

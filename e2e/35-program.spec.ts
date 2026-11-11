@@ -2,11 +2,12 @@
  * Program (`/program`): the training program's own screen. The cycle is delayed a week in one tap
  * (the server's cycle start, and what Train prescribes, move with it) and Undo puts it back — a
  * double-tap moves one week, taps in a row fold into one Undo, and an Undo tapped from another
- * screen takes back only the move; the weekly layout is edited here (a day switched off comes
+ * screen takes back only the move — also while the move's save is still in flight, slow, or was
+ * saved without the answer ever arriving; the weekly layout is edited here (a day switched off comes
  * back as it was); old Settings anchors of the sections that moved land here; and Train's tab
  * stays lit.
  */
-import type { Page } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 import {
   expect,
   expectFocusNotOnBody,
@@ -19,6 +20,7 @@ import {
   serverData,
   test,
   toastMessage,
+  unsentEdits,
 } from "./helpers";
 
 /** The Monday after the suite's first one. */
@@ -30,6 +32,12 @@ const benchSets = (page: Page) => page.getByRole("button", { name: /^Bench press
 const now = (page: Page) => page.locator("[data-cycle-now]");
 const delayAWeek = (page: Page) => page.getByRole("button", { name: "Delay a week" });
 const undoButtons = (page: Page) => notifications(page).getByRole("button", { name: "Undo" });
+
+/** Routes this page's settings saves (PUT /api/settings) through `handle(route, n)`, n = 1 for the first. */
+async function onSettingsSave(page: Page, handle: (route: Route, n: number) => Promise<void>) {
+  let n = 0;
+  await page.route("**/api/settings", (route) => (route.request().method() === "PUT" ? handle(route, ++n) : route.fallback()));
+}
 
 test.beforeEach(async ({ page }) => {
   await onboardedOn(page, MONDAY);
@@ -136,6 +144,104 @@ test("Undo tapped on another screen takes back only the move: a steps target cha
   expect(after).toEqual({ ...before, targets: { ...before.targets, steps: 12000 } });
   await page.reload();
   await expect(page.getByRole("textbox", { name: "Steps", exact: true })).toHaveValue("12,000");
+});
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+for (const [latency, handle] of [
+  // The server saves at once; each answer takes 700 ms to arrive, so the later edits queue behind a save in flight.
+  [
+    "every answer is slow",
+    async (route: Route) => {
+      const response = await route.fetch();
+      await wait(700);
+      await route.fulfill({ response });
+    },
+  ],
+  // The steps target is on the server (and can be read there) well before the Undo that follows it.
+  [
+    "the Undo's own save is slow",
+    async (route: Route, n: number) => {
+      if (n === 3) await wait(1500);
+      await route.fallback();
+    },
+  ],
+] as const) {
+  test(`the same on a slow connection (${latency}): the Undo still takes back only the move`, async ({ page }) => {
+    await page.goto("/settings");
+    await page.getByRole("link", { name: /Training program/ }).click();
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Program");
+    const before = (await serverData(page)).settings;
+    await onSettingsSave(page, handle);
+
+    await delayAWeek(page).click();
+    await expect(toastMessage(page, "Program delayed a week")).toBeVisible();
+    await page.getByRole("link", { name: "Back to Settings" }).click();
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Settings");
+    await fillNumber(page, "Steps", "12000");
+    await undoButtons(page).click();
+
+    await expect(page.getByRole("textbox", { name: "Steps", exact: true })).toHaveValue("12,000");
+    await expectSynced(page);
+    expect((await serverData(page)).settings).toEqual({ ...before, targets: { ...before.targets, steps: 12000 } });
+    await expect(toastMessage(page, /Merged changes/)).toHaveCount(0);
+  });
+}
+
+test("Undo while the delay's save is still in flight: the server ends on the original date", async ({ page }) => {
+  await page.goto("/program");
+  const before = (await serverData(page)).settings;
+  // The first save reaches the server; its answer is held back until the Undo has been tapped.
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await onSettingsSave(page, async (route, n) => {
+    if (n > 1) return route.fallback();
+    const response = await route.fetch();
+    await held;
+    await route.fulfill({ response });
+  });
+
+  await delayAWeek(page).click();
+  await expect.poll(() => cycleStart(page)).toBe(NEXT_MONDAY_ISO);
+  await undoButtons(page).click();
+  await expect(page.getByLabel("Cycle start date")).toHaveValue(MONDAY_ISO);
+  expect(await unsentEdits(page)).toBe(2); // the save in flight, and the Undo behind it
+  release();
+
+  await expectSynced(page);
+  expect((await serverData(page)).settings).toEqual(before);
+  await expect(page.getByLabel("Cycle start date")).toHaveValue(MONDAY_ISO);
+  await expect(now(page)).toContainText("Cycle 1 · Week 1 of 5");
+  await expect(toastMessage(page, /Merged changes/)).toHaveCount(0);
+});
+
+test("the delay is saved but its answer never arrives (the connection drops): Undo still takes it back", async ({ page, context }) => {
+  await page.goto("/program");
+  const before = (await serverData(page)).settings;
+  // The server saves the first one; then the connection is gone, before the answer.
+  await onSettingsSave(page, async (route, n) => {
+    if (n > 1) return route.fallback();
+    await route.fetch();
+    await context.setOffline(true);
+    await route.abort("failed");
+  });
+
+  await delayAWeek(page).click();
+  await expect(page.getByRole("button", { name: "Offline · 1 pending" })).toBeVisible();
+  // To this device the delay is unsent; the server has it.
+  // Undo, offline: it must not replace the save that may have landed (it queues behind it).
+  await undoButtons(page).click();
+  await expect(page.getByLabel("Cycle start date")).toHaveValue(MONDAY_ISO);
+  await expect(page.getByRole("button", { name: "Offline · 2 pending" })).toBeVisible();
+
+  await context.setOffline(false);
+  expect(await cycleStart(page)).toBe(NEXT_MONDAY_ISO);
+  await expectSynced(page);
+  expect((await serverData(page)).settings).toEqual(before);
+  // This device's own save coming back is not "another device": nothing was merged, and the date stays put.
+  await expect(toastMessage(page, /Merged changes/)).toHaveCount(0);
+  await expect(page.getByLabel("Cycle start date")).toHaveValue(MONDAY_ISO);
+  await page.reload();
+  await expect(page.getByLabel("Cycle start date")).toHaveValue(MONDAY_ISO);
 });
 
 test("the cycle start date field leaves the same Undo", async ({ page }) => {

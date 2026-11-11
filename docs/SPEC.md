@@ -650,6 +650,12 @@ there is one), the title in the same size and at the same height as Today's and 
     device's wins and the toast names it;
   - edits made while a conflicting save was in flight are re-merged onto the merged copy (never sent over it); every 409
     teaches the device the server's current copy and revision;
+  - a save that went out and was never answered (the connection dropped, the request timed out, the app was closed
+    mid-request) may be on the server: it is re-sent as it was, and later edits of that document queue behind it
+    instead of replacing it. When the retry is answered 409 with that very document, that is its confirmation —
+    nothing is merged and no toast is shown — and the edits behind it follow on its revision. So putting something back
+    before the retry (an Undo, a set un-logged, a new workout deleted) is never read as "unchanged on this device" and
+    lost to the device's own earlier save;
   - a second conflict in a row keeps the merged copy and marks the edit "not saved" (Retry merges again); saves without
     a revision (older app versions) are accepted as before;
   - deleting a workout carries the revision too: when another device changed it since, the delete is refused and that

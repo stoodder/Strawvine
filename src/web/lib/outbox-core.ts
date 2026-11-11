@@ -102,6 +102,14 @@ export interface Entry {
   etags?: AckEtags;
   /** Of an acked exercise create: its `weighted: false` follow-up is queued (see `queueWeightedFixes`). */
   weightedFix?: boolean;
+  /**
+   * Of an unacked whole-document save or delete: a request carrying this very op has gone out
+   * (`markSending`), and nothing since has shown the server didn't apply it — the answer may
+   * simply have been lost (a dropped connection, a timeout, the app killed mid-request). Nothing
+   * is coalesced into such an entry (`addOp`). Cleared when a 409 rewrites the op
+   * (`resolveConflict`): that request wasn't applied.
+   */
+  tried?: boolean;
 }
 
 export interface AckEtags {
@@ -320,7 +328,9 @@ export function tempRefs(op: Op): number[] {
 /**
  * Appends an op, coalescing it with the latest unsent op on the same resource (which then
  * moves to the end, after anything it may depend on). An entry that is in flight is never
- * touched, and nothing is merged into a rejected (failed) entry: a later day/exercise patch is
+ * touched — nor a whole document that went out before and may be on the server (`maybeSent`):
+ * replacing it would lose what the server may hold, the ancestor a merge needs — and the new op
+ * is queued behind it. Nothing is merged into a rejected (failed) entry: a later day/exercise patch is
  * queued separately (it doesn't depend on the rejected fields), while a whole-document op
  * (session, settings) supersedes the rejected one — the caller validates it first. A document
  * replacing queued or rejected copies was made on what they showed, so it takes over what the
@@ -363,6 +373,7 @@ export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 
         }
         break;
       }
+      if (wholeDoc && maybeSent(s, e)) break;
       dropped.push(e.seq);
       entries.splice(i, 1);
       op = merge(e.op, op);
@@ -375,6 +386,38 @@ export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 
   }
   entries.push({ seq: withTab(s.nextSeq, tab), op, state: "pending" });
   return { ...s, entries, nextSeq: s.nextSeq + 1, ...(dropped.length ? { removed: tombstone(s, dropped) } : {}) };
+}
+
+/**
+ * Whether a request carrying this pending whole-document op may have reached the server without
+ * this device learning the outcome: it went out (`tried`), or — in an outbox written by a build
+ * from before that mark — it is the entry a window was sending when it was killed (the stored
+ * `inflight` marker still names it; an answer of any kind clears the marker).
+ *
+ * Why it matters: a save the server applied but never acked is, as far as this device knows, not
+ * saved — its `base` is still the copy from before it. Were a later edit coalesced into it, the
+ * queued document would be the later one on that old base; the retry is then answered 409 with
+ * this device's own earlier save, and the three-way merge reads every field the later edit put
+ * back to its old value as "not changed here" and keeps the server's — an Undo (a set un-logged,
+ * a goal cleared and restored…) silently lost. Kept apart, the earlier save is settled first
+ * (`savedAlready`, or a merge with the right ancestor) and the later edit is re-based on it.
+ */
+function maybeSent(s: OutboxState, e: Entry): boolean {
+  return e.tried === true || s.inflight?.seq === e.seq;
+}
+
+/**
+ * Entry `seq` is being sent now (`at`: ms since epoch): the cross-window `inflight` marker, and
+ * for a whole document the lasting `tried` mark (see `maybeSent`).
+ */
+export function markSending(s: OutboxState, seq: number, at: number): OutboxState {
+  return {
+    ...s,
+    inflight: { seq, at },
+    entries: s.entries.map((e) =>
+      e.seq === seq && !e.tried && (e.op.kind === "session" || e.op.kind === "settings") ? { ...e, tried: true, rev: bump(e) } : e,
+    ),
+  };
 }
 
 /**
@@ -486,6 +529,20 @@ export interface Conflict {
 }
 
 /**
+ * A 409 that isn't a conflict at all: the server's copy is exactly the document this save
+ * carries — its own earlier attempt, applied although the answer never arrived (or the same
+ * document saved by another window or device). There is nothing to merge or send: the caller
+ * acks the entry with the server's copy and revision, which re-bases the edits queued behind it
+ * (`ackEntry`) — a delete queued behind a lost create then deletes what that create made.
+ */
+export function savedAlready(op: Op, c: Conflict): boolean {
+  if (c.current === null || c.current === undefined || c.rev === null) return false;
+  if (op.kind === "session") return !!op.doc && deepEqual(c.current, op.doc);
+  if (op.kind === "settings") return deepEqual(c.current, op.settings);
+  return false;
+}
+
+/**
  * In every merged resolution, `conflicts` says what the merge couldn't keep as both devices had
  * it: for settings, the lists both changed (this device's kept, e.g. "program weeks"); for a
  * workout, the unlogged work left out to fit the server's limits (`fitSession`'s notices).
@@ -574,7 +631,7 @@ export function resolveConflict(s: OutboxState, seq: number, c: Conflict, retry:
   // Later edits of this document: merged onto the merged copy, based on the server's revision.
   const laterSet = new Set(laterIdx);
   const entries = s.entries.map((x, i) => {
-    if (x.seq === seq) return { ...x, op: next, rev: bump(x) };
+    if (x.seq === seq) return untried({ ...x, op: next, rev: bump(x) });
     if (!laterSet.has(i)) return x;
     const lo = x.op;
     let op2: Op = lo;
@@ -600,8 +657,15 @@ export function resolveConflict(s: OutboxState, seq: number, c: Conflict, retry:
   return { kind: "failed", state, tookServer, conflicts, error };
 }
 
+/** The entry once a 409 has answered its request: the server didn't apply it, and its op is re-based on what the server has. */
+function untried(e: Entry): Entry {
+  if (!e.tried) return e;
+  const { tried: _tried, ...rest } = e;
+  return rest;
+}
+
 function replaceOp(s: OutboxState, seq: number, op: Op): OutboxState {
-  return { ...s, entries: s.entries.map((x) => (x.seq === seq ? { ...x, op, rev: bump(x) } : x)) };
+  return { ...s, entries: s.entries.map((x) => (x.seq === seq ? untried({ ...x, op, rev: bump(x) }) : x)) };
 }
 
 /**

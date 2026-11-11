@@ -235,8 +235,25 @@ export async function openExerciseEditor(page: Page, name: string) {
   return sheet;
 }
 
-/** Wait until nothing is waiting to sync on this page (the dock's pending pill is gone). */
+/** Edits this device still has to send (its outbox in localStorage: pending entries); -1 while the page can't be asked. */
+export function unsentEdits(page: Page): Promise<number> {
+  return page
+    .evaluate(() => {
+      const outbox = JSON.parse(localStorage.getItem("strawvine:outbox") ?? "{}") as { entries?: Array<{ state: string }> };
+      return (outbox.entries ?? []).filter((e) => e.state === "pending").length;
+    })
+    .catch(() => -1); // mid-navigation: ask again
+}
+
+/**
+ * Wait until nothing is waiting to sync on this page: every edit queued on this device has been
+ * confirmed by the server (rejected ones aside — those wait for a person), and the dock's pill
+ * reports nothing pending. The pill alone can't tell: online it never says "pending" (a slow
+ * save reads "Syncing…", and only after 1.5 s), so a server read right after it could run ahead
+ * of a save still in flight.
+ */
 export async function expectSynced(page: Page) {
+  await expect.poll(() => unsentEdits(page), { message: "edits still waiting to be sent", timeout: 20_000 }).toBe(0);
   await expect(page.getByRole("button", { name: /pending/ })).toHaveCount(0, { timeout: 20_000 });
 }
 

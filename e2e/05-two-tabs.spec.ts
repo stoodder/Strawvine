@@ -2,7 +2,7 @@
  * Two tabs of the app open on one device, each editing a different field of the same day: both
  * edits must reach the server (neither tab's sync may overwrite or drop the other's).
  */
-import { dismissCelebrations, expect, fillNumber, login, test } from "./helpers";
+import { dismissCelebrations, expect, expectSynced, fillNumber, login, test } from "./helpers";
 
 test("edits made in two tabs both reach the server", async ({ page, context }) => {
   await dismissCelebrations(page);
@@ -20,7 +20,7 @@ test("edits made in two tabs both reach the server", async ({ page, context }) =
   await second.getByRole("button", { name: /Nutrition/ }).click();
   await fillNumber(second, "Protein", "187");
 
-  for (const tab of [page, second]) await expect(tab.getByRole("button", { name: /pending/ })).toHaveCount(0, { timeout: 20_000 });
+  for (const tab of [page, second]) await expectSynced(tab);
 
   // The server has both: a fresh context (no device copy) sees them.
   const fresh = await context.browser()!.newContext({ baseURL: page.url(), storageState: await context.storageState() });

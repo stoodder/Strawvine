@@ -57,6 +57,8 @@ class FakeServer {
   beforeWrite: ((c: Call) => void) | null = null;
   /** Replies to use instead of handling (transient failures etc.), in order. */
   canned: Reply[] = [];
+  /** How many of the next writes are handled but never answered (the connection drops first). */
+  loseAnswers = 0;
   private gates: Array<{ match: (c: Call) => boolean; wait: Promise<void> }> = [];
 
   constructor() {
@@ -128,6 +130,10 @@ class FakeServer {
     }
     const i = this.canned.findIndex((r) => !r.match || call.path.startsWith(r.match));
     const r = i >= 0 ? this.canned.splice(i, 1)[0]! : this.handle(call);
+    if (call.method !== "GET" && this.loseAnswers > 0) {
+      this.loseAnswers--;
+      throw new TypeError("Failed to fetch");
+    }
     return new Response(r.status === 304 || r.body === undefined ? null : JSON.stringify(r.body), { status: r.status, headers: r.headers });
   }
 
@@ -505,6 +511,136 @@ describe("settings", () => {
     expect(server.settings.doc.strengthTargets.map((x) => x.id).sort()).toEqual(["here", "there"]);
     expect(server.settings.doc.program.weeks[0]!.reps).toEqual([5]);
     expect(toasts.map((x) => x.message)).toEqual(["Merged changes from another device (kept this device's program weeks)"]);
+  });
+});
+
+/**
+ * The server applied a save but its answer never arrived (a dropped connection, a timeout, the
+ * app closed mid-request). To this device the save is still unsent, on the copy from before it —
+ * so an edit that puts a field back (an Undo) must not be folded into it: the retry's 409 is this
+ * device's own save, and a merge from the old copy would read the Undo as "nothing changed here".
+ */
+describe("a save the server applied but never answered", () => {
+  const start = (s: Settings, cycleStartDate: string): Settings => ({ ...s, program: { ...s.program, cycleStartDate } });
+  const steps = (s: Settings, n: number): Settings => ({ ...s, targets: { ...s.targets, steps: n } });
+  const live = (sync: Sync) => sync.currentData()!.settings;
+  const WAS = settings.program.cycleStartDate;
+  const DELAYED = "2026-11-09";
+  const settingsWrites = () => server.writes().map((w) => [w.headers["if-match"], (w.body as Settings).program.cycleStartDate]);
+
+  it("Delay a week, then Undo: the server ends on the original date (and nothing is called a merge)", async () => {
+    const sync = await device();
+    server.loseAnswers = 1;
+    sync.enqueue({ kind: "settings", settings: start(live(sync), DELAYED) });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    expect(server.settings.doc.program.cycleStartDate).toBe(DELAYED);
+    sync.enqueue({ kind: "settings", settings: start(live(sync), WAS) }); // Undo
+    await settled(sync);
+    expect(server.settings.doc).toEqual(settings);
+    expect(live(sync)).toEqual(settings);
+    expect(toasts).toEqual([]);
+    // The lost save, its retry (409: already there — taken as the answer), then the Undo on its revision.
+    expect(settingsWrites()).toEqual([
+      ['"s1"', DELAYED],
+      ['"s1"', DELAYED],
+      ['"s2"', WAS],
+    ]);
+  });
+
+  it("then offline: a steps target and the Undo — only the move is taken back", async () => {
+    const sync = await device();
+    server.loseAnswers = 1;
+    sync.enqueue({ kind: "settings", settings: start(live(sync), DELAYED) });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    offline(true);
+    sync.enqueue({ kind: "settings", settings: steps(live(sync), 12000) });
+    sync.enqueue({ kind: "settings", settings: start(live(sync), WAS) }); // Undo, on the live settings
+    expect(sync.getSyncInfo().unsynced).toBe(2); // the lost save, and one edit behind it
+    offline(false);
+    await settled(sync);
+    expect(server.settings.doc).toEqual(steps(settings, 12000));
+    expect(live(sync)).toEqual(server.settings.doc);
+    expect(toasts).toEqual([]);
+  });
+
+  it("with another device's change on top: merged, and the Undo still takes the date back", async () => {
+    const sync = await device();
+    server.loseAnswers = 1;
+    sync.enqueue({ kind: "settings", settings: start(live(sync), DELAYED) });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    offline(true);
+    server.otherDeviceSettings({ ...server.settings.doc, targets: { ...settings.targets, zone2Minutes: 45 } });
+    sync.enqueue({ kind: "settings", settings: start(live(sync), WAS) }); // Undo
+    offline(false);
+    await settled(sync);
+    expect(server.settings.doc).toEqual({ ...settings, targets: { ...settings.targets, zone2Minutes: 45 } });
+    expect(live(sync)).toEqual(server.settings.doc);
+    expect(toasts.map((t) => t.message)).toEqual(["Merged changes from another device"]);
+  });
+
+  it("the app closed mid-save: the Undo after reopening isn't lost either", async () => {
+    const first = await device();
+    await first.persistNow();
+    server.hold((c) => c.method === "PUT"); // the answer never reaches the page that asked
+    first.enqueue({ kind: "settings", settings: start(live(first), DELAYED) });
+    await vi.waitFor(() => expect(server.writes()).toHaveLength(1));
+    first.stopSync();
+    offline(true); // reopened without a connection, on the copy from before the save
+    const sync = await load();
+    await sync.initSync();
+    expect(live(sync).program.cycleStartDate).toBe(DELAYED); // the unsent edit is still shown
+    sync.enqueue({ kind: "settings", settings: start(live(sync), WAS) }); // Undo
+    server.settings = { doc: start(settings, DELAYED), rev: "s2" }; // …while the server did save it
+    offline(false);
+    await settled(sync);
+    expect(server.settings.doc).toEqual(settings);
+    expect(toasts).toEqual([]);
+  });
+
+  it("a set logged, then un-logged: it stays un-logged", async () => {
+    const sync = await device();
+    server.loseAnswers = 1;
+    sync.enqueue({ kind: "session", date: D, doc: logAt(shown(sync)!, 0) });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    expect(doneOf(server.session())).toEqual([true, false, false]);
+    sync.enqueue({ kind: "session", date: D, doc: withSets(shown(sync)!, (xs) => xs.map((x, i) => (i === 0 ? set("a") : x))) });
+    await settled(sync);
+    expect(doneOf(server.session())).toEqual([false, false, false]);
+    expect(shown(sync)).toEqual(server.session());
+    expect(toasts).toEqual([]);
+  });
+
+  it("a new workout, then deleted: it is deleted on the server too", async () => {
+    const sync = await device();
+    const date = "2026-11-03";
+    server.loseAnswers = 1;
+    sync.enqueue({ kind: "session", date, doc: session([set("x")], { date }) });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    expect(server.session(date)).toBeDefined();
+    sync.enqueue({ kind: "session", date, doc: null });
+    await settled(sync);
+    expect(server.session(date)).toBeUndefined();
+    expect(shown(sync, date)).toBeUndefined();
+    expect(toasts).toEqual([]);
+  });
+});
+
+describe("an Undo while the save it takes back is still in flight", () => {
+  it("is sent after it, on its revision: the server ends on the original settings", async () => {
+    const sync = await device();
+    const release = server.hold((c) => c.method === "PUT");
+    const before = sync.currentData()!.settings;
+    sync.enqueue({ kind: "settings", settings: { ...before, program: { ...before.program, cycleStartDate: "2026-11-09" } } });
+    await vi.waitFor(() => expect(server.writes()).toHaveLength(1));
+    const delayed = sync.currentData()!.settings;
+    sync.enqueue({ kind: "settings", settings: { ...delayed, targets: { ...delayed.targets, steps: 12000 } } });
+    const now = sync.currentData()!.settings;
+    sync.enqueue({ kind: "settings", settings: { ...now, program: { ...now.program, cycleStartDate: before.program.cycleStartDate } } });
+    release();
+    await settled(sync);
+    expect(server.settings.doc).toEqual({ ...settings, targets: { ...settings.targets, steps: 12000 } });
+    expect(server.writes().map((w) => w.headers["if-match"])).toEqual(['"s1"', '"s2"']);
+    expect(toasts).toEqual([]);
   });
 });
 

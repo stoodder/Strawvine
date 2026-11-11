@@ -28,6 +28,9 @@
  *   same document) is merged onto it (./merge, `resolveConflict`) and sent once more, and a
  *   toast says so. A delete of a workout changed elsewhere since is dropped (the server's copy
  *   stays).
+ * - A whole-document save whose answer never arrived may be on the server: it is marked when it
+ *   goes out (`markSending`) and re-sent as it was — later edits queue behind it — and a 409
+ *   carrying that very document is taken as its ack (`savedAlready`), never as another device.
  * - Every write answers with the dataset version before and after it; when the copy here was at
  *   the "before" version, it takes the "after" one, so the next revalidation is a 304.
  */
@@ -50,6 +53,7 @@ import {
   ensureIdempotencyKeys,
   failOrSupersede,
   isNoopDelete,
+  markSending,
   maxSeenKey,
   mergeOutbox,
   nextSendable,
@@ -62,11 +66,13 @@ import {
   request,
   resolveConflict,
   retryFailed as retryFailedCore,
+  savedAlready,
   TAB_SPACE,
   unsynced,
   validateOp,
   type AckEtags,
   type AckMeta,
+  type Conflict,
   type ConflictResolution,
   type Entry,
   type Op,
@@ -1031,11 +1037,14 @@ async function replay() {
       }
       renewLease();
       inflight = e.seq;
-      mutate((s) => ({ ...s, inflight: { seq: e.seq, at: Date.now() } }));
+      // Stored before the request leaves: from here on the server may hold this op (see `maybeSent`).
+      mutate((s) => markSending(s, e.seq, Date.now()));
       emit();
       const req = request(e.op);
       let result: unknown;
       let headers: Headers | null = null;
+      /** Set when a 409 turns out to be this very save, already on the server. */
+      let echo: AckMeta | null = null;
       try {
         result = await api<unknown>(req.path, {
           method: req.method,
@@ -1045,14 +1054,19 @@ async function replay() {
         });
       } catch (err) {
         inflight = null;
-        if (err instanceof ApiError && err.status === 409 && onConflict(e, err.body)) continue; // e.g. send the merged edit
-        if (err instanceof ApiError && err.status === 401) {
+        const conflict = err instanceof ApiError && err.status === 409 ? conflictOf(err.body) : null;
+        if (conflict && savedAlready(e.op, conflict)) {
+          // An earlier attempt was applied and its answer lost: this is that answer.
+          result = conflict.current;
+          echo = { srev: conflict.rev };
+        } else if (conflict && onConflict(e, conflict)) {
+          continue; // e.g. send the merged edit
+        } else if (err instanceof ApiError && err.status === 401) {
           // api() already signalled sign-out; resume after sign-in.
           clearSending(e.seq);
           authPaused = true;
           break;
-        }
-        if (err instanceof ApiError && err.status === 404 && e.op.kind === "deleteMax") {
+        } else if (err instanceof ApiError && err.status === 404 && e.op.kind === "deleteMax") {
           result = null; // already gone: that's what we wanted
         } else if (!isTransient(err)) {
           onRejected(e.seq, e.op, err instanceof Error ? err.message : "Rejected by the server");
@@ -1072,7 +1086,7 @@ async function replay() {
       inflight = null;
       failures = 0;
       retrying = false;
-      onAcked(e, result, ackMeta(e.op, headers));
+      onAcked(e, result, echo ?? ackMeta(e.op, headers));
     }
   } finally {
     running = false;
@@ -1115,24 +1129,29 @@ function learnServerCopy(op: Op, current: unknown, rev: string | null) {
   schedulePersist();
 }
 
+/** The server's document and revision from a 409's body, or null when it isn't a version conflict. */
+function conflictOf(body: unknown): Conflict | null {
+  const c = body as ConflictBody<Session | Settings> | null;
+  if (!c || c.error !== "conflict" || !("current" in c)) return null;
+  return { current: c.current, rev: c.rev ?? null };
+}
+
 /**
  * A 409 on a version-checked write (see `resolveConflict`): takes in the server's copy, then
  * merges and re-sends once, reports a second conflict like a rejection (the merged copy stays
  * on screen; Retry merges again), or keeps the server's copy over a delete. Returns whether it
  * was handled.
  */
-function onConflict(e: Entry, body: unknown): boolean {
-  const c = body as ConflictBody<Session | Settings> | null;
-  if (!c || c.error !== "conflict" || !("current" in c)) return false;
+function onConflict(e: Entry, c: Conflict): boolean {
   let res: ConflictResolution = { kind: "none" };
   mutate((s) => {
-    res = resolveConflict(s, e.seq, { current: c.current, rev: c.rev ?? null }, !mergedOnce.has(e.seq));
+    res = resolveConflict(s, e.seq, c, !mergedOnce.has(e.seq));
     if (res.kind === "none") return s;
     return { ...res.state, inflight: res.state.inflight?.seq === e.seq ? null : res.state.inflight };
   });
   const r = res as ConflictResolution;
   if (r.kind === "none") return false;
-  learnServerCopy(e.op, c.current, c.rev ?? null);
+  learnServerCopy(e.op, c.current, c.rev);
   const took = (x: { tookServer: boolean; conflicts: string[] }) => x.tookServer || x.conflicts.length > 0;
   switch (r.kind) {
     case "retry":

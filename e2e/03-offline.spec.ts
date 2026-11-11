@@ -2,7 +2,7 @@
  * Offline: an edit made with no connection is kept on the device, survives a reload while still
  * offline, and reaches the server once back online.
  */
-import { dismissCelebrations, expect, fillNumber, login, test, waitForDeviceCopy } from "./helpers";
+import { dismissCelebrations, expect, expectSynced, fillNumber, login, test, waitForDeviceCopy } from "./helpers";
 
 test.use({ serviceWorkers: "allow" });
 
@@ -35,7 +35,7 @@ test("an offline write survives a reload and syncs when back online", async ({ p
   await expect(page.getByRole("button", { name: /Offline · \d+ pending/ })).toBeVisible();
 
   await context.setOffline(false);
-  await expect(page.getByRole("button", { name: /pending/ })).toHaveCount(0, { timeout: 20_000 });
+  await expectSynced(page);
 
   // The server has it: a fresh context (no device copy) sees the value.
   const fresh = await context.browser()!.newContext({ baseURL: page.url(), storageState: await context.storageState() });
