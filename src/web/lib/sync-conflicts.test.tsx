@@ -17,7 +17,15 @@ vi.mock("../components/Toast", () => ({ showToast: vi.fn((t: { message: string }
 
 type Sync = typeof import("./sync");
 type Call = { method: string; path: string; headers: Record<string, string>; body?: unknown };
-type Reply = { status: number; body?: unknown; headers?: Record<string, string>; /** Only for paths starting with this. */ match?: string };
+type Reply = {
+  status: number;
+  body?: unknown;
+  /** A body that isn't JSON (a proxy's page), instead of `body`. */
+  text?: string;
+  headers?: Record<string, string>;
+  /** Only for paths starting with this. */
+  match?: string;
+};
 
 const D = "2026-11-02";
 const settings: Settings = {
@@ -134,7 +142,8 @@ class FakeServer {
       this.loseAnswers--;
       throw new TypeError("Failed to fetch");
     }
-    return new Response(r.status === 304 || r.body === undefined ? null : JSON.stringify(r.body), { status: r.status, headers: r.headers });
+    const body = r.status === 304 ? null : (r.text ?? (r.body === undefined ? null : JSON.stringify(r.body)));
+    return new Response(body, { status: r.status, headers: r.headers });
   }
 
   private conflict(pre: Call["headers"], cur: { rev: string } | undefined): boolean {
@@ -622,6 +631,304 @@ describe("a save the server applied but never answered", () => {
     expect(server.session(date)).toBeUndefined();
     expect(shown(sync, date)).toBeUndefined();
     expect(toasts).toEqual([]);
+  });
+});
+
+/**
+ * A save went out and was never answered; before its retry, a revalidation takes in another
+ * device's save. The screen still shows this device's document (the unsent edit covers the
+ * refreshed copy), so what is done next is done without having seen the other device's change —
+ * and must not be let through on the refreshed revision.
+ */
+describe("a save never answered, then this device's copy is refreshed with another device's change", () => {
+  /** `op` goes out and never arrives; the phone then saves `theirs`, and this device re-reads the server (its retry still waiting). */
+  async function triedThenRefreshed(sync: Sync, op: Parameters<Sync["enqueue"]>[0], date: string, theirs: Session) {
+    server.offline = true; // the request leaves, nothing comes back
+    sync.enqueue(op);
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    offline(true); // no retry until the device is back
+    server.offline = false;
+    server.otherDevice(date, theirs);
+    await sync.fetchBootstrap({ signal }); // a revalidation gets through before the retry does
+    expect(sync.getSyncInfo().unsynced).toBe(1);
+  }
+  const ifMatch = () => server.writes().map((w) => `${w.method} ${w.headers["if-match"] ?? w.headers["if-none-match"]}`);
+
+  it("deleting the workout: refused — the set logged on the other device is still there", async () => {
+    const sync = await device();
+    await triedThenRefreshed(sync, { kind: "session", date: D, doc: logAt(shown(sync)!, 0) }, D, logAt(server.session()!, 1));
+    expect(doneOf(shown(sync))).toEqual([true, false, false]); // the screen: this device's edit, not the phone's set b
+    sync.enqueue({ kind: "session", date: D, doc: null });
+    offline(false);
+    await settled(sync);
+    expect(doneOf(server.session())).toEqual([false, true, false]);
+    expect(shown(sync)).toEqual(server.session());
+    expect(toasts.map((t) => t.message)).toEqual(["Your workout for Nov 2 changed on another device, so it wasn't deleted."]);
+    // The save's retry (409, dropped for the delete), then the delete at the revision the screen was built on.
+    expect(ifMatch()).toEqual(['PUT "r1"', 'DELETE "r1"']);
+  });
+
+  it("a delete never answered, then the workout rebuilt: merged with the other device's, whose logged set survives", async () => {
+    const sync = await device();
+    await triedThenRefreshed(sync, { kind: "session", date: D, doc: null }, D, logAt(server.session()!, 1));
+    expect(shown(sync)).toBeUndefined(); // the screen: deleted
+    sync.enqueue({ kind: "session", date: D, doc: session([set("n1"), set("n2")]) });
+    offline(false);
+    await settled(sync);
+    const saved = server.session()!.blocks.flatMap((b) => b.exercises.flatMap((x) => x.sets));
+    expect(saved.find((x) => x.id === "b")).toMatchObject({ done: true, reps: 5 });
+    expect(shown(sync)).toEqual(server.session());
+    expect(toasts.map((t) => t.message)).toEqual([
+      "Your workout for Nov 2 changed on another device, so it wasn't deleted.",
+      "Merged changes from another device",
+    ]);
+    expect(ifMatch().slice(0, 2)).toEqual(['DELETE "r1"', 'PUT "r1"']); // nothing went out on the refreshed revision unmerged
+  });
+
+  it("the save refused (403) and dropped for the edit behind it: that edit is merged, not saved over the other device's set", async () => {
+    const sync = await device();
+    await triedThenRefreshed(sync, { kind: "session", date: D, doc: logAt(shown(sync)!, 0) }, D, logAt(server.session()!, 1));
+    sync.enqueue({ kind: "session", date: D, doc: logAt(shown(sync)!, 2) }); // set c, on what the screen shows
+    server.canned = [{ status: 403, body: { error: "Forbidden" }, match: "/sessions/" }]; // a proxy answers the retry
+    offline(false);
+    await settled(sync);
+    expect(doneOf(server.session())).toEqual([true, true, true]);
+    expect(shown(sync)).toEqual(server.session());
+    expect(toasts.map((t) => t.message)).toEqual(["Merged changes from another device"]);
+    expect(ifMatch()).toEqual(['PUT "r1"', 'PUT "r1"', 'PUT "r2"']);
+  });
+
+  it("a draft whose save never arrived, deleted: the workout another device made that day isn't touched", async () => {
+    const sync = await device();
+    const date = "2026-11-03";
+    const phone = session([logged("p1")], { date, label: "Pull" });
+    await triedThenRefreshed(sync, { kind: "session", date, doc: session([set("x")], { date }) }, date, phone);
+    expect(setsOf(shown(sync, date)).map((x) => x.id)).toEqual(["x"]); // the screen: this device's draft
+    sync.enqueue({ kind: "session", date, doc: null });
+    offline(false);
+    await settled(sync);
+    expect(server.session(date)).toEqual(phone);
+    expect(shown(sync, date)).toEqual(phone);
+    expect(server.writes().map((w) => w.method)).toEqual(["PUT"]); // the draft's retry (409); no DELETE
+    expect(toasts).toEqual([]);
+  });
+});
+
+describe("a change the server can't take", () => {
+  const half = "great \ud83d!"; // an emoji cut in half: ill-formed text, which the database refuses
+  const sessionPuts = () => server.writes().filter((w) => w.path.startsWith("/sessions/"));
+  const error500 = (n: number): Reply[] =>
+    Array.from({ length: n }, () => ({ status: 500, body: { error: "Something went wrong" }, match: "/sessions/" }));
+  /** Skips the retry backoff until `done()`: every "Sync now" is another attempt. */
+  async function retryUntil(sync: Sync, done: () => boolean) {
+    for (let i = 0; i < 40 && !done(); i++) await sync.syncNow();
+    expect(done()).toBe(true);
+  }
+
+  it("text with half an emoji is refused on the device: not queued, not sent, listed with the reason", async () => {
+    const sync = await device();
+    expect(sync.enqueue({ kind: "session", date: D, doc: { ...shown(sync)!, notes: half } })).toBe(-1);
+    expect(sync.enqueue({ kind: "day", date: D, patch: { journal: half } })).toBe(-1);
+    expect(sync.getSyncInfo()).toMatchObject({ unsynced: 0, failed: 0 });
+    expect(sync.getSyncInfo().refused.map((r) => [r.label, r.reason])).toEqual([
+      ["Workout · Nov 2", "The text has a broken character (half of an emoji) — delete it and save again."],
+      ["Log · Nov 2", "The text has a broken character (half of an emoji) — delete it and save again."],
+    ]);
+    expect(toasts[0]!.message).toBe("Not saved: The text has a broken character (half of an emoji) — delete it and save again.");
+    expect(shown(sync)!.notes).toBe("");
+    // The corrected text is saved like any edit.
+    sync.enqueue({ kind: "session", date: D, doc: { ...shown(sync)!, notes: "great \ud83d\ude00!" } });
+    await settled(sync);
+    expect(server.session()!.notes).toBe("great \ud83d\ude00!");
+    expect(server.writes()).toHaveLength(1);
+  });
+
+  it("one queued by an earlier build isn't sent: marked not saved with the reason, and what was waiting behind it goes out", async () => {
+    // As that build left it: tried (answered 500 each time), with a day log stuck behind it.
+    const first = server.session()!;
+    localStorage.setItem(
+      "strawvine:outbox",
+      JSON.stringify({
+        entries: [
+          {
+            seq: 1,
+            op: { kind: "session", date: D, doc: { ...first, notes: half }, baseRev: "r1", base: first },
+            state: "pending",
+            tried: true,
+          },
+          { seq: 2, op: { kind: "day", date: D, patch: { steps: 9000 } }, state: "pending" },
+        ],
+        nextSeq: 3,
+        nextAck: 1,
+        nextTemp: -1,
+        tempMap: {},
+      }),
+    );
+    const sync = await device();
+    await vi.waitFor(() => expect(sync.getSyncInfo().failed).toBe(1));
+    await vi.waitFor(() => expect(sync.getSyncInfo().pending).toBe(0));
+    expect(sync.getSyncInfo().items).toEqual([
+      {
+        id: "1",
+        label: "Workout · Nov 2",
+        failed: true,
+        error: "The text has a broken character (half of an emoji) — delete it and save again.",
+      },
+    ]);
+    expect(server.writes().map((w) => w.path)).toEqual([`/days/${D}`]); // the workout never left the device again
+    // Typing the note again replaces it…
+    sync.enqueue({ kind: "session", date: D, doc: { ...shown(sync)!, notes: "great" } });
+    await settled(sync);
+    expect(server.session()!.notes).toBe("great");
+    expect(sessionPuts().map((w) => w.headers["if-match"])).toEqual(['"r1"']);
+  });
+
+  it("…or Discard drops it, and the server's copy shows again", async () => {
+    const first = server.session()!;
+    localStorage.setItem(
+      "strawvine:outbox",
+      JSON.stringify({
+        entries: [
+          {
+            seq: 1,
+            op: { kind: "session", date: D, doc: { ...first, notes: half }, baseRev: "r1", base: first },
+            state: "pending",
+            tried: true,
+          },
+        ],
+        nextSeq: 2,
+        nextAck: 1,
+        nextTemp: -1,
+        tempMap: {},
+      }),
+    );
+    const sync = await device();
+    await vi.waitFor(() => expect(sync.getSyncInfo().failed).toBe(1));
+    expect(shown(sync)!.notes).toBe(half); // still shown here until retried or discarded
+    sync.discardFailed();
+    expect(sync.getSyncInfo()).toMatchObject({ unsynced: 0, failed: 0 });
+    expect(shown(sync)).toEqual(first);
+    expect(server.writes()).toEqual([]);
+  });
+
+  it("a save answered with a server error every time stops being retried: not saved (Retry / Discard), and the rest of the queue is sent", async () => {
+    const sync = await device();
+    server.canned = error500(sync.SERVER_ERROR_TRIES + 5);
+    sync.enqueue({ kind: "session", date: D, doc: { ...shown(sync)!, notes: "poison" } });
+    sync.enqueue({ kind: "day", date: D, patch: { steps: 9000 } }); // waits its turn behind it
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    expect(sync.getSyncInfo()).toMatchObject({ pending: 2, failed: 0 });
+    await retryUntil(sync, () => sync.getSyncInfo().failed === 1);
+    expect(sessionPuts()).toHaveLength(sync.SERVER_ERROR_TRIES);
+    await vi.waitFor(() => expect(sync.getSyncInfo().pending).toBe(0)); // the day log went out
+    expect(server.writes().at(-1)!.path).toBe(`/days/${D}`);
+    expect(sync.getSyncInfo().items).toEqual([
+      {
+        id: expect.any(String),
+        label: "Workout · Nov 2",
+        failed: true,
+        error: "The server keeps failing on this change (error 500). Retry later, or discard it.",
+      },
+    ]);
+    expect(sync.getSyncState()).toMatchObject({ failed: 1, retrying: false });
+    expect(toasts.at(-1)!.message).toBe(
+      "Couldn't save your workout for 2026-11-02: The server keeps failing on this change (error 500). Retry later, or discard it.",
+    );
+    expect(shown(sync)!.notes).toBe("poison"); // still shown here
+    // Nothing more is sent on its own…
+    await sync.syncNow();
+    expect(sessionPuts()).toHaveLength(sync.SERVER_ERROR_TRIES);
+    // …Discard drops it: the server's copy shows again and nothing is left to send.
+    sync.discardFailed();
+    expect(sync.getSyncInfo()).toMatchObject({ unsynced: 0, failed: 0 });
+    await vi.waitFor(() => expect(shown(sync)).toEqual(server.session()));
+    expect(shown(sync)!.notes).toBe("");
+  });
+
+  it("Retry sends it again once the server can take it", async () => {
+    const sync = await device();
+    server.canned = error500(sync.SERVER_ERROR_TRIES);
+    sync.enqueue({ kind: "session", date: D, doc: logAt(shown(sync)!, 0) });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    await retryUntil(sync, () => sync.getSyncInfo().failed === 1);
+    expect(sync.getSyncState()).toMatchObject({ pending: 1, failed: 1, retrying: false }); // "1 not saved", not "Can't reach server"
+    sync.retryFailed();
+    await settled(sync);
+    expect(doneOf(server.session())).toEqual([true, false, false]);
+    expect(sessionPuts().map((w) => w.headers["if-match"])).toEqual(Array(sync.SERVER_ERROR_TRIES + 1).fill('"r1"'));
+  });
+
+  it("a corrected document queued behind it takes its place, before or after it was given up on", async () => {
+    const sync = await device();
+    server.canned = error500(sync.SERVER_ERROR_TRIES);
+    sync.enqueue({ kind: "session", date: D, doc: { ...shown(sync)!, notes: "poison" } });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    sync.enqueue({ kind: "session", date: D, doc: { ...shown(sync)!, notes: "fine" } }); // behind the save that went out
+    expect(sync.getSyncInfo().unsynced).toBe(2);
+    await retryUntil(sync, () => sync.getSyncInfo().unsynced === 0);
+    expect(server.session()!.notes).toBe("fine");
+    expect(sync.getSyncInfo().failed).toBe(0);
+    expect(sessionPuts()).toHaveLength(sync.SERVER_ERROR_TRIES + 1);
+    expect(toasts).toEqual([]);
+
+    // Given up on first, corrected after.
+    server.canned = error500(sync.SERVER_ERROR_TRIES);
+    sync.enqueue({ kind: "session", date: D, doc: { ...shown(sync)!, notes: "poison again" } });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    await retryUntil(sync, () => sync.getSyncInfo().failed === 1);
+    sync.enqueue({ kind: "session", date: D, doc: { ...shown(sync)!, notes: "fine again" } });
+    await settled(sync);
+    expect(server.session()!.notes).toBe("fine again");
+    expect(sync.getSyncInfo().failed).toBe(0);
+  });
+
+  it("an edit of the change starts the count over", async () => {
+    const sync = await device();
+    const n = sync.SERVER_ERROR_TRIES;
+    const dayError = (): Reply => ({ status: 500, body: { error: "Something went wrong" }, match: "/days/" });
+    server.canned = Array.from({ length: n - 1 }, dayError);
+    sync.enqueue({ kind: "day", date: D, patch: { steps: 1 } });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    await retryUntil(sync, () => server.writes().length === n - 1);
+    // One short of giving up: the patch is edited (merged into the unsent one — a new change).
+    server.canned = Array.from({ length: n - 1 }, dayError);
+    sync.enqueue({ kind: "day", date: D, patch: { steps: 2 } });
+    await retryUntil(sync, () => sync.getSyncInfo().unsynced === 0);
+    expect(sync.getSyncInfo().failed).toBe(0);
+    expect(server.writes()).toHaveLength(2 * (n - 1) + 1);
+  });
+
+  it("no answer from the app itself — a gateway's error page, a dropped connection — is retried for as long as it takes", async () => {
+    const sync = await device();
+    const tries = sync.SERVER_ERROR_TRIES + 4;
+    // A proxy's 503 page (not JSON), and one that answers 200 with a sign-in page.
+    server.canned = Array.from({ length: tries + 10 }, (_, i) =>
+      i % 2
+        ? { status: 503, match: "/sessions/" }
+        : { status: 200, headers: { "content-type": "text/html" }, match: "/sessions/", text: "<html>" },
+    );
+    sync.enqueue({ kind: "session", date: D, doc: logAt(shown(sync)!, 0) });
+    await vi.waitFor(() => expect(sync.getSyncState().retrying).toBe(true));
+    await retryUntil(sync, () => sessionPuts().length >= tries);
+    expect(sync.getSyncInfo()).toMatchObject({ pending: 1, failed: 0 });
+    server.canned = []; // the connection is back
+    await retryUntil(sync, () => sync.getSyncInfo().unsynced === 0);
+    expect(doneOf(server.session())).toEqual([true, false, false]);
+    expect(toasts).toEqual([]);
+  });
+});
+
+describe("a 409 that isn't a version conflict", () => {
+  it("is a refusal even when it carries a document: nothing is merged or re-sent, and the reason is shown", async () => {
+    const sync = await device();
+    const theirs = logAt(server.session()!, 1);
+    server.canned = [{ status: 409, body: { error: "This workout is locked", current: theirs, rev: "r9" }, match: "/sessions/" }];
+    sync.enqueue({ kind: "session", date: D, doc: logAt(shown(sync)!, 0) });
+    await vi.waitFor(() => expect(sync.getSyncInfo().failed).toBe(1));
+    expect(sync.getSyncInfo().items[0]).toMatchObject({ failed: true, error: "This workout is locked" });
+    expect(doneOf(shown(sync))).toEqual([true, false, false]); // this device's edit, unmerged
+    expect(server.writes()).toHaveLength(1);
+    expect(toasts.map((t) => t.message)).toEqual(["Couldn't save your workout for 2026-11-02: This workout is locked"]);
   });
 });
 

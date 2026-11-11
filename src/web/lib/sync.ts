@@ -12,9 +12,11 @@
  * - The UI shows `overlay(base, outbox)`; server responses are applied to `base` directly, so a
  *   write never triggers a full refetch. The dataset is revalidated (ETag, so usually a bodiless
  *   304) on start, whenever the app becomes visible, and after errors.
- * - Replay is serial and in order. Network failures, timeouts and 5xx retry forever with capped
- *   backoff (paused while offline); a 401 pauses until sign-in; any other 4xx marks the entry
- *   "not saved" (the edit stays on screen) and raises a toast with Retry.
+ * - Replay is serial and in order. Network failures, timeouts and 5xx retry with capped backoff
+ *   (paused while offline) — forever, except a change the app's server itself keeps answering
+ *   with an error, which is given up on after `SERVER_ERROR_TRIES` such answers; a 401
+ *   pauses until sign-in; any other 4xx marks the entry "not saved" (the edit stays on screen)
+ *   and raises a toast with Retry.
  * - The dataset copy lives in IndexedDB, split per collection (days and sessions per year) so
  *   a write touches only what changed; written right after the first download, then in the
  *   background once things settle.
@@ -1071,6 +1073,12 @@ async function replay() {
         } else if (!isTransient(err)) {
           onRejected(e.seq, e.op, err instanceof Error ? err.message : "Rejected by the server");
           continue;
+        } else if (isServerError(err) && serverErrorsFor(e.seq) >= SERVER_ERROR_TRIES) {
+          // Not "can't reach the server": it answers, and can't take this change (see SERVER_ERROR_TRIES).
+          serverErrors = null;
+          retrying = false;
+          onRejected(e.seq, e.op, `The server keeps failing on this change (error ${err.status}). Retry later, or discard it.`);
+          continue;
         } else {
           clearSending(e.seq);
           failures++;
@@ -1086,6 +1094,7 @@ async function replay() {
       inflight = null;
       failures = 0;
       retrying = false;
+      serverErrors = null;
       onAcked(e, result, echo ?? ackMeta(e.op, headers));
     }
   } finally {
@@ -1094,6 +1103,40 @@ async function replay() {
     emit();
     if (reconcileOwed && !nextSendable(ob.entries) && !authPaused) reconcile();
   }
+}
+
+/**
+ * How many server errors (5xx answers from the app's server, `isServerError`) one change gets
+ * before it stops being retried on its own and is shown as not saved, with Retry / Discard —
+ * about a minute of retries (`backoff`). Attempts that got no answer in between don't count,
+ * and don't start the count over.
+ *
+ * A request that gets no answer (offline, a timeout) is retried for as long as it takes, and so
+ * is a server that is briefly unwell. But a change the server can't take — a bug on its side, a
+ * value the database refuses — would otherwise be re-sent forever with no way out: the queue is
+ * sent in order, so everything behind it waits, and a workout or settings save that has gone out
+ * can't be replaced by a corrected one (`maybeSent`). Marked failed, it no longer holds anything
+ * up: a later edit of the same document takes its place (`failOrSupersede`, `addOp`), other
+ * changes are sent, and Discard drops it. A day or exercise patch edited in the meantime starts
+ * over (merged with the edit, it is a new entry). After an outage that outlasted the retries,
+ * Retry sends what was marked.
+ */
+export const SERVER_ERROR_TRIES = 8;
+/** The entry the server last answered 5xx to, and how many times so far (this window). */
+let serverErrors: { seq: number; n: number } | null = null;
+
+/**
+ * A 5xx the app's own server answered (its error body, `{ error }`) — it took the request and
+ * failed on it. Not a gateway's or a captive portal's page, which says nothing about the change.
+ */
+function isServerError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status >= 500 && typeof (err.body as { error?: unknown } | null)?.error === "string";
+}
+
+/** Counts one more server error for `seq`; returns how many it has had. */
+function serverErrorsFor(seq: number): number {
+  serverErrors = { seq, n: serverErrors?.seq === seq ? serverErrors.n + 1 : 1 };
+  return serverErrors.n;
 }
 
 /** Seqs that had their one automatic merge-and-resend (this window); a second conflict in a row fails. */

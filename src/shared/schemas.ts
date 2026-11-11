@@ -4,11 +4,20 @@
  */
 import { z } from "zod";
 import { isISODate } from "./dates";
+import { ILL_FORMED_MESSAGE, isWellFormed } from "./text";
 
 export const isoDate = z.string().refine(isISODate, "Expected a YYYY-MM-DD date");
 
-/** Any stored string. Postgres `text` and `jsonb` both reject U+0000, so it never gets that far. */
-export const safeString = () => z.string().regex(/^[^\u0000]*$/, "Must not contain NUL characters");
+/**
+ * Any stored string. Postgres `text` and `jsonb` both reject U+0000, so it never gets that far —
+ * nor does ill-formed text (a lone surrogate, see `isWellFormed`), which `jsonb` rejects too.
+ * Nothing stored can hold either, so every document the server has ever returned still parses.
+ */
+export const safeString = () =>
+  z
+    .string()
+    .regex(/^[^\u0000]*$/, "Must not contain NUL characters")
+    .refine(isWellFormed, ILL_FORMED_MESSAGE);
 
 const optNum = (min: number, max: number) => z.number().min(min).max(max).nullable();
 

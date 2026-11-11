@@ -12,6 +12,7 @@
  */
 import { formatShortDate } from "../../shared/dates";
 import { emptyDayLog } from "../../shared/empty";
+import { hasIllFormedText } from "../../shared/text";
 import { deepEqual, fitSession, mergeSession, mergeSettingsDetailed, SESSION_LIMITS } from "./merge";
 import type {
   Bootstrap,
@@ -221,6 +222,44 @@ function withDocBase<T extends Op & DocBase<unknown>>(op: T, from: DocBase<unkno
   return { ...op, baseRev: from.baseRev, base: from.base ?? null };
 }
 
+/**
+ * A whole-document op queued behind an unsettled entry of the same document (one in flight, or
+ * one that went out and may be on the server — `maybeSent`), which it can't be merged into.
+ *
+ * It was made on a screen showing that entry's document — the overlay shows the entry's copy
+ * whatever the device's server copy says — so it is based on what that entry is based on, not
+ * on the device's server copy as of now. The two differ once a revalidation takes in another
+ * device's save while the entry is still unanswered: the newer revision would then make the
+ * follower's `If-Match` pass over changes its screen never showed. E.g. the tried save is
+ * answered 409 and dropped for a delete queued behind it (`resolveConflict`): at the refreshed
+ * revision that delete goes through and removes sets logged on the other device, without a
+ * word; at the entry's revision it is refused ("…changed on another device, so it wasn't
+ * deleted"). Likewise a rebuild behind a tried delete, an edit behind a tried save that is then
+ * refused (4xx) and dropped, or the delete of a draft whose create never arrived while another
+ * device made a workout that day (inheriting "no such document", it sends nothing).
+ *
+ * When the entry is acked the follower is re-based on what the server saved (`ackEntry`), and a
+ * 409 re-bases it on the merged copy (`resolveConflict`) — so inheriting only matters when the
+ * entry is dropped unanswered, or answered with something that proves nothing.
+ *
+ * The price: the tried save did reach the server (its answer was lost), the device's copy has
+ * taken that save in since (a revalidation, or the retry's own 409), and the retry doesn't
+ * settle it as this device's own (`savedAlready`) — because it is refused with a non-409 4xx (a
+ * proxy's 403, a rule tightened since), because the server saved the document in another shape
+ * than it was sent (a key it doesn't know dropped, a main-lift block normalized), or because
+ * the window handling the retry runs a build from before `savedAlready`. The save is then
+ * dropped for what is queued behind it, which meets this device's own save as if it were
+ * another device's: a delete — let through on the refreshed revision — is answered 409 and the
+ * workout kept, with the "changed on another device" notice, to be deleted again; a rebuilt
+ * workout is merged with it (an exercise can show twice). Keeping too much there, rather than
+ * ever deleting or overwriting work the screen never showed. (For an edit in that spot see the
+ * note on `failOrSupersede`.)
+ */
+function behind(op: Op, ahead: Op): Op {
+  if (op.kind !== "session" && op.kind !== "settings") return op;
+  return withDocBase(op, ahead as DocBase<unknown>);
+}
+
 const isCreator = (op: Op): op is Extract<Op, { tempId: number }> => op.kind === "addMax" || op.kind === "createExercise";
 
 // ---------------------------------------------------------------------------
@@ -333,8 +372,9 @@ export function tempRefs(op: Op): number[] {
  * is queued behind it. Nothing is merged into a rejected (failed) entry: a later day/exercise patch is
  * queued separately (it doesn't depend on the rejected fields), while a whole-document op
  * (session, settings) supersedes the rejected one — the caller validates it first. A document
- * replacing queued or rejected copies was made on what they showed, so it takes over what the
- * first of them was based on (`baseRev`/`base`).
+ * replacing queued or rejected copies — or queued behind one it can't replace (`behind`) — was
+ * made on what they showed, so it takes over what the first of them was based on
+ * (`baseRev`/`base`), whatever the device's server copy has become since.
  *
  * Deleting a workout the server never had (its only save is still unsent — or there was none):
  * nothing is sent, and the unsent save goes too. A delete queued behind a save in flight stays
@@ -362,7 +402,10 @@ export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i]!;
       if (e.state === "acked" || opKey(e.op) !== key) continue;
-      if (e.seq === inflight) break;
+      if (e.seq === inflight) {
+        if (wholeDoc) op = behind(op, e.op);
+        break;
+      }
       if (e.state === "failed") {
         if (wholeDoc) {
           dropped.push(e.seq);
@@ -373,7 +416,10 @@ export function addOp(s: OutboxState, input: Op, inflight: number | null, tab = 
         }
         break;
       }
-      if (wholeDoc && maybeSent(s, e)) break;
+      if (wholeDoc && maybeSent(s, e)) {
+        op = behind(op, e.op);
+        break;
+      }
       dropped.push(e.seq);
       entries.splice(i, 1);
       op = merge(e.op, op);
@@ -672,6 +718,18 @@ function replaceOp(s: OutboxState, seq: number, op: Op): OutboxState {
  * Marks a rejected entry failed — or, for a whole document with a later queued edit of it (made
  * on top of this one, so carrying its changes), drops it: the later edit is what gets saved.
  * Returns the later edit's seq when it superseded the rejected one.
+ *
+ * Known gap (as in every build so far; SPEC §8): the rejection is taken as "the server doesn't
+ * have this save". A save that did reach the server on an earlier attempt (its answer lost) and
+ * is then refused on the retry with a non-409 4xx — a proxy or captive portal answering 403, a
+ * rule tightened since — is still on the server. The later edit goes out on the base it
+ * inherited (`behind`), is answered 409 with this device's own earlier save, and is merged with
+ * the ancestor from before it: whatever that edit put *back* (an Undo, a set un-logged) reads as
+ * "not changed here" and the server's value stays, under a "Merged changes" toast; an edit that
+ * changes something else is merged correctly. The same holds for an edit made after such an
+ * entry was marked failed (`addOp` replaces it, inheriting its base). Closing it means telling
+ * "refused" from "refused this time" (e.g. keeping the entry's document as the ancestor of
+ * what follows); not done here.
  */
 export function failOrSupersede(s: OutboxState, seq: number, error: string): { state: OutboxState; supersededBy: number | null } {
   const at = s.entries.findIndex((x) => x.seq === seq);
@@ -1158,8 +1216,17 @@ export function request(op: Op): OpRequest {
 
 const { blocks: MAX_BLOCKS, superset: MAX_SUPERSET, sets: MAX_SETS } = SESSION_LIMITS;
 
+/**
+ * Why a change with ill-formed text isn't saved. The server refuses such text (`safeString`) —
+ * the database can't store it; before that rule, a workout or settings document carrying it was
+ * answered with a server error on every retry and held up everything queued after it.
+ */
+export const BROKEN_TEXT = "The text has a broken character (half of an emoji) — delete it and save again.";
+
 /** Why the server would reject this op, for the limits a user can run into; null if it looks fine. */
 export function validateOp(op: Op): string | null {
+  // Everything that would be sent. Not "seen" bookkeeping: the server's refusal drops it quietly.
+  if (op.kind !== "seen" && hasIllFormedText(request(op).body)) return BROKEN_TEXT;
   switch (op.kind) {
     case "session": {
       const doc = op.doc;

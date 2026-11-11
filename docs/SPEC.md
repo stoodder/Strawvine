@@ -610,7 +610,21 @@ there is one), the title in the same size and at the same height as Today's and 
   Migration 0006 turned the flag off once for existing exercises with no sign of a load (not main lifts or max-tracked,
   no max entry, strength target, program day or logged/planned load).
 - Edits the server would reject (limits a person can hit: too many sets, an overlong note…) are refused before they are
-  queued; Settings → Sync lists the last 20 with why, until cleared.
+  queued; Settings → Sync lists the last 20 with why, until cleared. That includes text with a broken character — half
+  of an emoji or of any other character beyond U+FFFF (ill-formed UTF-16, as left by cutting text mid-character). The
+  database can't store one (a workout or settings document carrying it was a server error on every retry; a plain text
+  field would have held "�" in its place), so the server refuses it in any text with a 400 naming the field, and the
+  device says "The text has a broken character (half of an emoji) — delete it and save again." Nothing already saved
+  can contain one, so every stored document and export still validates. One already queued by an earlier build isn't
+  sent again: it shows as a change not saved (Retry / Discard) with that reason.
+- A change the server itself keeps failing on — answered 8 times with a server error (5xx, from the app's own server),
+  about a minute of retries — stops being retried on its own and shows as a change not saved (Retry / Discard), with
+  "The server keeps failing on this change (error 500). Retry later, or discard it." The changes queued after it are
+  then sent; a later edit of the same workout or settings takes its place (as it does for any change not saved), also
+  when it was already queued behind it; Discard drops it. A day-log or exercise edit made while it is being retried
+  makes it a new change (the count starts over). No answer at all (offline, a timeout), a 408/429, or an error page from
+  something in between (a proxy, a gateway — no answer from the app) is retried for as long as it takes, as before.
+  After an outage that outlasts the retries, Retry sends what was marked.
 - **Version-checked saves.** Workouts and settings are saved as whole documents, each with a server revision. An edit
   carries the revision it was made on; when another device saved the document since, the server answers 409 with its
   copy and the edit is merged onto it and sent once more ("Merged changes from another device"):
@@ -656,6 +670,23 @@ there is one), the title in the same size and at the same height as Today's and 
     nothing is merged and no toast is shown — and the edits behind it follow on its revision. So putting something back
     before the retry (an Undo, a set un-logged, a new workout deleted) is never read as "unchanged on this device" and
     lost to the device's own earlier save;
+  - an edit queued behind such a save (or behind the save in flight) is based on what that save was based on — the
+    screen it was made on shows that save's document — not on the device's copy of the server, which a revalidation
+    may have refreshed with another device's change in the meantime. Its check therefore never passes over a change
+    its screen didn't show: deleting the workout is refused when another device logged to it since ("…changed on
+    another device, so it wasn't deleted"); a workout rebuilt after a delete that never arrived, or an edit behind a
+    save that is then refused (4xx) and dropped, is merged with the other device's copy rather than saved over it; and
+    deleting a draft whose save never arrived sends nothing, so a workout another device made that day isn't touched.
+    The price: when the unanswered save did reach the server and its retry isn't recognised as this device's own — it
+    is refused with a 4xx other than 409 (a proxy's 403…), the server stored the document in another shape than it was
+    sent (a main-lift block normalized, a key it doesn't know dropped), or a window on an older build handles the retry
+    — what is queued behind it meets this device's own save as if it were another device's: a delete is refused (the
+    workout stays, with that notice, and has to be deleted again) and a rebuilt workout is merged with it (an exercise
+    can show twice). Too much is kept there; nothing a screen never showed is deleted or overwritten;
+  - known gap (in every version so far): a save that reached the server on an attempt whose answer was lost, and is
+    then refused on its retry with a 4xx other than 409, is taken as not saved. An edit made on top of it is merged
+    with the copy from before it, so what that edit put _back_ (an Undo, a set un-logged) is kept as the server has it
+    — under a "Merged changes" toast — while what it changed otherwise is merged correctly;
   - a second conflict in a row keeps the merged copy and marks the edit "not saved" (Retry merges again); saves without
     a revision (older app versions) are accepted as before;
   - deleting a workout carries the revision too: when another device changed it since, the delete is refused and that

@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Bootstrap } from "../shared/schemas";
-import { buildSession } from "../shared/session";
+import type { Bootstrap, Session, Settings } from "../shared/schemas";
+import { blankSet, buildSession, buildSessionFrom } from "../shared/session";
+import { savedAlready } from "../web/lib/outbox-core";
 import { maxPrs, effectiveMaxHistory } from "../shared/gamify";
 import { clampCreatedAt, createApp, LOGIN_BODY_LIMIT_BYTES } from "./app";
 import { deriveSessionKey, makeToken, MAX_AGE_S, RENEW_BELOW_S } from "./auth";
@@ -165,6 +166,35 @@ describe("api", () => {
     expect((await req("/api/days/2026-13-40", json("PUT", { weightLb: 200 }))).status).toBe(400);
     expect((await req("/api/days/2026-11-02", json("PUT", { weightLb: "heavy" }))).status).toBe(400);
     expect((await req("/api/days/2026-11-02", json("PUT", { bogus: 1 }))).status).toBe(400);
+  });
+
+  it("refuses text with a broken character (half an emoji) with a 400 naming the field, wherever it would be stored", async () => {
+    // Postgres can't store a lone surrogate: jsonb refuses the document (it used to be an unhandled 500,
+    // on every retry) and a text column would hold U+FFFD in its place.
+    const half = "great \ud83d";
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const refused = async (res: Response, path: string, message = "Must not contain a broken character (half of an emoji)") => {
+      expect(res.status, path).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid", issues: [{ path, message }] });
+    };
+    const session = buildSession("2026-11-16", b);
+    await refused(await req("/api/sessions/2026-11-16", json("PUT", { ...session, notes: half })), "notes");
+    await refused(await req("/api/sessions/2026-11-16", json("PUT", { ...session, label: `\ude00${session.label}` })), "label");
+    await refused(
+      await req("/api/settings", json("PUT", { ...b.settings, program: { ...b.settings.program, name: half } })),
+      "program.name",
+    );
+    await refused(await req("/api/days/2026-11-16", json("PUT", { journal: half })), "journal");
+    await refused(await req("/api/days/2026-11-16", json("PUT", { micros: { [half]: 1 } })), `micros.${half}`, "Invalid key in record");
+    await refused(await req("/api/exercises", json("POST", { name: half, category: "core", measure: "seconds" })), "name");
+    const after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after).toEqual(b); // nothing was written
+    // Whole characters beyond U+FFFF are text like any other.
+    const whole = "great \ud83d\udcaa";
+    const day = await req("/api/days/2026-11-16", json("PUT", { journal: whole, micros: { "\ud83e\udd66": 1 } }));
+    expect(day.status).toBe(200);
+    expect(await day.json()).toMatchObject({ journal: whole, micros: { "\ud83e\udd66": 1 } });
+    expect((await req("/api/days/2026-11-16", json("PUT", { journal: null, micros: null }))).status).toBe(200);
   });
 
   it("records maxes, saves sessions and settings", async () => {
@@ -618,6 +648,139 @@ describe("path parameters", () => {
     };
     expect((await req("/api/sessions/2026-11-11", json("PUT", full))).status).toBe(400);
     expect((await req("/api/sessions/2026-11-10", { method: "DELETE" })).status).toBe(200);
+  });
+});
+
+/**
+ * The sync engine takes a 409 whose document is exactly what a save carries as that save's own
+ * ack — an earlier attempt landed and its answer was lost (`savedAlready`). That holds only if a
+ * document the app builds comes back from the server as it was sent: nothing added (a schema
+ * default), dropped or reshaped by validation, `normalizeMainLift` or the trip through jsonb.
+ */
+describe("a saved document comes back exactly as the app sent it", () => {
+  const put = (path: string, body: unknown, precondition: Record<string, string>) =>
+    req(path, { ...json("PUT", body), headers: precondition });
+  const tag = (res: Response) => res.headers.get("etag")!.replace(/"/g, "");
+
+  it("workouts: as built, logged, edited, finished and moved", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const date = "2026-12-07"; // a program day
+    const built = buildSession(date, b);
+    expect(built.blocks[0]!.exercises[0]!.sets.length).toBeGreaterThan(1);
+    const withMainSets = (s: Session, f: (sets: Session["blocks"][number]["exercises"][number]["sets"]) => typeof sets): Session => ({
+      ...s,
+      blocks: [
+        { ...s.blocks[0]!, exercises: [{ ...s.blocks[0]!.exercises[0]!, sets: f(s.blocks[0]!.exercises[0]!.sets) }] },
+        ...s.blocks.slice(1),
+      ],
+    });
+    const logged = withMainSets(built, (sets) =>
+      sets.map((x, i) => (i === 0 ? { ...x, done: true, reps: x.targetReps, weight: 242.5 } : x)),
+    );
+    // A set removed and one added (a load no decimal writes exactly), a superset added with a skipped exercise.
+    const resized = withMainSets(logged, (sets) => [...sets.slice(0, -1), blankSet({ targetReps: 8, targetWeight: 0.1 + 0.2 })]);
+    const edited: Session = {
+      ...resized,
+      blocks: [
+        ...resized.blocks,
+        {
+          id: "acc-1",
+          kind: "accessory",
+          exercises: [
+            { exerciseId: b.exercises.at(-1)!.id, measure: "seconds", sets: [blankSet({ targetReps: 45 })], skipped: true },
+            { exerciseId: b.exercises[1]!.id, measure: "reps", sets: [] },
+          ],
+        },
+      ],
+    };
+    const finished: Session = {
+      ...edited,
+      blocks: edited.blocks.map((x, i) => (i === 0 ? { ...x, skipped: false } : x)),
+      label: "Push \ud83d\udcaa",
+      notes: "Felt strong \ud83d\udcaa — “heavy” singles\n\tline two <b>&amp;</b> \u2028 é",
+      completedAt: new Date().toISOString(),
+    };
+    const moved = { ...buildSessionFrom("2026-12-08", date, b), notes: "done a day early" };
+
+    let precondition: Record<string, string> = { "If-None-Match": "*" };
+    for (const [name, doc] of Object.entries({ built, logged, edited, finished, moved })) {
+      const res = await put(`/api/sessions/${date}`, doc, precondition);
+      expect(res.status, name).toBe(200);
+      const rev = tag(res);
+      const op = { kind: "session", date, doc } as const;
+      // The answer…
+      expect(savedAlready(op, { current: await res.json(), rev }), `${name}: the answer`).toBe(true);
+      // …the retry of a save whose answer was lost (same document, same — now stale — precondition)…
+      const again = await put(`/api/sessions/${date}`, doc, precondition);
+      expect(again.status, name).toBe(409);
+      const conflict = (await again.json()) as { error: string; current: Session; rev: string };
+      expect(conflict).toMatchObject({ error: "conflict", rev });
+      expect(conflict.current, name).toEqual(JSON.parse(JSON.stringify(doc)));
+      expect(savedAlready(op, conflict), `${name}: the retry's 409`).toBe(true);
+      // …and the copy every device downloads.
+      const after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+      expect(savedAlready(op, { current: after.sessions.find((x) => x.date === date), rev: after.revs!.sessions[date]! }), name).toBe(true);
+      precondition = { "If-Match": `"${rev}"` };
+    }
+    // A different document is not "saved already".
+    const other = await put(`/api/sessions/${date}`, logged, { "If-None-Match": "*" });
+    expect(savedAlready({ kind: "session", date, doc: logged }, (await other.json()) as { current: Session; rev: string })).toBe(false);
+    expect((await req(`/api/sessions/${date}`, { method: "DELETE" })).status).toBe(200);
+  });
+
+  it("settings: the defaults and the edits the app makes", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const s0 = b.settings;
+    const edits: Record<string, Settings> = {
+      asDownloaded: s0,
+      targets: {
+        ...s0,
+        targets: { steps: 12_000, zone2Minutes: 37.5 },
+        schedule: { ...s0.schedule, zone2: [true, false, true, false, true, false, true] },
+      },
+      program: {
+        ...s0,
+        program: {
+          ...s0.program,
+          name: "Winter block \ud83c\udfd4",
+          cycleStartDate: "2026-11-09",
+          roundToLb: 2.5,
+          weeks: s0.program.weeks.map((w, i) => (i === 0 ? { ...w, label: "Week 1 — volume", reps: [10, 10, 8] } : w)),
+          repMaxPct: { ...s0.program.repMaxPct, "7": 0.83 },
+        },
+      },
+      goals: {
+        ...s0,
+        weightGoal: { targetLb: 185.5, pacePctPerWeek: 0.5, setOn: "2026-11-02", startLb: 192.4 },
+        strengthTargets: [...s0.strengthTargets, { id: "t-1", exerciseId: b.exercises[0]!.id, targetLb: 405, setOn: "2026-11-02" }],
+        nutrition: { ...s0.nutrition, initialTdee: 2450.5 },
+      },
+      preferences: {
+        ...s0,
+        training: { restSecondsMain: 180, restSecondsAccessory: 75, accessoryIncrementLb: 2.5 },
+        display: { highContrast: true },
+      },
+      cleared: { ...s0, weightGoal: null },
+    };
+    let rev = b.revs!.settings;
+    for (const [name, settings] of Object.entries(edits)) {
+      const precondition = { "If-Match": `"${rev}"` };
+      const res = await put("/api/settings", settings, precondition);
+      expect(res.status, name).toBe(200);
+      const next = tag(res);
+      const op = { kind: "settings", settings } as const;
+      expect(savedAlready(op, { current: await res.json(), rev: next }), `${name}: the answer`).toBe(true);
+      const again = await put("/api/settings", settings, precondition);
+      expect(again.status, name).toBe(409);
+      const conflict = (await again.json()) as { error: string; current: Settings; rev: string };
+      expect(conflict).toMatchObject({ error: "conflict", rev: next });
+      expect(conflict.current, name).toEqual(JSON.parse(JSON.stringify(settings)));
+      expect(savedAlready(op, conflict), `${name}: the retry's 409`).toBe(true);
+      const after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+      expect(savedAlready(op, { current: after.settings, rev: after.revs!.settings }), name).toBe(true);
+      rev = next;
+    }
+    expect((await put("/api/settings", s0, { "If-Match": `"${rev}"` })).status).toBe(200);
   });
 });
 

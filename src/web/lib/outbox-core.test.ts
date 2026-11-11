@@ -8,9 +8,12 @@ import {
   applyAcked,
   dependentsOfFailed,
   discardFailed,
+  BROKEN_TEXT,
   emptyOutbox,
   ensureIdempotencyKeys,
   failEntry,
+  failOrSupersede,
+  isNoopDelete,
   markSending,
   mergeOutbox,
   nextSendable,
@@ -619,5 +622,184 @@ describe("a save that went out and was never answered", () => {
     const b = markSending(a, a.entries[0]!.seq, 1000);
     expect(mergeOutbox(a, b).entries[0]!.tried).toBe(true);
     expect(mergeOutbox(b, a).entries[0]!.tried).toBe(true);
+  });
+
+  it("sending also writes the cross-window marker (which entry, since when) — for every kind of entry", () => {
+    let s = addOp(emptyOutbox(), save(delayed), null);
+    s = addOp(s, { kind: "day", date: "2026-01-01", patch: { steps: 1 } }, null);
+    const [doc, day] = s.entries;
+    expect(markSending(s, doc!.seq, 1000).inflight).toEqual({ seq: doc!.seq, at: 1000 });
+    expect(markSending(s, day!.seq, 2000).inflight).toEqual({ seq: day!.seq, at: 2000 });
+  });
+
+  it("a day or exercise patch a killed window was sending still takes later patches (only whole documents are left alone)", () => {
+    let s = addOp(emptyOutbox(), { kind: "day", date: "2026-01-01", patch: { steps: 1 } }, null);
+    s = addOp(s, { kind: "updateExercise", id: 1, patch: { name: "Hang" } }, null);
+    const [day, exercise] = s.entries;
+    // The stored marker still names the entry (the window died mid-request); nothing is in flight now.
+    s = addOp({ ...s, inflight: { seq: day!.seq, at: 1000 } }, { kind: "day", date: "2026-01-01", patch: { calories: 2 } }, null);
+    s = addOp({ ...s, inflight: { seq: exercise!.seq, at: 1000 } }, { kind: "updateExercise", id: 1, patch: { category: "core" } }, null);
+    expect(s.entries.map((e) => e.op)).toEqual([
+      { kind: "day", date: "2026-01-01", patch: { steps: 1, calories: 2 } },
+      { kind: "updateExercise", id: 1, patch: { name: "Hang", category: "core" } },
+    ]);
+  });
+
+  it("a delete re-sent at the server's new revision is a new request: later edits replace it again", () => {
+    const D = "2026-01-01";
+    const doc = session(D, 1, "a");
+    let s = addOp(emptyOutbox(), { kind: "session", date: D, doc: null, baseRev: "r1", base: doc }, null);
+    s = { ...markSending(s, s.entries[0]!.seq, 1000), inflight: null };
+    expect(s.entries[0]!.tried).toBe(true);
+    // 409: the same document under a newer revision (saved again unchanged elsewhere) — the delete stands.
+    const r = resolveConflict(s, s.entries[0]!.seq, { current: doc, rev: "r2" }, true);
+    expect(r.kind).toBe("retry");
+    s = (r as { state: OutboxState }).state;
+    expect(s.entries[0]!.tried).toBeUndefined(); // that request wasn't applied
+    expect(s.entries[0]!.op).toEqual({ kind: "session", date: D, doc: null, baseRev: "r2", base: doc });
+    // "Undo delete": coalesced into it (nothing of the delete is on the server), on its base.
+    s = addOp(s, { kind: "session", date: D, doc, baseRev: "r2", base: doc }, null);
+    expect(s.entries.map((e) => e.op)).toEqual([{ kind: "session", date: D, doc, baseRev: "r2", base: doc }]);
+  });
+});
+
+/**
+ * The screen shows an unsettled save's document whatever the device's server copy says. So an
+ * edit queued behind one (it can't be merged into it) is based on what that save is based on —
+ * not on a server copy refreshed since, whose revision would let the edit through over changes
+ * from another device that its screen never showed.
+ */
+describe("an edit queued behind a save that may have reached the server", () => {
+  const D = "2026-01-01";
+  const before = session(D, 1, "as first downloaded"); // the server's r1
+  const mine = session(D, 1, "this device's edit");
+  const theirs = session(D, 2, "another device's save"); // the server's r2, in this device's refreshed copy
+  const op = (doc: Session | null, baseRev: string | null, base: Session | null) =>
+    ({ kind: "session", date: D, doc, baseRev, base }) as const;
+  /** `first` went out and was never answered; then the device's server copy was refreshed. */
+  const tried = (first: ReturnType<typeof op>): OutboxState => {
+    const s = addOp(emptyOutbox(), first, null);
+    return { ...markSending(s, s.entries[0]!.seq, 1000), inflight: null };
+  };
+  const send = (s: OutboxState) => request(nextSendable(s.entries)!.op);
+  const stateOf = (r: unknown) => (r as { state: OutboxState }).state;
+
+  it("a delete: checked against the revision its screen was built on, so the other device's workout is kept", () => {
+    let s = tried(op(mine, "r1", before));
+    s = addOp(s, op(null, "r2", theirs), null); // as `enqueue` bases it: on the refreshed copy
+    expect(s.entries[1]!.op).toEqual(op(null, "r1", before));
+    // The save's retry is answered 409 and dropped for the delete…
+    const r = resolveConflict(s, s.entries[0]!.seq, { current: theirs, rev: "r2" }, true);
+    expect(r.kind).toBe("superseded");
+    s = stateOf(r);
+    // …which doesn't pass (at r2 it would have, deleting what the other device logged)…
+    expect(send(s)).toMatchObject({ method: "DELETE", headers: { "If-Match": '"r1"' } });
+    // …and is refused: the other device's copy isn't what this device deleted.
+    expect(resolveConflict(s, s.entries[0]!.seq, { current: theirs, rev: "r2" }, true).kind).toBe("keptServer");
+  });
+
+  it("behind the save in flight alike", () => {
+    let s = addOp(emptyOutbox(), op(mine, "r1", before), null);
+    const seq = s.entries[0]!.seq;
+    s = addOp(markSending(s, seq, 1000), op(null, "r2", theirs), seq);
+    expect(s.entries.map((e) => e.op)).toEqual([op(mine, "r1", before), op(null, "r1", before)]);
+  });
+
+  it("a workout rebuilt behind a delete that never arrived: merged with the other device's, not saved over it", () => {
+    let s = tried(op(null, "r1", before));
+    const rebuilt = session(D, 3, "rebuilt here");
+    s = addOp(s, op(rebuilt, "r2", theirs), null);
+    expect(s.entries[1]!.op).toEqual(op(rebuilt, "r1", before));
+    // The delete's retry: 409, the other device's copy wins over it.
+    const r = resolveConflict(s, s.entries[0]!.seq, { current: theirs, rev: "r2" }, true);
+    expect(r.kind).toBe("keptServer");
+    // The rebuild goes out checked against r1 — a 409 and a merge — not against r2.
+    expect(send(stateOf(r))).toMatchObject({ method: "PUT", headers: { "If-Match": '"r1"' } });
+  });
+
+  it("the save refused (4xx) and dropped for the edit behind it: that edit is still checked against the old revision", () => {
+    let s = tried(op(mine, "r1", before));
+    const next = session(D, 1, "this device's next edit");
+    s = addOp(s, op(next, "r2", theirs), null);
+    const r = failOrSupersede(s, s.entries[0]!.seq, "Forbidden");
+    expect(r.supersededBy).toBe(s.entries[1]!.seq);
+    expect(send(r.state)).toMatchObject({ method: "PUT", body: next, headers: { "If-Match": '"r1"' } });
+  });
+
+  it("a draft whose create never arrived, deleted: nothing is sent, so another device's workout that day stays", () => {
+    let s = tried(op(mine, null, null));
+    s = addOp(s, op(null, "r2", theirs), null); // the refreshed copy holds the other device's workout
+    expect(s.entries[1]!.op).toEqual(op(null, null, null));
+    // The create's retry: 409 (a workout exists), dropped for the delete…
+    const r = resolveConflict(s, s.entries[0]!.seq, { current: theirs, rev: "r2" }, true);
+    expect(r.kind).toBe("superseded");
+    // …of something the server never had from this device: no request (`replay` drops it).
+    const left = stateOf(r).entries;
+    expect(left).toHaveLength(1);
+    expect(isNoopDelete(left[0]!.op)).toBe(true);
+  });
+
+  it("settings alike", () => {
+    const S = (n: number) => ({ onboarded: true, targets: { steps: n } }) as unknown as Settings;
+    let s = addOp(emptyOutbox(), { kind: "settings", settings: S(2), baseRev: "s1", base: S(1) }, null);
+    s = { ...markSending(s, s.entries[0]!.seq, 1000), inflight: null };
+    s = addOp(s, { kind: "settings", settings: S(3), baseRev: "s2", base: S(9) }, null);
+    expect(s.entries[1]!.op).toEqual({ kind: "settings", settings: S(3), baseRev: "s1", base: S(1) });
+  });
+
+  it("when the save is answered, the edit behind it follows on what the server saved (as before)", () => {
+    let s = tried(op(mine, "r1", before));
+    s = addOp(s, op(null, "r2", theirs), null);
+    s = ackEntry(s, s.entries[0]!.seq, mine, { srev: "r3" });
+    expect(send(s)).toMatchObject({ method: "DELETE", headers: { "If-Match": '"r3"' } });
+  });
+
+  it("a save from a copy without revisions (no base recorded) leaves the edit behind it its own", () => {
+    let s = addOp(emptyOutbox(), { kind: "session", date: D, doc: mine }, null);
+    s = { ...markSending(s, s.entries[0]!.seq, 1000), inflight: null };
+    s = addOp(s, op(null, "r2", theirs), null);
+    expect(s.entries[1]!.op).toEqual(op(null, "r2", theirs));
+  });
+
+  it("the price: a save that did land, then refused on its retry — the delete behind it is refused too, and the workout kept", () => {
+    let s = tried(op(mine, "r1", before));
+    s = addOp(s, op(null, "r2", mine), null); // the refreshed copy is this device's own save, at r2
+    const r = failOrSupersede(s, s.entries[0]!.seq, "Forbidden"); // a proxy's 403 on the retry
+    expect(send(r.state)).toMatchObject({ method: "DELETE", headers: { "If-Match": '"r1"' } });
+    // 409 with this device's own save — not what the delete is based on: kept, with the notice.
+    expect(resolveConflict(r.state, r.state.entries[0]!.seq, { current: mine, rev: "r2" }, true).kind).toBe("keptServer");
+  });
+});
+
+describe("text the database can't store", () => {
+  const D = "2026-01-01";
+  const half = "great \ud83d"; // an emoji cut in half
+  const whole = "great \ud83d\ude00";
+  const doc = (over: Partial<Session>): Session => ({ ...session(D, 1), label: "Push", ...over });
+
+  it("is refused wherever it would be sent: notes, names, labels, journal, object keys", () => {
+    const S = { onboarded: true, program: { name: "Mine", days: [{ label: half }] } } as unknown as Settings;
+    for (const op of [
+      { kind: "session", date: D, doc: doc({ notes: half }) },
+      { kind: "session", date: D, doc: doc({ label: "\ude00 Push" }) },
+      { kind: "settings", settings: S },
+      { kind: "day", date: D, patch: { journal: half } },
+      { kind: "day", date: D, patch: { micros: { [half]: 1 } } },
+      { kind: "updateExercise", id: 1, patch: { name: half } },
+      { kind: "createExercise", tempId: -1, name: half, category: "accessory", measure: "reps", tracksMax: false },
+      { kind: "addMax", tempId: -1, exerciseId: 1, date: D, valueLb: 100, source: "manual", note: half, createdAt: "" },
+    ] as const)
+      expect(validateOp(op as Parameters<typeof validateOp>[0]), op.kind).toBe(BROKEN_TEXT);
+  });
+
+  it("whole emoji and other characters beyond U+FFFF are fine", () => {
+    expect(validateOp({ kind: "session", date: D, doc: doc({ notes: whole, label: "\ud83d\udcaa Push" }) })).toBeNull();
+    expect(validateOp({ kind: "day", date: D, patch: { journal: whole, micros: { "\ud83e\udd66": 1 } } })).toBeNull();
+  });
+
+  it("doesn't look at what isn't sent (the merge ancestor), deletes, or bookkeeping", () => {
+    expect(validateOp({ kind: "session", date: D, doc: doc({ notes: "ok" }), baseRev: "r1", base: doc({ notes: half }) })).toBeNull();
+    expect(validateOp({ kind: "session", date: D, doc: null, baseRev: "r1", base: doc({ notes: half }) })).toBeNull();
+    expect(validateOp({ kind: "seen", keys: [`bench-${half}-${D}`] })).toBeNull();
   });
 });
