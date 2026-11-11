@@ -94,8 +94,8 @@ tile.
   labels, the weekly means, and the chart's "from … to" summary. It joins all of them once the day is done.
 - The step target is a neutral dashed reference line, named in the legend row ("Target 15,000") rather than on the
   line, where it would sit on the data.
-- The chart follows the same 30 / 90 / All range toggle as the bodyweight and energy charts; the Steps section names
-  the range it shows ("Last 30 days", "All time"), since the toggle is out of sight up on Bodyweight.
+- The chart follows the same 30 / 90 / All range as the bodyweight and energy charts: one control, at the top of each
+  chart view (§4.7).
 - It needs counts on at least two complete days.
 
 ### 3.3 Recovery metrics
@@ -217,6 +217,41 @@ Smoothed TDEE, actual vs target rate, adherence (each day's calories against the
 over ~30 days (§3.3), lifts / metcon / Zone 2 done against planned (Zone 2 with the week's total machine kcal once
 logged, §3.5), and next week's recommended calories & macros. The Zone 2 kcal total covers the same days as the count's
 "done": planned days with Zone 2 done; a reading on a day not done, or on an unplanned day, isn't in it.
+
+The card opens with a one-line **verdict**: the week's trend change against the plan (`weeklyRate` / `weeklyVerdict`,
+`src/shared/insights.ts` — the same rule as the rate-of-change insights in §7, so the two never disagree). Said in
+words with an icon, never by colour alone:
+
+| Verdict             | When                                                                                | Tone |
+| ------------------- | ----------------------------------------------------------------------------------- | ---- |
+| Not enough data yet | fewer than 10 logged days, or no trend weight a week apart                          | info |
+| Maintaining         | the plan is to hold (no goal, at the goal, past it); warns only past a safety limit | info |
+| On plan             | ≥ 60 % of the planned change, the planned way, within the safety limit              | good |
+| Slower than plan    | the planned way (or flat: a change that prints as 0.0 lb), under 60 %               | info |
+| Faster than plan    | the planned way, past the safety limit for that direction (§4.4)                    | warn |
+| Wrong direction     | against the plan                                                                    | warn |
+
+e.g. "On plan · −1.3 lb this week against −1.5"; past a limit it adds ", past your 1% weekly limit". The 10 days and
+the 60 % are insight constants (`RATE_MIN_LOGGED_DAYS`, `ON_PLAN_MIN_SHARE`), not training rules. Under the verdict the
+tiles are grouped: Body (TDEE, trend weight), Fuel (intake, protein), Activity (steps; lifts / metcon / Zone 2 counts),
+Recovery (sleep · HRV, resting HR, VO2 max).
+
+### 4.7 Progress views
+
+Progress is five views behind one segmented control that stays in reach while a view scrolls: **Week** (the check-in,
+§4.6, and next week's targets), **Body** (bodyweight: scale dots, trend, goal line), **Fuel** (energy balance and the
+7-day intake strip, §3.1), **Activity** (steps, §3.2) and **Strength** (tracked maxes, §6.1, with each lift's strength
+targets as read-only progress; targets are edited on Goals).
+
+- The view is part of the URL (`/progress?view=body`; Week is `/progress`), so a reload, a link and Back land on it.
+  Switching views replaces the history entry: Back leaves Progress instead of replaying taps.
+- Body, Fuel and Activity share one chart range (30 / 90 / All), shown at the top of each.
+- **Energy balance ends yesterday.** Today's intake is still being logged: once the day has a weight and its first
+  meal, the engine's value for today (§4.1) averages in the calories _so far_, which would drag the intake line — and
+  the TDEE derived from it — down every morning. So both lines, the "Latest" readout and the table stop at the last
+  complete day (`energyBalanceSeries`), like the steps trend (§3.2) and the day's targets. The engine itself is
+  unchanged; the bodyweight chart includes today (a weigh-in is a finished reading), and the intake strip shows today
+  dimmed, as "so far".
 
 ## 5. Goals
 

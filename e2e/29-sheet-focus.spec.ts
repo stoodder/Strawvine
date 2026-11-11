@@ -193,7 +193,7 @@ test("Add exercise: the search field stays on screen through the open and with a
 
 test("a field low in a sheet (the max form) stays visible above the keyboard when tapped", async ({ page }) => {
   await onboardedOn(page, MONDAY);
-  await page.goto("/progress");
+  await page.goto("/progress?view=strength");
   await page
     .getByRole("button", { name: /^Bench press/ })
     .first()

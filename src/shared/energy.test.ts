@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { addDays } from "./dates";
-import { computeEnergySeries, effectiveTdee, firstTdeeDate, weightedAverage } from "./energy";
+import { computeEnergySeries, effectiveTdee, energyBalanceSeries, firstTdeeDate, weightedAverage } from "./energy";
 
 const day = (date: string, weightLb: number | null, calories: number | null) => ({ date, weightLb, calories });
 
@@ -99,6 +99,69 @@ describe("firstTdeeDate", () => {
     }
     expect(firstTdeeDate(["2026-11-02", "2026-11-09"])).toBe("2026-11-09");
     expect(firstTdeeDate(["2026-11-02", "2026-11-10"])).toBeNull();
+  });
+});
+
+describe("energyBalanceSeries", () => {
+  const first = "2026-10-01";
+  const today = addDays(first, 40);
+  /** 40 complete days of a slow cut, then today as given (null: nothing logged yet). */
+  const history = (todayLog: { weightLb: number | null; calories: number | null } | null) => [
+    ...Array.from({ length: 40 }, (_, i) => day(addDays(first, i), 200 - i * 0.1, 2500 + (i % 3) * 100)),
+    ...(todayLog ? [day(today, todayLog.weightLb, todayLog.calories)] : []),
+  ];
+  const balance = (days: ReturnType<typeof history>, from = addDays(today, -29)) =>
+    energyBalanceSeries(computeEnergySeries(days, from, today), today);
+
+  it("ends at yesterday: today's partial intake is in neither line", () => {
+    // After the weigh-in and breakfast, the raw engine's value for today dips: 400 kcal "so far" is in the window.
+    const morning = history({ weightLb: 196, calories: 400 });
+    const raw = computeEnergySeries(morning, addDays(today, -29), today);
+    expect(raw.at(-1)!.date).toBe(today);
+    expect(raw.at(-1)!.avgCalories!).toBeLessThan(raw.at(-2)!.avgCalories! - 300);
+    expect(raw.at(-1)!.avgTdee!).toBeLessThan(raw.at(-2)!.avgTdee! - 50);
+
+    const b = balance(morning);
+    expect(b).toHaveLength(29);
+    expect(b.at(-1)!.date).toBe(addDays(today, -1));
+    expect(b.every((d) => d.date < today)).toBe(true);
+    // Yesterday is a complete day: it is there, with the engine's own values.
+    expect(b.at(-1)).toEqual({ date: addDays(today, -1), intake: raw.at(-2)!.avgCalories, tdee: raw.at(-2)!.avgTdee });
+    expect(b.at(-1)!.intake!).toBeGreaterThan(2500);
+  });
+
+  it("doesn't move as today is logged: nothing, a weigh-in only, breakfast, the whole day", () => {
+    const empty = balance(history(null));
+    expect(empty.at(-1)!.date).toBe(addDays(today, -1));
+    for (const log of [
+      { weightLb: 196, calories: null },
+      { weightLb: null, calories: 400 },
+      { weightLb: 196, calories: 400 },
+      { weightLb: 196, calories: 2600 },
+    ])
+      expect(balance(history(log))).toEqual(empty);
+  });
+
+  it("is the same days whatever the range: a shorter range is the tail of a longer one", () => {
+    const days = history({ weightLb: 196, calories: 400 });
+    const all = balance(days, first);
+    const month = balance(days);
+    const week = balance(days, addDays(today, -6));
+    expect(all).toHaveLength(40);
+    expect(all[0]!.date).toBe(first);
+    expect(month).toEqual(all.slice(-29));
+    expect(week).toEqual(all.slice(-6));
+    expect(week.map((d) => d.date)).toEqual(Array.from({ length: 6 }, (_, i) => addDays(today, -6 + i)));
+  });
+
+  it("keeps a day without data as a gap, and every day when there is no 'today'", () => {
+    const series = computeEnergySeries([day(first, 200, 3000)], first, addDays(first, 9));
+    const b = energyBalanceSeries(series, null);
+    expect(b).toHaveLength(10);
+    expect(b[0]).toEqual({ date: first, intake: 3000, tdee: null });
+    // Past the 7-day window nothing is logged: no value, not a zero.
+    expect(b[9]).toEqual({ date: addDays(first, 9), intake: null, tdee: null });
+    expect(energyBalanceSeries(series, first)).toEqual([]);
   });
 });
 

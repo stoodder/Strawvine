@@ -20,6 +20,10 @@ for (const width of [195, 320]) {
       ["Today with Nutrition open", "/", /Nutrition/],
       ["Train", "/train", null],
       ["Progress", "/progress", null],
+      ["Progress: Body", "/progress?view=body", null],
+      ["Progress: Fuel", "/progress?view=fuel", null],
+      ["Progress: Activity", "/progress?view=activity", null],
+      ["Progress: Strength", "/progress?view=strength", null],
       ["Goals", "/goals", null],
       ["Settings", "/settings", null],
     ] as const)

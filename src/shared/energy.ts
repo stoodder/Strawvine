@@ -135,6 +135,34 @@ export function computeEnergySeries(
   return out;
 }
 
+export interface EnergyBalanceDay {
+  date: ISODate;
+  /** Weighted 7-day average of calories eaten, ending this day. */
+  intake: number | null;
+  /** Smoothed TDEE as of this day. */
+  tdee: number | null;
+}
+
+/**
+ * The energy-balance lines (intake average against smoothed TDEE) for the complete days of
+ * `series`. `today` is still being eaten: once it has a weight and its first meal, its slot holds
+ * the calories logged *so far*, which drags the intake average — and the TDEE derived from it —
+ * down until the day is finished. So the lines end the day before, like the steps trend
+ * (`computeStepsSeries`) and the day's targets (`targetsFor`); pass `null` to treat every day as
+ * complete. Nothing is recomputed: a complete day's values never read a later day.
+ */
+export function energyBalanceSeries(
+  series: ReadonlyArray<Pick<EnergyDay, "date" | "avgCalories" | "avgTdee">>,
+  today: ISODate | null,
+): EnergyBalanceDay[] {
+  const out: EnergyBalanceDay[] = [];
+  for (const d of series) {
+    if (today !== null && d.date >= today) continue;
+    out.push({ date: d.date, intake: d.avgCalories, tdee: d.avgTdee });
+  }
+  return out;
+}
+
 /**
  * The first logged date with a daily TDEE. TDEE(d) needs yesterday's weight average (§4.2),
  * whose 7-day window is d−7…d−1, so it exists from the first logged day with another logged

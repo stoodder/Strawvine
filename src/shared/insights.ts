@@ -7,7 +7,7 @@ import { computeEnergySeries, effectiveTdee, type EffectiveTdee, type EnergyDay 
 import { type AppData } from "./gamify";
 import { project, recommend, type Projection, type Recommendation } from "./nutrition";
 import { scheduledProgramDay } from "./program";
-import type { DayLog } from "./schemas";
+import type { DayLog, Settings } from "./schemas";
 import { recoveryInsight, vo2MaxTrend, type Vo2Trend } from "./recovery";
 import { planDateOf, sessionDoneEarly } from "./session";
 
@@ -43,6 +43,8 @@ export interface WeeklyCheckin {
   trendWeight: number | null;
   weightChangeLb: number | null;
   targetRateLbPerWeek: number | null;
+  /** The week's trend change judged against the plan and the safety limits (`weeklyRate`). */
+  rate: WeeklyRate;
   daysLogged: number;
   avgCalories: number | null;
   avgProtein: number | null;
@@ -132,6 +134,13 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     trendWeight: end?.avgWeight ?? null,
     weightChangeLb: end?.avgWeight != null && weekAgo?.avgWeight != null ? end.avgWeight - weekAgo.avgWeight : null,
     targetRateLbPerWeek: next?.rateLbPerWeek ?? null,
+    rate: weeklyRate({
+      trendWeight: end?.avgWeight,
+      weekAgoTrendWeight: weekAgo?.avgWeight,
+      loggedCount: end?.loggedCount ?? 0,
+      plan: next,
+      limits: settings.limits,
+    }),
     daysLogged: dates.filter((d) => {
       const x = byDate.get(d);
       return x && x.weightLb !== null && x.calories !== null;
@@ -162,6 +171,131 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     next,
     projection: end?.avgWeight != null ? project(settings, today, end.avgWeight, weekAgo?.avgWeight ?? null) : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The week's rate of change, judged: one rule for the check-in's verdict and the rate insights
+// ---------------------------------------------------------------------------
+
+/** Logged days needed before a week's trend change is judged (the trend is too noisy before). */
+export const RATE_MIN_LOGGED_DAYS = 10;
+/** A week counts as on plan from this share of the planned change, in the planned direction. */
+export const ON_PLAN_MIN_SHARE = 0.6;
+
+/**
+ * - `no-data`: no trend weight a week apart yet, or fewer than `RATE_MIN_LOGGED_DAYS` logged days;
+ * - `maintaining`: the plan is to hold (no goal, at the goal, or past it);
+ * - `faster`: moving the planned way, past the safety limit for that direction;
+ * - `wrong-way`: moving against the plan (by an amount that shows at one decimal);
+ * - `on-plan`: at least `ON_PLAN_MIN_SHARE` of the planned change, the planned way, within the limit;
+ * - `slower`: the planned way (or flat), but less than that.
+ */
+export type RateKind = "no-data" | "maintaining" | "on-plan" | "faster" | "slower" | "wrong-way";
+
+export interface WeeklyRate {
+  kind: RateKind;
+  /** Trend weight change over the week (null without a trend a week apart). */
+  changeLb: number | null;
+  /** The same change as % of the trend weight a week ago. */
+  pctPerWeek: number | null;
+  /** Signed lb/week the plan asks for (0 when maintaining). */
+  planLb: number;
+  /** The change is past a safety limit (Settings → limits), whatever the plan says. */
+  overLimit: { direction: "loss" | "gain"; limitPct: number } | null;
+  /** Logged days through the week's last day. */
+  loggedCount: number;
+}
+
+/**
+ * Judges a week's trend change against the plan (`recommend`'s rate) and the safety limits. The
+ * only place these thresholds live: `insights` (loss-fast / gain-fast / on-rate) and the weekly
+ * check-in's verdict (`weeklyVerdict`) both read it.
+ */
+export function weeklyRate(input: {
+  /** Trend weight on the week's last day, and seven days before it. */
+  trendWeight: number | null | undefined;
+  weekAgoTrendWeight: number | null | undefined;
+  loggedCount: number;
+  plan: Pick<Recommendation, "direction" | "rateLbPerWeek"> | null;
+  limits: Settings["limits"];
+}): WeeklyRate {
+  const { trendWeight, weekAgoTrendWeight, loggedCount, plan, limits } = input;
+  const planLb = plan && plan.direction !== "maintain" ? plan.rateLbPerWeek : 0;
+  if (trendWeight == null || weekAgoTrendWeight == null)
+    return { kind: "no-data", changeLb: null, pctPerWeek: null, planLb, overLimit: null, loggedCount };
+  const changeLb = trendWeight - weekAgoTrendWeight;
+  const pctPerWeek = (changeLb / weekAgoTrendWeight) * 100;
+  if (loggedCount < RATE_MIN_LOGGED_DAYS) return { kind: "no-data", changeLb, pctPerWeek, planLb, overLimit: null, loggedCount };
+
+  const overLimit: WeeklyRate["overLimit"] =
+    pctPerWeek < -limits.maxLossPctPerWeek
+      ? { direction: "loss", limitPct: limits.maxLossPctPerWeek }
+      : pctPerWeek > limits.maxGainPctPerWeek
+        ? { direction: "gain", limitPct: limits.maxGainPctPerWeek }
+        : null;
+  // "Against the plan" is read at the precision the change is shown in, so a week that prints
+  // as 0.0 lb is slow, never the wrong direction.
+  const shown = Math.round(changeLb * 10) / 10;
+  let kind: RateKind;
+  if (planLb === 0) kind = "maintaining";
+  else if (overLimit && (overLimit.direction === "loss") === planLb < 0) kind = "faster";
+  else if (shown !== 0 && Math.sign(shown) !== Math.sign(planLb)) kind = "wrong-way";
+  else if (Math.sign(changeLb) === Math.sign(planLb) && Math.abs(changeLb) >= Math.abs(planLb) * ON_PLAN_MIN_SHARE) kind = "on-plan";
+  else kind = "slower";
+  return { kind, changeLb, pctPerWeek, planLb, overLimit, loggedCount };
+}
+
+export interface WeeklyVerdict {
+  kind: RateKind;
+  /** good: on plan · warn: past a safety limit, or against the plan · info: everything else. */
+  tone: Insight["tone"];
+  /** "On plan" */
+  title: string;
+  /** "−1.3 lb this week against −1.5" */
+  detail: string;
+  /** The whole line: "On plan · −1.3 lb this week against −1.5". */
+  text: string;
+}
+
+const VERDICT_TITLE: Record<RateKind, string> = {
+  "no-data": "Not enough data yet",
+  maintaining: "Maintaining",
+  "on-plan": "On plan",
+  faster: "Faster than plan",
+  slower: "Slower than plan",
+  "wrong-way": "Wrong direction",
+};
+
+/** "+1.3" / "−1.3" / "0.0": one decimal, with a real minus sign. */
+function signedLb(n: number): string {
+  const s = Math.abs(n).toFixed(1);
+  return s === "0.0" ? s : n > 0 ? `+${s}` : `−${s}`;
+}
+
+/**
+ * The weekly check-in's headline: the week's trend change against the plan, in one line. It only
+ * words `checkin.rate` (`weeklyRate`) — it has no thresholds of its own.
+ */
+export function weeklyVerdict(checkin: Pick<WeeklyCheckin, "rate">): WeeklyVerdict {
+  const { kind, changeLb, planLb, overLimit, loggedCount } = checkin.rate;
+  const title = VERDICT_TITLE[kind];
+  let tone: Insight["tone"] = "info";
+  let detail: string;
+  if (kind === "no-data" || changeLb === null) {
+    detail =
+      loggedCount < RATE_MIN_LOGGED_DAYS
+        ? `the trend is judged after ${RATE_MIN_LOGGED_DAYS} logged days (${loggedCount} so far)`
+        : "it takes trend weights a week apart";
+  } else {
+    const limit = overLimit ? `, past your ${overLimit.limitPct}% weekly limit` : "";
+    detail =
+      kind === "maintaining"
+        ? `trend ${signedLb(changeLb)} lb this week${limit}`
+        : `${signedLb(changeLb)} lb this week against ${signedLb(planLb)}${limit}`;
+    if (overLimit || kind === "wrong-way") tone = "warn";
+    else if (kind === "on-plan") tone = "good";
+  }
+  return { kind, tone, title, detail, text: `${title} · ${detail}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -196,31 +330,31 @@ export function insights(data: AppData, series: ReadonlyArray<EnergyDay>, today:
       out.push({ key: "protein-good", tone: "good", text: "Protein target hit every logged day this week." });
   }
 
-  // Rate of change safety vs limits.
+  // Rate of change: past a safety limit, or on plan — the judgement the check-in's verdict words (`weeklyRate`).
   const end = series.find((d) => d.date === addDays(today, -1));
   const weekAgo = series.find((d) => d.date === addDays(today, -8));
-  if (end?.avgWeight != null && weekAgo?.avgWeight != null && end.loggedCount >= 10) {
-    const change = end.avgWeight - weekAgo.avgWeight;
-    const pct = (change / weekAgo.avgWeight) * 100;
-    const { maxLossPctPerWeek, maxGainPctPerWeek } = data.settings.limits;
-    if (pct < -maxLossPctPerWeek)
+  const rate = weeklyRate({
+    trendWeight: end?.avgWeight,
+    weekAgoTrendWeight: weekAgo?.avgWeight,
+    loggedCount: end?.loggedCount ?? 0,
+    plan: rec,
+    limits: data.settings.limits,
+  });
+  if (rate.kind !== "no-data" && rate.changeLb !== null && rate.pctPerWeek !== null) {
+    const { changeLb: change, pctPerWeek: pct, overLimit } = rate;
+    if (overLimit?.direction === "loss")
       out.push({
         key: "loss-fast",
         tone: "warn",
-        text: `Trend is dropping ${Math.abs(pct).toFixed(1)}%/week — faster than your ${maxLossPctPerWeek}% limit. Consider eating closer to target.`,
+        text: `Trend is dropping ${Math.abs(pct).toFixed(1)}%/week — faster than your ${overLimit.limitPct}% limit. Consider eating closer to target.`,
       });
-    else if (pct > maxGainPctPerWeek)
+    else if (overLimit)
       out.push({
         key: "gain-fast",
         tone: "warn",
-        text: `Trend is climbing ${pct.toFixed(1)}%/week — above your ${maxGainPctPerWeek}% limit.`,
+        text: `Trend is climbing ${pct.toFixed(1)}%/week — above your ${overLimit.limitPct}% limit.`,
       });
-    else if (
-      rec &&
-      rec.direction !== "maintain" &&
-      Math.sign(change) === Math.sign(rec.rateLbPerWeek) &&
-      Math.abs(change) >= Math.abs(rec.rateLbPerWeek) * 0.6
-    )
+    else if (rate.kind === "on-plan")
       out.push({
         key: "on-rate",
         tone: "good",
