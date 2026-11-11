@@ -25,7 +25,7 @@ import { Signals } from "../components/today/Signals";
 import { fmt, signed } from "../lib/format";
 import { success } from "../lib/haptics";
 import { useData, usePendingDates, useSaveDay } from "../lib/store";
-import { useHeldWhileTyping } from "../components/useHeldWhileTyping";
+import { useHeldWhile, useTyping } from "../components/useHeldWhileTyping";
 import { useTitle } from "../components/useTitle";
 
 /** Shown only where the header's text column has room for the long form (about 168 px at the default text size). */
@@ -106,27 +106,29 @@ export function TodayScreen() {
     today,
   };
 
-  // What the app makes of the day — signals, targets and trend, calibration, the checklist rows' summaries —
-  // holds still while a field is being typed in, and catches up when no field has focus (useHeldWhileTyping):
-  // a value saved as its field is left for the next one must not move that next field. What is saved is as
-  // live as ever, and so is what was eaten against the target (it moves nothing), the ring and the dots.
-  const still = useHeldWhileTyping(
+  // A value saved as its field is left for the next one must not move that next field. So while a field is
+  // being typed in (useTyping), what could make the page above it taller or shorter holds still, and catches up
+  // when no field has focus: Signals (the text of a signal decides how many lines it takes), the Fuel frame —
+  // target, TDEE and trend, calibration (whether the block is there at all; its lines re-wrap with their text;
+  // and "N left" must be left of the target shown) — and, in the checklist, whether a row has its note line or
+  // the steps bar. Everything else says the day as it is: what was eaten, the ring, the rows' text and dots.
+  const typing = useTyping();
+  const still = useHeldWhile(
     {
       insights: model.insights,
       targets,
       energy: model.series.find((d) => d.date === date) ?? null,
       prevEnergy: model.series.find((d) => d.date === addDays(date, -1)) ?? null,
-      items,
       day,
-      lift,
     },
+    typing,
     date,
   );
   const { energy, prevEnergy } = still;
   const rec = still.targets.recommendation;
   const loggedCount = energy?.loggedCount ?? 0;
   const calibrating = loggedCount < CALIBRATION_DAYS;
-  // A day only counts once it has both a weight and calories; say which half is missing.
+  // A day only counts once it has both a weight and calories; say which half is missing (of the day the count is of).
   const missing =
     still.day.weightLb !== null && still.day.calories === null
       ? "calories"
@@ -351,8 +353,7 @@ export function TodayScreen() {
           stepTarget={data.settings.targets.steps}
           zone2Minutes={data.settings.targets.zone2Minutes}
           lift={lift}
-          // The rows' summaries (and the steps bar) are of the day as held; the dots and the editors are live.
-          shown={{ items: still.items, day: still.day, lift: still.lift }}
+          holding={typing}
           saved={saved}
         />
         {upcoming && <NextSession next={upcoming} today={today} />}

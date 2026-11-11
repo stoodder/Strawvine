@@ -1411,3 +1411,68 @@ describe("old Settings anchors", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Train");
   });
 });
+
+describe("A number typed into a setting and not yet committed", () => {
+  const hide = (state: "hidden" | "visible") => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+    act(() => void document.dispatchEvent(new Event("visibilitychange")));
+  };
+  afterEach(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  });
+
+  it("Settings: is saved when the app is hidden — one save, and none more when the field is then left", async () => {
+    const user = userEvent.setup();
+    show("/settings");
+    const steps = screen.getByRole("textbox", { name: "Steps" });
+    await user.clear(steps);
+    await user.type(steps, "12000");
+    expect(store.saved).toHaveLength(0);
+    hide("hidden");
+    expect(store.saved).toHaveLength(1);
+    expect(lastSaved()).toEqual({ ...base(), targets: { ...base().targets, steps: 12_000 } });
+    hide("visible");
+    await user.tab();
+    expect(store.saved).toHaveLength(1);
+  });
+
+  it("Settings: is saved when the screen is left with the field still focused (no blur reaches a removed field)", async () => {
+    const user = userEvent.setup();
+    show("/settings");
+    const steps = screen.getByRole("textbox", { name: "Steps" });
+    await user.clear(steps);
+    await user.type(steps, "12000");
+    // A tap that takes no focus from the field, on the link to Program.
+    act(() => document.querySelector<HTMLElement>("[data-program-link]")!.click());
+    expect(where()).toBe("/program");
+    expect(store.saved).toHaveLength(1);
+    expect(lastSaved().targets.steps).toBe(12_000);
+  });
+
+  it("Settings: a number the setting wouldn't take is not saved for the app being hidden, nor an emptied field", async () => {
+    const user = userEvent.setup();
+    show("/settings");
+    const steps = screen.getByRole("textbox", { name: "Steps" });
+    await user.clear(steps);
+    hide("hidden");
+    hide("visible");
+    await user.type(steps, "999999");
+    hide("hidden");
+    expect(store.saved).toHaveLength(0);
+    expect(store.data.settings.targets.steps).toBe(base().targets.steps);
+  });
+
+  it("Program: a rule typed and not yet committed is saved when the app is hidden, once", async () => {
+    const user = userEvent.setup();
+    show();
+    const field = screen.getByRole("textbox", { name: "Working weight" });
+    await user.clear(field);
+    await user.type(field, "85");
+    hide("hidden");
+    expect(store.saved).toHaveLength(1);
+    expect(lastSaved().program.intensity).toBe(0.85);
+    hide("visible");
+    await user.tab();
+    expect(store.saved).toHaveLength(1);
+  });
+});

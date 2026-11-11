@@ -4,7 +4,7 @@
  * without it — what Fuel says is left / over / eaten (§3.1), Signals under the header, and the
  * header's place in the program.
  */
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import { addDays, dateRange } from "../../shared/dates";
@@ -298,6 +298,118 @@ describe("Today's Fuel: what's left", () => {
     expect(fuelSection.querySelector("[data-fuel-eaten]")).toBeNull();
     expect(fuelSection.textContent).toMatch(/\+[\d,]+ kcal over/);
     expect(fuelSection.textContent).not.toContain("left");
+  });
+
+  it("a past day keeps the over note's line when it isn't over: editing its calories moves nothing under the bar", () => {
+    const yesterday = addDays(TODAY, -1);
+    const data = history();
+    const { section, unmount } = renderDay(data, `/day/${yesterday}`);
+    const line = section("Fuel").querySelector<HTMLElement>("[data-fuel-over]")!;
+    // There, empty, and as tall as a line of its text by itself (min-h-4 is text-xs's line).
+    expect(line).not.toBeNull();
+    expect(line.textContent).toBe("");
+    expect(line.className).toContain("min-h-4");
+    expect(line.className).toContain("text-xs");
+    unmount();
+
+    data.days.find((d) => d.date === yesterday)!.calories = 3600;
+    const over = renderDay(data, `/day/${yesterday}`);
+    const same = over.section("Fuel").querySelector<HTMLElement>("[data-fuel-over]")!;
+    expect(same.className).toBe(line.className);
+    expect(same.textContent).toMatch(/^\+[\d,]+ kcal over$/);
+    // It sits where today's "eaten" line does: right after the calorie bar.
+    expect(same.previousElementSibling!.querySelector("[data-severity]")).not.toBeNull();
+  });
+});
+
+describe("Today while a field is being typed in", () => {
+  /** Three weeks of recovery readings, and `today` for today's log. */
+  const readings = (today: Partial<DayLog>): AppData => history(today, { hrvMs: 60, restingHrBpm: 50, sleepMinutes: 480 });
+  /** The same, cut to eight days before today: still calibrating. */
+  const short = (today: Partial<DayLog>): AppData => {
+    const data = readings(today);
+    return { ...data, days: data.days.slice(-9) };
+  };
+  const view = (data: AppData) => {
+    const tree = () => (
+      <MemoryRouter initialEntries={["/"]}>
+        <Routes>
+          <Route path="/" element={<TodayScreen />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    store.data = data;
+    const rendered = render(tree());
+    return {
+      /** The store has new data (a save, a sync): the screen renders it. */
+      arrive: (next: AppData) => {
+        store.data = next;
+        rendered.rerender(tree());
+      },
+      fuel: () => screen.getByRole("heading", { name: "Fuel" }).closest("section")!,
+      signals: () => document.querySelector("[data-signals]")?.textContent ?? null,
+    };
+  };
+  const nextTask = () => act(() => new Promise<void>((r) => setTimeout(r, 5)));
+  const trend = (fuel: HTMLElement) => [...fuel.querySelectorAll("span")].find((el) => el.textContent?.startsWith("Trend"))!.textContent;
+  const calibration = (fuel: HTMLElement) => /Calibrating.*$/.exec(fuel.textContent ?? "")?.[0] ?? null;
+
+  it("signals and the trend wait for the field to be left; what was eaten is said at once", async () => {
+    const before = readings({});
+    // The morning's readings and the day's food, as typed field by field: a low HRV, a weight, calories.
+    const after = readings({ weightLb: 188, hrvMs: 20, restingHrBpm: 70, calories: 1000 });
+    // What they change, were nothing held: the first signal, and the trend.
+    expect(buildModel(after, TODAY).insights[0]?.text).not.toBe(buildModel(before, TODAY).insights[0]?.text);
+    const s = view(before);
+    const was = { signals: s.signals(), trend: trend(s.fuel()) };
+    expect(was.trend).toBe("Trend 200.0 lb");
+    expect(s.fuel().querySelector("[data-fuel-eaten]")!.textContent).toBe("Nothing logged yet");
+
+    const journal = screen.getByRole("textbox", { name: "Journal" });
+    act(() => journal.focus());
+    s.arrive(after);
+    expect(s.signals()).toBe(was.signals);
+    expect(trend(s.fuel())).toBe(was.trend);
+    // Live: what was eaten, and what is left of the target shown.
+    expect(s.fuel().querySelector("[data-fuel-eaten]")!.textContent).toBe("1,000 eaten");
+    const target = num(s.fuel().querySelector(".text-5xl")!.textContent);
+    expect(num(s.fuel().querySelector("[data-fuel-side]")!.textContent)).toBe(target - 1000);
+
+    // The field is left: everything the app makes of the day is there.
+    act(() => journal.blur());
+    await nextTask();
+    expect(s.signals()).not.toBe(was.signals);
+    expect(s.signals()).toContain(buildModel(after, TODAY).insights[0]!.text.slice(0, 12));
+    expect(trend(s.fuel())).not.toBe(was.trend);
+  });
+
+  it("the calibration waits too: its count, and which half of the day is missing", async () => {
+    const s = view(short({ weightLb: 200 }));
+    const was = calibration(s.fuel());
+    expect(was).toMatch(/^Calibrating 8\/14.*Add calories to complete day 9$/);
+    const journal = screen.getByRole("textbox", { name: "Journal" });
+    act(() => journal.focus());
+    s.arrive(short({ weightLb: 200, calories: 2800 }));
+    expect(calibration(s.fuel())).toBe(was);
+    act(() => journal.blur());
+    await nextTask();
+    expect(calibration(s.fuel())).toMatch(/^Calibrating 9\/14/);
+    expect(calibration(s.fuel())).not.toContain("Add calories");
+  });
+
+  it("the Fuel block itself waits too: a first weight typed doesn't put a target above the next field", async () => {
+    const empty: AppData = { ...history(), days: [] };
+    const s = view(empty);
+    expect(s.fuel().textContent).toContain("Log a morning weight and your targets appear here");
+    const journal = screen.getByRole("textbox", { name: "Journal" });
+    act(() => journal.focus());
+    s.arrive({ ...empty, days: [{ ...emptyDayLog(TODAY), weightLb: 200 }] });
+    expect(s.fuel().textContent).toContain("Log a morning weight and your targets appear here");
+    expect(s.fuel().querySelector("[data-fuel-side]")).toBeNull();
+    act(() => journal.blur());
+    await nextTask();
+    expect(s.fuel().textContent).not.toContain("Log a morning weight");
+    expect(s.fuel().querySelector("[data-fuel-side]")).not.toBeNull();
   });
 });
 

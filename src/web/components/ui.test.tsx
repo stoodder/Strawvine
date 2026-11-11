@@ -680,6 +680,200 @@ describe("NumberInput", () => {
   });
 });
 
+describe("NumberInput: a number typed and not yet committed", () => {
+  /** `saved`: every onCommit. `follow: false` leaves the saved value where it was (a save that hasn't come back yet). */
+  function Harness({
+    initial = null,
+    saved,
+    follow = true,
+    show = true,
+    ...rest
+  }: Partial<Parameters<typeof NumberInput>[0]> & {
+    initial?: number | null;
+    saved: Array<number | null>;
+    follow?: boolean;
+    show?: boolean;
+  }) {
+    const [v, setV] = useState<number | null>(initial);
+    return show ? (
+      <NumberInput
+        ariaLabel="Reading"
+        {...rest}
+        value={v}
+        onCommit={(n) => {
+          saved.push(n);
+          if (follow) setV(n);
+        }}
+      />
+    ) : null;
+  }
+  const hide = (state: "hidden" | "visible") => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+    act(() => void document.dispatchEvent(new Event("visibilitychange")));
+  };
+  afterEach(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  });
+  const input = () => screen.getByRole("textbox", { name: "Reading" }) as HTMLInputElement;
+
+  it("is committed when the app is hidden — once, however often that is said, and not again by the blur that follows", async () => {
+    const user = userEvent.setup();
+    const saved: Array<number | null> = [];
+    // The saved value doesn't come back before the blur (the worst case for a duplicate).
+    render(<Harness saved={saved} follow={false} min={0} max={200000} />);
+    await user.click(input());
+    await user.keyboard("9000");
+    expect(saved).toEqual([]);
+    hide("hidden");
+    expect(saved).toEqual([9000]);
+    act(() => void window.dispatchEvent(new Event("pagehide")));
+    hide("hidden");
+    expect(saved).toEqual([9000]);
+    // Back in the app, the field is as it was; leaving it saves nothing a second time.
+    hide("visible");
+    expect(input().value).toBe("9000");
+    expect(document.activeElement).toBe(input());
+    await user.keyboard("{Enter}");
+    expect(saved).toEqual([9000]);
+  });
+
+  it("after such a commit, what is typed next is committed as usual — the old value included", async () => {
+    const user = userEvent.setup();
+    const saved: Array<number | null> = [];
+    render(<Harness saved={saved} initial={8000} />);
+    await user.click(input());
+    await user.keyboard("9000");
+    hide("hidden");
+    expect(saved).toEqual([9000]);
+    hide("visible");
+    await user.clear(input());
+    await user.keyboard("8000{Enter}");
+    expect(saved).toEqual([9000, 8000]);
+    // And a second hide with nothing new typed commits nothing.
+    await user.click(input());
+    hide("hidden");
+    expect(saved).toEqual([9000, 8000]);
+    hide("visible");
+    // The number committed while hidden is an ordinary number again once it was saved: typed later, it is saved.
+    await user.keyboard("9000{Enter}");
+    expect(saved).toEqual([9000, 8000, 9000]);
+  });
+
+  it("is committed when the field goes away while it has focus (no blur is fired for a removed element), through its last onCommit", async () => {
+    const user = userEvent.setup();
+    const saved: Array<number | null> = [];
+    const { rerender, unmount } = render(<Harness saved={saved} decimals={1} />);
+    await user.click(input());
+    await user.keyboard("199.44");
+    rerender(<Harness saved={saved} decimals={1} show={false} />);
+    expect(saved).toEqual([199.4]);
+    unmount();
+    expect(saved).toEqual([199.4]);
+  });
+
+  it("is not committed twice when the field is left and then goes away, nor when nothing was typed", async () => {
+    const user = userEvent.setup();
+    const saved: Array<number | null> = [];
+    const { rerender } = render(<Harness saved={saved} initial={50} />);
+    await user.click(input());
+    hide("hidden"); // focused, select-all, nothing typed
+    expect(saved).toEqual([]);
+    hide("visible");
+    await user.keyboard("60{Enter}");
+    expect(saved).toEqual([60]);
+    rerender(<Harness saved={saved} initial={50} show={false} />);
+    expect(saved).toEqual([60]);
+  });
+
+  it("never commits, for the app being hidden or the field going away, what leaving the field wouldn't plainly save", async () => {
+    const user = userEvent.setup();
+    const cases: Array<[props: Partial<Parameters<typeof NumberInput>[0]> & { initial?: number | null }, typed: string, why: string]> = [
+      [{ initial: 48 }, "48", "the value it already has"],
+      [{ initial: 48 }, "{Backspace}", "an emptied field: clearing a value takes leaving the field"],
+      [{ initial: 48 }, "4x", "something that isn't a number"],
+      [{ initial: 48, min: 20, max: 220, outOfRange: "reject" }, "5", "a reading out of range (refused on blur)"],
+      [{ initial: 48, min: 20, max: 220, outOfRange: "reject" }, "900", "a reading out of range (refused on blur)"],
+      [{ initial: 199, min: 50, max: 1000 }, "1", "a number that leaving the field would clamp: half-typed, as likely as not"],
+      [{ initial: 199, min: 50, max: 1000 }, "20000", "a number that leaving the field would clamp"],
+    ];
+    for (const [props, typed, why] of cases) {
+      const saved: Array<number | null> = [];
+      const view = render(<Harness saved={saved} {...props} />);
+      await user.click(input());
+      await user.keyboard(typed);
+      hide("hidden");
+      act(() => void window.dispatchEvent(new Event("pagehide")));
+      hide("visible");
+      expect(saved, `hidden: ${why}`).toEqual([]);
+      view.rerender(<Harness saved={saved} {...props} show={false} />);
+      expect(saved, `removed: ${why}`).toEqual([]);
+      view.unmount();
+    }
+  });
+
+  it("leaves a field that isn't focused alone: hiding the app or removing it commits nothing", async () => {
+    const user = userEvent.setup();
+    const saved: Array<number | null> = [];
+    const { rerender } = render(
+      <>
+        <Harness saved={saved} initial={48} />
+        <button type="button">elsewhere</button>
+      </>,
+    );
+    await user.click(input());
+    await user.keyboard("52");
+    await user.click(screen.getByRole("button", { name: "elsewhere" }));
+    expect(saved).toEqual([52]);
+    hide("hidden");
+    hide("visible");
+    rerender(<button type="button">elsewhere</button>);
+    expect(saved).toEqual([52]);
+  });
+
+  it("…also while it still shows a number its owner didn't take (a setting refused with a message): not offered again behind the person's back", async () => {
+    const user = userEvent.setup();
+    const saved: Array<number | null> = [];
+    const { rerender } = render(
+      <>
+        <Harness saved={saved} initial={48} follow={false} />
+        <button type="button">elsewhere</button>
+      </>,
+    );
+    await user.click(input());
+    await user.keyboard("999");
+    await user.click(screen.getByRole("button", { name: "elsewhere" }));
+    expect(saved).toEqual([999]);
+    expect(input().value).toBe("999");
+    hide("hidden");
+    act(() => void window.dispatchEvent(new Event("pagehide")));
+    hide("visible");
+    rerender(<button type="button">elsewhere</button>);
+    expect(saved).toEqual([999]);
+  });
+});
+
+describe("Stepper: a number being typed when its sheet goes away", () => {
+  it("is not applied: the sheet's own buttons save, and closing it abandons the draft", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    function SetEditor({ open }: { open: boolean }) {
+      return open ? <Stepper value={160} onChange={onChange} step={5} max={2000} editable label="load" /> : null;
+    }
+    const { rerender } = render(<SetEditor open />);
+    await user.click(screen.getByRole("button", { name: "load 160, edit" }));
+    await user.keyboard("172.5");
+    // Hidden with the draft typed: nothing is applied behind the person's back…
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    act(() => void document.dispatchEvent(new Event("visibilitychange")));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    act(() => void document.dispatchEvent(new Event("visibilitychange")));
+    expect(onChange).not.toHaveBeenCalled();
+    // …and the sheet closed with the keyboard up drops it.
+    rerender(<SetEditor open={false} />);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
 describe("ChoiceChip", () => {
   it("presses lime with a check, and unpressed without one", () => {
     const { rerender } = render(

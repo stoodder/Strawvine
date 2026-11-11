@@ -26,10 +26,15 @@
 - Train: which finished exercises show folded is view state (`components/train/folds.ts`), never saved; nothing folds or
   moves while the page is in use, and no tap is ever intercepted.
 - The field being typed in stays put (e2e/40): a keystroke never changes the page's height except by the field's own
-  growth (`fitToContent` in `components/TextArea.tsx` measures inside a wrapper that keeps its height), and what a
-  saved value changes must not move a field the person may be moving to. Inside an editor: put what appears (a chip,
-  a note line) under the fields, or keep its line there empty. Around the editors on Today: show derived things
-  (signals, targets, a row's summary) from `useHeldWhileTyping` (`components/useHeldWhileTyping.ts`), which holds them
-  while any field has focus and catches up when none has — view state only; saves are never delayed for it, and
-  nothing writes scroll to compensate.
+  growth (`fitToContent` in `components/TextArea.tsx` measures inside a wrapper that keeps its height) and never
+  re-wraps its row (no `flex-wrap` around a field that sizes to its content), and what a saved value changes must not
+  move a field the person may be moving to. Inside an editor: put what appears (a chip, a note line) under every
+  field, or hang it without taking room (the range hint of `NumberInput`). Around the editors on Today: what would
+  change the page's *height* waits while a field has focus (`useTyping` / `useHeldWhile` in
+  `components/useHeldWhileTyping.ts`) — hold whether a line or block is there, never what an existing line says (no
+  "not done" beside a value that makes it done); view state only, saves are never delayed for it, and nothing writes
+  scroll to compensate.
+- `NumberInput` commits a typed number when the app is hidden or the field is removed while focused (once; only a
+  readable in-range number that differs from the saved one). So an `onCommit` inside a sheet whose own button saves
+  must only set the sheet's draft.
 - Schema change: edit `src/server/db/schema.ts`, run `npm run db:generate`, commit the migration.

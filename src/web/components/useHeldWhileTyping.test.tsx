@@ -6,6 +6,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { flushSync } from "react-dom";
 import { afterEach, describe, expect, it } from "vitest";
 import { useHeldWhileTyping } from "./useHeldWhileTyping";
 
@@ -29,6 +30,8 @@ function Harness({ initial = "one" }: { initial?: string }) {
     <div>
       <output data-testid="shown">{shown}</output>
       <output data-testid="live">{value}</output>
+      {/* A field that saves as it is left, the save reaching the screen in that very event (as a save that updates the store at once does). */}
+      <input aria-label="Saves on blur" onBlur={() => flushSync(() => set("saved on blur"))} />
       {fields && (
         <>
           <input aria-label="First" />
@@ -40,6 +43,7 @@ function Harness({ initial = "one" }: { initial?: string }) {
         Rate
       </button>
       <input type="checkbox" aria-label="Flag" />
+      <input type="date" aria-label="Day" />
     </div>
   );
 }
@@ -123,13 +127,13 @@ describe("useHeldWhileTyping", () => {
     expect(shown()).toBe("from the button");
   });
 
-  it("stays held through a tap on a button that leaves focus in the field (iOS), and through a toggle", async () => {
+  it("stays held through a tap on a button that leaves focus in the field; a checkbox taking focus ends it", async () => {
     const user = userEvent.setup();
     render(<Harness />);
     const first = screen.getByRole("textbox", { name: "First" });
     const rate = screen.getByRole("button", { name: "Rate" });
     await user.click(first);
-    // iOS: a tapped button doesn't take focus, the keyboard stays up.
+    // Where a tapped button doesn't take focus and the field keeps it, typing simply goes on.
     fireEvent.pointerDown(rate);
     fireEvent.pointerUp(rate);
     fireEvent.click(rate);
@@ -169,6 +173,107 @@ describe("useHeldWhileTyping", () => {
     act(() => first.blur());
     await nextTask();
     expect(shown()).toBe("after the keystroke");
+  });
+
+  it("after coming back with a field focused, moving on to the next field holds from the field being left — its save moves nothing", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const saves = screen.getByRole("textbox", { name: "Saves on blur" });
+    await user.click(saves);
+    act(() => void document.dispatchEvent(new Event("visibilitychange")));
+    change("caught up on return");
+    expect(shown()).toBe("caught up on return"); // released: nobody's finger is on the page
+    // On to the next field by Tab, with no key typed since: the field left saves in its blur — and that save waits.
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "First" }));
+    expect(screen.getByTestId("live").textContent).toBe("saved on blur");
+    expect(shown()).toBe("caught up on return");
+    await nextTask();
+    expect(shown()).toBe("caught up on return");
+    act(() => (document.activeElement as HTMLElement).blur());
+    await nextTask();
+    expect(shown()).toBe("saved on blur");
+  });
+
+  it("…also where the browser doesn't say which field focus is going to: the press on the field starts the hold", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const saves = screen.getByRole("textbox", { name: "Saves on blur" });
+    const second = screen.getByRole("textbox", { name: "Second" });
+    await user.click(saves);
+    act(() => void document.dispatchEvent(new Event("visibilitychange")));
+    change("caught up on return");
+    expect(shown()).toBe("caught up on return");
+    // The tap as such a browser plays it: the press on the next field, then the first one blurs to nothing, then focus arrives.
+    fireEvent.pointerDown(second);
+    fireEvent.pointerUp(second);
+    act(() => saves.blur());
+    expect(screen.getByTestId("live").textContent).toBe("saved on blur");
+    expect(shown()).toBe("caught up on return");
+    act(() => second.focus());
+    fireEvent.click(second);
+    await nextTask();
+    expect(shown()).toBe("caught up on return");
+  });
+
+  it("is held from the start when the screen appears with a field already focused", async () => {
+    const outside = document.createElement("input");
+    document.body.append(outside);
+    outside.focus();
+    try {
+      render(<Harness />);
+      change("two");
+      expect(shown()).toBe("one");
+      act(() => outside.blur());
+      await nextTask();
+      expect(shown()).toBe("two");
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("a date picker is not typing: nothing waits while it has focus", async () => {
+    render(<Harness />);
+    const day = screen.getByLabelText("Day");
+    act(() => day.focus());
+    expect(document.activeElement).toBe(day);
+    change("two");
+    expect(shown()).toBe("two");
+    // Nor does leaving a field for it keep anything waiting.
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("textbox", { name: "First" }));
+    change("three");
+    expect(shown()).toBe("two");
+    act(() => day.focus());
+    await nextTask();
+    expect(shown()).toBe("three");
+  });
+
+  it("a press that ends without a pointerup still ends: cancelled (the browser took it for a scroll), or only its click arrives", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const first = screen.getByRole("textbox", { name: "First" });
+    const rate = screen.getByRole("button", { name: "Rate" });
+
+    await user.click(first);
+    change("two");
+    fireEvent.pointerDown(rate);
+    act(() => first.blur());
+    await nextTask();
+    expect(shown()).toBe("one"); // the press is still under way
+    fireEvent.pointerCancel(rate);
+    await nextTask();
+    expect(shown()).toBe("two");
+
+    await user.click(first);
+    change("three");
+    fireEvent.pointerDown(rate);
+    act(() => first.blur());
+    await nextTask();
+    expect(shown()).toBe("two");
+    fireEvent.click(rate); // no pointerup was seen
+    await nextTask();
+    expect(shown()).toBe("from the button");
   });
 
   it("never holds one day's display on another day", async () => {

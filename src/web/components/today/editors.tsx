@@ -278,13 +278,15 @@ export function FuelEditor({ day, patch }: EditorProps) {
         />
       )}
       <div className="grid grid-cols-3 gap-4">
+        {/* The limits are the day log's own (shared/schemas): a number past them is refused here, with the range,
+            rather than sent and refused by the server. */}
         {(
           [
-            ["proteinG", "Protein"],
-            ["carbsG", "Carbs"],
-            ["fatG", "Fat"],
+            ["proteinG", "Protein", 2000],
+            ["carbsG", "Carbs", 3000],
+            ["fatG", "Fat", 1000],
           ] as const
-        ).map(([k, label]) => (
+        ).map(([k, label, max]) => (
           <div key={k}>
             <div className="label mb-2">{label}</div>
             <BoxNumber
@@ -295,24 +297,26 @@ export function FuelEditor({ day, patch }: EditorProps) {
               className="w-full"
               align="left"
               min={0}
+              max={max}
+              outOfRange="reject"
             />
           </div>
         ))}
       </div>
-      {/* Under the numbers it comes from, never above them: it appears and goes as a macro or the calories are
-          saved — when the field leaves focus, often for the next one — and anything above a field would move that
-          field, under a thumb or out from over the keyboard. */}
-      {!paste && fromMacros !== null && fromMacros !== day.calories && (
-        <button type="button" className="chip bg-white/[0.05] text-fg-2" onClick={() => patch({ calories: fromMacros })}>
-          Use {fmt(fromMacros)} from macros
-        </button>
-      )}
       <AlsoToday day={day} patch={patch} />
       {showMicros ? (
         <Micros micros={day.micros} onChange={(m) => patch({ micros: m })} />
       ) : (
         <button type="button" className="label -my-3 flex min-h-11 items-center text-mute" onClick={() => setShowMicros(true)}>
           + Micronutrients
+        </button>
+      )}
+      {/* The last thing in the editor, under every field and control of it (the micronutrients included): it
+          appears and goes as a macro or the calories are saved — when the field leaves focus, often for the next
+          one — and anything above a field would move that field, under a thumb or out from over the keyboard. */}
+      {!paste && fromMacros !== null && fromMacros !== day.calories && (
+        <button type="button" className="chip bg-white/[0.05] text-fg-2" onClick={() => patch({ calories: fromMacros })}>
+          Use {fmt(fromMacros)} from macros
         </button>
       )}
     </div>
@@ -374,8 +378,11 @@ export function StepsEditor({ day, patch, target }: EditorProps & { target: numb
  */
 export function Zone2Editor({ day, patch }: EditorProps) {
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2">
+    // A container: the two fields sit side by side where both always fit at their widest (600 min, 3000 kcal),
+    // and one under the other where they wouldn't (a 320 px phone) — decided by the room, never by what is
+    // typed: a row that wraps would re-wrap, and move the field in use, as a number gains or loses a digit.
+    <div className="group @container space-y-2">
+      <div className="flex flex-col gap-y-2 @min-[17rem]:flex-row @min-[17rem]:items-baseline @min-[17rem]:gap-x-8">
         <div className="flex items-baseline gap-2">
           <NumberInput
             ariaLabel="Zone 2 minutes"
@@ -402,7 +409,8 @@ export function Zone2Editor({ day, patch }: EditorProps) {
           rangeHint="0–3000 kcal"
         />
       </div>
-      <p className="text-xs text-mute">Machine reading · not added to intake</p>
+      {/* The range of a refused reading hangs under its field, where this line is: it makes way. */}
+      <p className="text-xs text-mute group-has-[[data-range-hint]]:invisible">Machine reading · not added to intake</p>
     </div>
   );
 }
@@ -458,8 +466,18 @@ export function MetconEditor({ day, patch }: EditorProps) {
           />
         </div>
       </div>
+      <JournalText
+        ariaLabel="Metcon notes"
+        value={day.metconNotes}
+        onSave={(v) => log({ metconNotes: v }, v)}
+        placeholder="The workout, how it went…"
+        className="text-base"
+        minRows={2}
+      />
+      {/* Under the notes, not between the fields and them: the best so far (once there is a name) and the recent
+          names (while there is none) come and go as the name is saved — as its field is left, perhaps for the notes. */}
       {day.metconBenchmark && (
-        <div id={bestId} className="-mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs" aria-live="polite">
+        <div id={bestId} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs" aria-live="polite">
           {best ? (
             // Opens every result for this benchmark.
             <button
@@ -481,7 +499,7 @@ export function MetconEditor({ day, patch }: EditorProps) {
         </div>
       )}
       {!day.metconBenchmark && recent.length > 0 && (
-        <div className="-mt-1 flex flex-wrap gap-2" role="group" aria-label="Recent benchmarks">
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Recent benchmarks">
           {recent.map((n) => (
             <button key={n} type="button" className="chip bg-white/[0.05] text-fg-2" onClick={() => log({ metconBenchmark: n }, n)}>
               {n}
@@ -498,14 +516,6 @@ export function MetconEditor({ day, patch }: EditorProps) {
           date={day.date}
         />
       )}
-      <JournalText
-        ariaLabel="Metcon notes"
-        value={day.metconNotes}
-        onSave={(v) => log({ metconNotes: v }, v)}
-        placeholder="The workout, how it went…"
-        className="text-base"
-        minRows={2}
-      />
     </div>
   );
 }

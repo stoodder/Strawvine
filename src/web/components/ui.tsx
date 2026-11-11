@@ -8,6 +8,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type ComponentProps,
@@ -344,8 +345,17 @@ export function useFieldIds(): FieldIds | null {
 /**
  * An inline number that looks like text until edited. Commits on blur / enter, rounded to
  * `decimals` (what is saved is what is shown). Out of `min`–`max` it clamps — or, with
- * `outOfRange="reject"`, keeps the previous value and says the range under the field.
+ * `outOfRange="reject"`, keeps the previous value and says the range under the field (in the gap
+ * under it, like SleepField's readout: it takes no room, so it pushes nothing that follows).
  * Sizes itself to its content (field-sizing, with a ch-width fallback) unless the caller sets a width.
+ *
+ * A number typed but not yet committed is not lost with the field: when the app is hidden
+ * (backgrounded, closed) or the field goes away while it has focus (its editor closed, another day
+ * shown — a removed element gets no blur), it is committed through the `onCommit` it was last
+ * rendered with — once, and only a readable number inside `min`–`max` that differs from the saved
+ * one. Never a clamped or an emptied one: clearing a value, or accepting a limit, takes leaving the
+ * field. (So in a sheet whose numbers are only saved by its own button, `onCommit` must do no more
+ * than set the sheet's draft — as it does on blur.)
  */
 export function NumberInput({
   value,
@@ -407,10 +417,42 @@ export function NumberInput({
   };
   const [text, setText] = useState(show(value));
   const focused = useRef(false);
+  /** What was committed for the app being hidden, until the saved value catches up: not committed again by the blur that follows. */
+  const flushed = useRef<number | null | undefined>(undefined);
   useEffect(() => {
+    flushed.current = undefined;
     if (!focused.current) setText(show(value));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
+
+  /** Commit what is typed, should the field not live to be left (see above). */
+  const flushPending = () => {
+    if (!focused.current) return;
+    const typed = parseNum(text);
+    if (typed === null) return;
+    const n = round(typed);
+    if ((min !== undefined && n < min) || (max !== undefined && n > max)) return;
+    if (n === value || n === flushed.current) return;
+    flushed.current = n;
+    onCommit(n);
+  };
+  const latestFlush = useRef(flushPending);
+  useLayoutEffect(() => {
+    latestFlush.current = flushPending;
+  });
+  useEffect(() => {
+    const flush = () => latestFlush.current();
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, []);
 
   const commit = () => {
     let n = parseNum(text);
@@ -425,7 +467,7 @@ export function NumberInput({
       if (max !== undefined) n = Math.min(max, n);
     }
     setRejected(false);
-    if (n !== value) onCommit(n);
+    if (n !== value && n !== flushed.current) onCommit(n);
     setText(show(n));
   };
 
@@ -470,11 +512,18 @@ export function NumberInput({
   );
   if (outOfRange !== "reject") return input;
   const range = rangeHint ?? `${min ?? ""}–${max ?? ""}${typeof unit === "string" ? ` ${unit}` : ""}`;
-  // The live region is always there (empty until a rejection), so the hint is announced when it appears.
+  // The live region is always there (empty until a rejection), so the hint is announced when it appears. It hangs
+  // under the field without taking room (a rejection shows as the field is left, often for the next one: a line
+  // added here would move that next field). `data-range-hint` lets a caller make way for it (Zone 2's note).
   return (
-    <div>
+    <div className="relative">
       {input}
-      <div id={hintId} aria-live="polite" className={clsx(rejected && "mt-1.5 text-xs text-warn")}>
+      <div
+        id={hintId}
+        aria-live="polite"
+        data-range-hint={rejected ? "" : undefined}
+        className="num absolute top-full left-0 mt-1 text-[0.6875rem] whitespace-nowrap text-warn"
+      >
         {rejected && (
           <>
             <span className="sr-only">{ariaLabel} not saved: use </span>

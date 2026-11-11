@@ -50,13 +50,26 @@ All fields are optional and can be edited at any time during the day (or later).
   any past day ripples forward correctly.
 - Today is shown live, marked _in progress_.
 - **A field being typed in stays where it is.** A value is saved the moment its field is left — often for the next
-  field, the keyboard still up. While any field of the day has focus, what the app makes of the day _around_ the fields
-  holds at what it showed when typing began: Signals, the target / TDEE / trend and calibration, and each checklist
-  row's text (its value, the lines under its label, the steps bar). It catches up when no field has focus any more
-  (the keyboard goes down, or focus moves to something that isn't a field — then only after that tap has landed), on
-  coming back to the app, and at once for another day. What is typed, the editors themselves, what was eaten against
-  the target, the ring and the dots stay live (they move nothing). Nothing is saved later or differently for it: it is
-  view state only.
+  field, the keyboard still up — and what the app makes of it must not move that next field. So while a field of the day
+  is being typed in (a text or number field; not the date picker), what could make the page above it taller or shorter
+  holds at what it was when typing began:
+  - Signals (how many lines a signal takes depends on what it says), and the Fuel frame: whether there is a target at
+    all, the target / TDEE / trend line, the calibration (their text decides their height, and "left" must be left of
+    the target shown);
+  - in the checklist, only whether a row has its second summary line and the steps bar. Everything a row says is the
+    day as it is — done or not (to a screen reader too), its value, the text of the lines it has; a line that is there
+    stays, empty if need be.
+- What is held catches up when no field has focus any more (the keyboard goes down, or focus moves to something that
+  isn't a field — then only after that tap has landed), on coming back to the app, and at once for another day. What is
+  typed, the editors, what was eaten against the target, the ring and the dots are always live. Inside an editor, what
+  comes and goes with a saved value sits under the fields (Nutrition's "Use N from macros" is the last thing in its
+  editor; a metcon's best-so-far and recent names are under its notes), and the range of a refused reading hangs under
+  its field without taking room. Nothing is saved later or differently for any of it: view state only.
+- **A number typed is not lost with its field.** A number field commits when it is left (or Enter). If the app is
+  hidden first (backgrounded, closed), or the field goes away while it has focus (its editor closed, another day
+  shown), what is typed is committed then, once — but only a readable number inside the field's range that differs
+  from the saved one: never an emptied field, a number out of range, or one that leaving the field would round to a
+  limit. A sheet's own numbers (the set editor) are saved by its buttons only: closing it abandons what was typed.
 
 ### 3.1 Fuel bars (Today)
 

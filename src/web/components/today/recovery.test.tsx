@@ -155,7 +155,8 @@ describe("Also today chips", () => {
 
     // The name never changed; nothing but the status region speaks the change.
     expect(chips.map((c) => c.getAttribute("aria-label"))).toEqual(["Alcohol", "Nicotine", "THC", "Caffeine"]);
-    expect(document.querySelectorAll("[aria-live]")).toHaveLength(1);
+    // (The macro fields' range hints are live regions too: empty unless a number is refused.)
+    expect([...document.querySelectorAll("[aria-live]")].filter((el) => el.textContent)).toHaveLength(1);
 
     // Keyboard: Enter and Space cycle too. Each patch touches only its own flag.
     const thc = chips[2]!;

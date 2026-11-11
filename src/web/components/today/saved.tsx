@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Check } from "lucide-react";
+import clsx from "clsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSavedPulse } from "../../lib/store";
 
@@ -51,10 +52,23 @@ export function useSavedFlash(date: string): SavedFlash {
  * `live` (default) makes it a polite status for screen readers; inside a button, render it with
  * `live={false}` and announce through a separate status region.
  */
-export function SavedTick({ show, className, live = true }: { show: boolean; className?: string; live?: boolean }) {
+export function SavedTick({
+  show,
+  className,
+  live = true,
+  wordClassName,
+}: {
+  show: boolean;
+  className?: string;
+  live?: boolean;
+  /** Classes for the word (the check always shows): e.g. to drop it where there is no room for it beside a label. */
+  wordClassName?: string;
+}) {
   const reduce = useReducedMotion();
   return (
-    <span role={live ? "status" : undefined} aria-hidden={live ? undefined : true} className={className}>
+    // inline-flex: as tall as the tick, and nothing while there is none. A plain inline span would bring a line
+    // of the surrounding text size with it when the tick shows, and make its row (a Section header) taller.
+    <span role={live ? "status" : undefined} aria-hidden={live ? undefined : true} className={clsx("inline-flex", className)}>
       <AnimatePresence>
         {show && (
           <motion.span
@@ -66,7 +80,7 @@ export function SavedTick({ show, className, live = true }: { show: boolean; cla
             transition={{ duration: reduce ? 0 : 0.25, ease: [0.22, 1, 0.36, 1] }}
           >
             <Check size={11} strokeWidth={3} aria-hidden />
-            saved
+            <span className={wordClassName}>saved</span>
           </motion.span>
         )}
       </AnimatePresence>
