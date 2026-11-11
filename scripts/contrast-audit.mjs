@@ -86,6 +86,10 @@ const SCREENS = [
     "[role=dialog]",
   ],
   ["Progress", "/progress", null],
+  ["Progress: Body", "/progress?view=body", null],
+  ["Progress: Fuel", "/progress?view=fuel", null],
+  ["Progress: Activity", "/progress?view=activity", null],
+  ["Progress: Strength", "/progress?view=strength", null],
   ["Goals", "/goals", null],
   [
     "Goals (new strength target sheet)",

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { addDays, formatShortDate } from "../../shared/dates";
+import { computeEnergySeries, energyBalanceSeries } from "../../shared/energy";
 import { computeStepsSeries } from "../../shared/steps";
 import { LineChart, weeklyMeans, type Series } from "./charts";
 
@@ -188,6 +189,47 @@ describe("LineChart: steps with their trend and a target", () => {
     const { container } = render(<LineChart series={series} title="Steps" refLine={{ y: 12000, label: "goal 12000" }} />);
     expect(container.querySelector("svg line[stroke-dasharray]")!.getAttribute("stroke")).toBe("var(--color-gold)");
     expect(screen.getByText("goal 12000").className).toContain("text-gold");
+  });
+});
+
+describe("LineChart: energy balance ends at the last complete day", () => {
+  const today = "2026-10-21";
+  const fmtN = (v: number) => v.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  /** Twenty steady days, then today with a weigh-in and `eaten` kcal so far (null: nothing logged). */
+  const chart = (eaten: number | null) => {
+    const days = [
+      ...Array.from({ length: 20 }, (_, i) => ({ date: addDays("2026-10-01", i), weightLb: 200, calories: 2600 + (i % 2) * 200 })),
+      ...(eaten === null ? [] : [{ date: today, weightLb: 200, calories: eaten }]),
+    ];
+    const balance = energyBalanceSeries(computeEnergySeries(days, "2026-10-01", today), today);
+    const series: Series[] = [
+      {
+        key: "intake",
+        label: "Intake",
+        kind: "line",
+        color: "gray",
+        points: balance.map((d) => ({ x: d.date, y: d.intake })),
+        format: fmtN,
+      },
+      { key: "tdee", label: "TDEE", kind: "line", color: "lime", points: balance.map((d) => ({ x: d.date, y: d.tdee })), format: fmtN },
+    ];
+    const view = render(<LineChart series={series} title="Energy balance" />);
+    const out = {
+      label: screen.getByRole("img").getAttribute("aria-label"),
+      readout: view.container.querySelector("[aria-live=polite]")!.textContent,
+      lines: [...view.container.querySelectorAll("svg path")].map((p) => p.getAttribute("d")),
+    };
+    view.unmount();
+    return out;
+  };
+
+  it("reads the same before today's first meal, after breakfast and after a full day", () => {
+    const before = chart(null);
+    // Through Oct 20 (yesterday), not today; the readout is yesterday's averages.
+    expect(before.label).toMatch(/^Energy balance, Oct 1 to Oct 20\. Intake 2,600 to 2,7\d\d\. TDEE /);
+    expect(before.readout).toMatch(/^Intake2,7\d\dTDEE2,7\d\dLatest$/);
+    expect(chart(350)).toEqual(before);
+    expect(chart(2700)).toEqual(before);
   });
 });
 

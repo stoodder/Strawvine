@@ -124,7 +124,8 @@ for (const width of [195, 320, 375]) {
     });
 
     test("every screen, and Today's editors", async ({ page }) => {
-      for (const path of ["/", "/train", "/progress", "/goals", "/settings", "/train/2026-10-19"]) {
+      const progressViews = ["body", "fuel", "activity", "strength"].map((view) => `/progress?view=${view}`);
+      for (const path of ["/", "/train", "/progress", ...progressViews, "/goals", "/settings", "/train/2026-10-19"]) {
         await page.goto(path);
         await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
         await page.waitForTimeout(500);
@@ -182,7 +183,7 @@ for (const width of [195, 320, 375]) {
       await expect(add).toHaveCount(0);
 
       // A 1,000 lb max beside its sparkline, and the max form.
-      await page.goto("/progress");
+      await page.goto("/progress?view=strength");
       await page.getByRole("button", { name: new RegExp(`^${UNBREAKABLE}`) }).click();
       const max = page.getByRole("dialog", { name: UNBREAKABLE });
       await expect(max.getByRole("textbox", { name: "New max" })).toBeVisible();

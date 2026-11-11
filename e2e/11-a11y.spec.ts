@@ -80,6 +80,10 @@ const SCREENS = [
   ["Today", "/"],
   ["Train", "/train"],
   ["Progress", "/progress"],
+  ["Progress: Body", "/progress?view=body"],
+  ["Progress: Fuel", "/progress?view=fuel"],
+  ["Progress: Activity", "/progress?view=activity"],
+  ["Progress: Strength", "/progress?view=strength"],
   ["Goals", "/goals"],
   ["Settings", "/settings"],
 ] as const;

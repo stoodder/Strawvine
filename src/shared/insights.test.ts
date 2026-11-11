@@ -3,7 +3,7 @@ import { addDays, dateRange } from "./dates";
 import { defaultSettings } from "./defaults";
 import { computeEnergySeries } from "./energy";
 import { dayChecklist, type AppData } from "./gamify";
-import { buildModel, insights, targetsFor, weeklyCheckin } from "./insights";
+import { buildModel, insights, targetsFor, weeklyCheckin, weeklyRate, weeklyVerdict } from "./insights";
 import { overTarget } from "./nutrition";
 import { emptyDayLog, type DayLog, type Settings } from "./schemas";
 
@@ -150,6 +150,116 @@ describe("insights", () => {
   it("says nothing without data", () => {
     const d = data([]);
     expect(insights(d, [], today, { basis: null, tdee: null, recommendation: null })).toEqual([]);
+  });
+});
+
+describe("the week's rate against the plan (weeklyRate, weeklyVerdict)", () => {
+  const limits = { maxLossPctPerWeek: 1, maxGainPctPerWeek: 0.5 };
+  const cut = { direction: "lose", rateLbPerWeek: -1.5 } as const;
+  const build = { direction: "gain", rateLbPerWeek: 0.8 } as const;
+  const hold = { direction: "maintain", rateLbPerWeek: 0 } as const;
+  type Plan = Parameters<typeof weeklyRate>[0]["plan"];
+  /** A week that moved the trend by `changeLb` from 200 lb. */
+  const rate = (changeLb: number, plan: Plan = cut, loggedCount = 30) =>
+    weeklyRate({ trendWeight: 200 + changeLb, weekAgoTrendWeight: 200, loggedCount, plan, limits });
+  const verdict = (...args: Parameters<typeof rate>) => weeklyVerdict({ rate: rate(...args) });
+
+  it("on plan: at least 60% of the planned change, the planned way, within the limit", () => {
+    expect(verdict(-1.3)).toEqual({
+      kind: "on-plan",
+      tone: "good",
+      title: "On plan",
+      detail: "−1.3 lb this week against −1.5",
+      text: "On plan · −1.3 lb this week against −1.5",
+    });
+    expect(rate(-0.95).kind).toBe("on-plan");
+    // Quicker than planned but inside the safety limit is still on plan (the limit is the only ceiling).
+    expect(rate(-1.9).kind).toBe("on-plan");
+    expect(verdict(0.7, build).text).toBe("On plan · +0.7 lb this week against +0.8");
+  });
+
+  it("slower than plan: the planned way or flat, under 60%", () => {
+    expect(verdict(-0.4)).toMatchObject({ kind: "slower", tone: "info", text: "Slower than plan · −0.4 lb this week against −1.5" });
+    expect(rate(-0.85).kind).toBe("slower");
+    // A week that prints as 0.0 is slow, whichever side of zero it fell.
+    expect(verdict(0.04).text).toBe("Slower than plan · 0.0 lb this week against −1.5");
+    expect(rate(-0.04).kind).toBe("slower");
+    expect(rate(0.3, build).kind).toBe("slower");
+  });
+
+  it("wrong direction: against the plan, a warning", () => {
+    expect(verdict(0.6)).toMatchObject({ kind: "wrong-way", tone: "warn", text: "Wrong direction · +0.6 lb this week against −1.5" });
+    expect(rate(0.06).kind).toBe("wrong-way"); // prints as +0.1
+    expect(verdict(-0.5, build).text).toBe("Wrong direction · −0.5 lb this week against +0.8");
+    // …and past the limit for that direction, it says so.
+    expect(verdict(1.2).text).toBe("Wrong direction · +1.2 lb this week against −1.5, past your 0.5% weekly limit");
+    expect(rate(1.2).overLimit).toEqual({ direction: "gain", limitPct: 0.5 });
+  });
+
+  it("faster than plan: the planned way, past the safety limit", () => {
+    expect(verdict(-2.4)).toMatchObject({
+      kind: "faster",
+      tone: "warn",
+      text: "Faster than plan · −2.4 lb this week against −1.5, past your 1% weekly limit",
+    });
+    expect(rate(-2.4).overLimit).toEqual({ direction: "loss", limitPct: 1 });
+    expect(verdict(1.2, build).text).toBe("Faster than plan · +1.2 lb this week against +0.8, past your 0.5% weekly limit");
+    // Exactly at the limit is not past it.
+    expect(rate(-2).kind).toBe("on-plan");
+  });
+
+  it("maintaining: no direction to judge, only the limits", () => {
+    expect(verdict(0.2, hold)).toMatchObject({ kind: "maintaining", tone: "info", text: "Maintaining · trend +0.2 lb this week" });
+    expect(verdict(-0.3, null).text).toBe("Maintaining · trend −0.3 lb this week");
+    expect(verdict(-2.4, hold)).toMatchObject({
+      kind: "maintaining",
+      tone: "warn",
+      text: "Maintaining · trend −2.4 lb this week, past your 1% weekly limit",
+    });
+  });
+
+  it("not enough data yet: under 10 logged days, or no trend a week apart", () => {
+    expect(verdict(-1.3, cut, 6)).toMatchObject({
+      kind: "no-data",
+      tone: "info",
+      text: "Not enough data yet · the trend is judged after 10 logged days (6 so far)",
+    });
+    // The change is still known (the Trend weight tile shows it); it just isn't judged, nor flagged.
+    expect(rate(-3, cut, 9)).toMatchObject({ kind: "no-data", overLimit: null });
+    expect(rate(-3, cut, 9).changeLb).toBeCloseTo(-3);
+    expect(rate(-1.3, cut, 10).kind).toBe("on-plan");
+    const noTrend = weeklyRate({ trendWeight: 200, weekAgoTrendWeight: null, loggedCount: 30, plan: cut, limits });
+    expect(noTrend).toMatchObject({ kind: "no-data", changeLb: null, pctPerWeek: null });
+    expect(weeklyVerdict({ rate: noTrend }).text).toBe("Not enough data yet · it takes trend weights a week apart");
+  });
+
+  it("is the rule behind both the check-in's verdict and the rate insights", () => {
+    const goal = { targetLb: 180, pacePctPerWeek: 1, setOn: addDays(today, -30), startLb: 205 };
+    const onPlan = buildModel(
+      data(
+        daysBefore(21, (i) => ({ weightLb: 205 - i * 0.25, calories: 2500 })),
+        { settings: { ...settings, weightGoal: goal } },
+      ),
+      today,
+    );
+    expect(onPlan.checkin.rate).toMatchObject({ kind: "on-plan", overLimit: null, loggedCount: 21 });
+    expect(onPlan.checkin.rate.changeLb).toBe(onPlan.checkin.weightChangeLb);
+    expect(onPlan.checkin.rate.planLb).toBe(onPlan.checkin.targetRateLbPerWeek);
+    expect(onPlan.insights.map((i) => i.key)).toContain("on-rate");
+    expect(weeklyVerdict(onPlan.checkin)).toMatchObject({ kind: "on-plan", tone: "good" });
+    expect(weeklyVerdict(onPlan.checkin).text).toMatch(/^On plan · −1\.\d lb this week against −\d\.\d$/);
+
+    // No goal, dropping a pound a day: maintaining on paper, past the loss limit.
+    const fast = buildModel(data(daysBefore(21, (i) => ({ weightLb: 230 - i, calories: 2500 }))), today);
+    expect(fast.checkin.rate).toMatchObject({ kind: "maintaining", overLimit: { direction: "loss", limitPct: 1 } });
+    expect(fast.insights.map((i) => i.key)).toContain("loss-fast");
+    expect(weeklyVerdict(fast.checkin).tone).toBe("warn");
+
+    // Eight logged days: neither speaks.
+    const early = buildModel(data(daysBefore(8, (i) => ({ weightLb: 230 - i, calories: 2500 }))), today);
+    expect(early.checkin.rate.kind).toBe("no-data");
+    expect(early.insights.map((i) => i.key)).not.toContain("loss-fast");
+    expect(weeklyVerdict(early.checkin).text).toBe("Not enough data yet · the trend is judged after 10 logged days (8 so far)");
   });
 });
 

@@ -1,8 +1,8 @@
 /**
- * Progress charts daily steps with a weighted 7-day trend (SPEC §3.2): empty until a couple of
- * days have a count; then each day is a dot, the trend reads the weighted average through
+ * Progress → Activity charts daily steps with a weighted 7-day trend (SPEC §3.2): empty until a
+ * couple of days have a count; then each day is a dot, the trend reads the weighted average through
  * yesterday, today's count is a hollow "so far" point kept off the scale, and the step target is
- * a reference line named in the legend. The section names the range it follows.
+ * a reference line named in the legend. The range control sits at the top of the view.
  */
 import type { Page } from "@playwright/test";
 import { dismissCelebrations, expect, expectSynced, fillNumber, login, startClockAt, test } from "./helpers";
@@ -26,6 +26,7 @@ test("logging steps over several days draws the steps trend", async ({ page }) =
   await login(page);
 
   await page.getByRole("link", { name: "Progress" }).click();
+  await page.getByRole("tab", { name: "Activity" }).click();
   await expect(stepsSection(page).getByText("Log steps a few days to see your trend.")).toBeVisible();
 
   // Mon–Thu, then a partial count today.
@@ -40,6 +41,7 @@ test("logging steps over several days draws the steps trend", async ({ page }) =
   await expectSynced(page);
 
   await page.getByRole("link", { name: "Progress" }).click();
+  await page.getByRole("tab", { name: "Activity" }).click();
   const section = stepsSection(page);
   const chart = section.getByRole("img");
   await expect(chart).toBeVisible();
@@ -65,11 +67,11 @@ test("logging steps over several days draws the steps trend", async ({ page }) =
   await expect(table.getByRole("row", { name: /^Oct 29/ })).toContainText("13,158");
   await expect(table.getByRole("row", { name: /^Oct 30/ })).toContainText("4,000 so far");
 
-  // The range toggle (on Bodyweight) applies to it too, and the section says which range it shows.
-  await expect(section.getByText("Last 30 days")).toBeVisible();
-  await page.getByRole("button", { name: "90 days" }).click();
-  await expect(section.getByText("Last 90 days")).toBeVisible();
+  // The range control at the top of the view (shared with Body and Fuel) applies to it.
+  await expect(section.getByRole("button", { name: "30 days" })).toHaveAttribute("aria-pressed", "true");
+  await section.getByRole("button", { name: "90 days" }).click();
+  await expect(section.getByRole("button", { name: "90 days" })).toHaveAttribute("aria-pressed", "true");
   await expect(chart).toHaveAttribute("aria-label", /Trend 10,000 to 13,158\./);
-  await page.getByRole("button", { name: "All time" }).click();
-  await expect(section.getByText("All time")).toBeVisible();
+  await section.getByRole("button", { name: "All time" }).click();
+  await expect(section.getByRole("button", { name: "All time" })).toHaveAttribute("aria-pressed", "true");
 });
