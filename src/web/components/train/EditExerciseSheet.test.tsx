@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultSettings } from "../../../shared/defaults";
 import type { Exercise, Settings } from "../../../shared/schemas";
 import { MemoryRouter } from "react-router";
-import { LiftsEditor } from "../../screens/Settings";
+import { LiftsEditor } from "../program/LiftsEditor";
 
 const store = vi.hoisted(() => ({
   exercises: [] as Exercise[],
@@ -145,7 +145,7 @@ describe("Edit exercise", () => {
     const note =
       "Mon’s main lift: the program calculates it from its max, so its category, measure and max stay as they are and it can’t be archived. Change the weekly layout to free them.";
     expect(q.getByText((_, el) => el?.tagName === "P" && el.textContent === note)).toBeTruthy();
-    expect(q.getByRole("link", { name: "weekly layout" }).getAttribute("href")).toBe("/settings#program");
+    expect(q.getByRole("link", { name: "weekly layout" }).getAttribute("href")).toBe("/program#layout");
     for (const group of ["Category", "Measured in", "Max"]) {
       const g = q.getByRole("group", { name: group, description: note });
       // Locked, not disabled: still reached by Tab (and with them the note); a press changes nothing.

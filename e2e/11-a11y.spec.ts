@@ -82,6 +82,7 @@ const SCREENS = [
   ["Progress", "/progress"],
   ["Goals", "/goals"],
   ["Settings", "/settings"],
+  ["Program", "/program"],
 ] as const;
 
 test.describe("axe: no serious or critical violations", () => {
@@ -121,9 +122,9 @@ test.describe("axe: no serious or critical violations", () => {
     await expectNoSeriousViolations(page, "the new strength target sheet", { minChecked: 0 });
   });
 
-  test("Settings: edit exercise sheet (an accessory, and a main lift the program locks)", async ({ page }) => {
+  test("Program: edit exercise sheet (an accessory, and a main lift the program locks)", async ({ page }) => {
     for (const name of ["Sandbag carry", "Bench press"]) {
-      await page.goto("/settings");
+      await page.goto("/program");
       await page.getByRole("button", { name: `Edit ${name}`, exact: true }).click();
       const sheet = page.getByRole("dialog", { name: `Edit ${name}` });
       await expect(sheet.getByRole("textbox", { name: "Name" })).toHaveValue(name);

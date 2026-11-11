@@ -2,7 +2,7 @@
  * Main-lift maths: rep-max estimation, working weights, cycle position and AMRAP
  * progression. All rules come from the (editable) Program settings. See docs/SPEC.md §6.
  */
-import { addDays, daysBetween, weekdayOf, type ISODate } from "./dates";
+import { addDays, daysBetween, isISODate, startOfWeek, weekdayOf, type ISODate } from "./dates";
 import type { MaxEntry, Program, ProgramDay, ProgramWeek } from "./schemas";
 
 export function roundTo(value: number, increment: number): number {
@@ -100,6 +100,45 @@ export function programDayFor(program: Program, date: ISODate): ProgramDay | nul
 export function scheduledProgramDay(program: Program, date: ISODate): ProgramDay | null {
   if (program.weeks.length === 0 || daysBetween(program.cycleStartDate, date) < 0) return null;
   return programDayFor(program, date);
+}
+
+/** Program weeks run Monday–Sunday: a cycle start snaps to the Monday on or before the date. */
+export function snapCycleStart(date: ISODate): ISODate {
+  return startOfWeek(date);
+}
+
+/**
+ * The program with its whole plan moved by whole weeks: the first cycle starts `weeks` later
+ * (negative: earlier), on a Monday. Every week of every cycle moves with it — a week later, the
+ * current week becomes the one before it (or the wait before week 1). Unchanged when the move
+ * would leave the calendar.
+ */
+export function shiftCycleStart(program: Program, weeks: number): Program {
+  const cycleStartDate = snapCycleStart(addDays(snapCycleStart(program.cycleStartDate), Math.trunc(weeks) * 7));
+  return isISODate(cycleStartDate) ? { ...program, cycleStartDate } : program;
+}
+
+export interface CycleShiftPreview {
+  /** The program after the shift. */
+  program: Program;
+  /** Where `date` sits afterwards; null when the first cycle would only start after it. */
+  position: CyclePosition | null;
+  /** The first lifting day on or after `date` under the shifted plan (null without lifting days). */
+  next: { date: ISODate; day: ProgramDay; position: CyclePosition } | null;
+}
+
+/** What `shiftCycleStart(program, weeks)` would mean on `date` (today), before doing it. */
+export function previewCycleShift(program: Program, weeks: number, date: ISODate): CycleShiftPreview {
+  const shifted = shiftCycleStart(program, weeks);
+  const from = daysBetween(shifted.cycleStartDate, date) < 0 ? shifted.cycleStartDate : date;
+  let next: CycleShiftPreview["next"] = null;
+  for (let i = 0; i < 7 && !next; i++) {
+    const d = addDays(from, i);
+    const day = scheduledProgramDay(shifted, d);
+    const position = day && cyclePosition(shifted, d);
+    if (day && position) next = { date: d, day, position };
+  }
+  return { program: shifted, position: cyclePosition(shifted, date), next };
 }
 
 /** Max increase earned on an AMRAP set (0 when the target wasn't beaten). */

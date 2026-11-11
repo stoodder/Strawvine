@@ -31,7 +31,7 @@ const scroll = (page: Page) => page.evaluate(() => ({ x: window.scrollX, y: wind
 test("an open sheet holds the page still; closing it gives the page back where it was", async ({ page }) => {
   await startClockAt(page, SUNDAY);
   await login(page);
-  await page.goto("/settings");
+  await page.goto("/program");
   const trigger = page.getByRole("button", { name: "Edit Bench press", exact: true });
   // Well down a long page.
   await trigger.evaluate((el) => el.scrollIntoView({ block: "center" }));
@@ -80,7 +80,7 @@ test("an open sheet holds the page still; closing it gives the page back where i
 test("sideways: a too-wide stray can't be scrolled or swiped to, with or without a sheet", async ({ page }) => {
   await startClockAt(page, SUNDAY);
   await login(page);
-  await page.goto("/settings");
+  await page.goto("/program");
   await expect(page.getByRole("button", { name: "Edit Bench press", exact: true })).toBeVisible();
 
   // No overscroll-behavior-x on the page: it would disable the trackpad's back/forward swipe.

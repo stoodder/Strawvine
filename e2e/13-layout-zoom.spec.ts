@@ -22,6 +22,7 @@ for (const width of [195, 320]) {
       ["Progress", "/progress", null],
       ["Goals", "/goals", null],
       ["Settings", "/settings", null],
+      ["Program", "/program", null],
     ] as const)
       test(name, async ({ page }) => {
         await page.goto(path);

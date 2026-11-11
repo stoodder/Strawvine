@@ -95,7 +95,7 @@ test("forget this device clears the known-device cookie", async ({ page, context
   await expect(done.or(signIn)).toBeVisible();
   if (await done.isVisible()) {
     await page.reload();
-    await expect(page.getByRole("heading", { name: "The rules" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   }
 });
 

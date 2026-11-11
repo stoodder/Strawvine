@@ -1,288 +1,45 @@
 import clsx from "clsx";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { Link, useNavigate } from "react-router";
-import { ChevronLeft, ChevronRight, Download, LogOut, Plus, RefreshCw, Trash2, UserX } from "lucide-react";
-import { isISODate, startOfWeek, WEEKDAY_SHORT } from "../../shared/dates";
-import { displayPrefs, trainingPrefs } from "../../shared/defaults";
-import { repMaxPct } from "../../shared/program";
-import { settingsSchema, type Exercise, type Program, type ProgramWeek, type Settings } from "../../shared/schemas";
-import { InlineText } from "../components/InlineText";
+import { useEffect, useId, useRef, useState } from "react";
+import { Link, Navigate, useLocation, useNavigate } from "react-router";
+import { ChevronLeft, ChevronRight, Download, LogOut, RefreshCw, UserX } from "lucide-react";
+import { displayPrefs } from "../../shared/defaults";
+import { programPathForSettingsHash } from "../components/program/sections";
+import { DayPicker, NumSetting } from "../components/settings/fields";
+import { JumpList, useJumpToHash } from "../components/settings/JumpList";
+import { useSettingsEditor } from "../components/settings/useSettingsEditor";
 import { useToast } from "../components/Toast";
 import { useFocusAfter } from "../components/useFocusAfter";
-import { formatRest, parseRest } from "../components/settings/restTime";
-import { EditExerciseSheet } from "../components/train/EditExerciseSheet";
-import { exerciseTag } from "../components/train/ExerciseFields";
-import { BoxNumber, Field, Section, Toggle, useFieldIds } from "../components/ui";
+import { Field, Section, Toggle } from "../components/ui";
 import { useTitle } from "../components/useTitle";
-import { fmt } from "../lib/format";
-import { forgetDevice, signOut, useCreateExercise, useData, useSaveSettings, useSyncInfo } from "../lib/store";
+import { forgetDevice, signOut, useSyncInfo } from "../lib/store";
 import { noteOfflineSignOut } from "./Login";
 
-// Weekday order shown Monday-first; values are JS weekday indices.
-const ORDER = [1, 2, 3, 4, 5, 6, 0];
-
-/** Human names for settings paths, so a rejected save reads "Steps target …", not "targets.steps: …". */
-const PATH_NAMES: Array<[RegExp, string]> = [
-  [/^targets\.steps/, "Steps target"],
-  [/^targets\.zone2Minutes/, "Zone 2 minutes"],
-  [/^nutrition\.proteinGPerLb/, "Protein"],
-  [/^nutrition\.fatGPerLb/, "Fat"],
-  [/^nutrition\.initialTdee/, "Maintenance estimate"],
-  [/^nutrition\.kcalPerLb/, "Calories per lb"],
-  [/^limits\.maxLoss/, "Max loss"],
-  [/^limits\.maxGain/, "Max gain"],
-  [/^program\.name/, "Program name"],
-  [/^program\.intensity/, "Working weight"],
-  [/^program\.roundToLb/, "Rounding"],
-  [/^program\.progression/, "Per extra rep"],
-  [/^program\.deloadAccessoryLoad/, "Deload accessories"],
-  [/^program\.repMaxPct/, "Rep-max table"],
-  [/^program\.weeks\.(\d+)/, "Week $1"],
-  [/^program\.weeks/, "Cycle weeks"],
-  [/^program\.days/, "Weekly layout"],
-  [/^program\.cycleStartDate/, "Cycle start date"],
-  [/^training\.restSecondsMain/, "Main lift rest"],
-  [/^training\.restSecondsAccessory/, "Accessory rest"],
-  [/^training\.accessoryIncrementLb/, "Accessory increment"],
-];
-
-/** A readable sentence for a schema issue. */
-function readableIssue(issue: { path: PropertyKey[]; code: string; message: string } & Record<string, unknown>): string {
-  const path = issue.path.join(".");
-  let name = "That value";
-  for (const [re, label] of PATH_NAMES) {
-    const m = path.match(re);
-    if (m) {
-      name = label.replace("$1", String(Number(m[1] ?? 0) + 1));
-      break;
-    }
-  }
-  if (issue.code === "too_big" && typeof issue.maximum === "number")
-    return `${name} can be at most ${fmt(issue.maximum, 2).replace(/\.?0+$/, "")}.`;
-  if (issue.code === "too_small" && typeof issue.minimum === "number")
-    return `${name} must be at least ${fmt(issue.minimum, 2).replace(/\.?0+$/, "")}.`;
-  if (issue.code === "invalid_type") return `${name} needs a number.`;
-  return `${name}: ${issue.message.toLowerCase()}.`;
-}
-
-/** Inline range check for a number setting; returns a message or null. */
-function rangeError(
-  v: number | null,
-  min: number,
-  max: number,
-  opts: { unit?: string; optional?: boolean; integer?: boolean } = {},
-): string | null {
-  if (v === null) return opts.optional ? null : "Enter a number.";
-  const u = opts.unit ?? "";
-  if (v < min || v > max) return `Between ${fmt(min, min % 1 ? 1 : 0)}${u} and ${fmt(max, max % 1 ? 1 : 0)}${u}.`;
-  if (opts.integer && !Number.isInteger(v)) return "Whole numbers only.";
-  return null;
-}
-
-/**
- * A Field with a BoxNumber that validates on commit: an out-of-range value stays visible with an
- * inline message (and isn't saved) until it's fixed.
- */
-function NumSetting({
-  label,
-  hint,
-  value,
-  onSave,
-  min,
-  max,
-  unit,
-  decimals = 0,
-  optional,
-  integer,
-  placeholder,
-  grouping,
-  unitInMessage,
-}: {
-  label: ReactNode;
-  hint?: ReactNode;
-  value: number | null;
-  onSave: (v: number | null) => void;
-  min: number;
-  max: number;
-  unit?: string;
-  decimals?: number;
-  optional?: boolean;
-  integer?: boolean;
-  placeholder?: string;
-  grouping?: boolean;
-  unitInMessage?: string;
-}) {
-  const [error, setError] = useState<string | null>(null);
-  return (
-    <Field label={label} hint={hint} error={error}>
-      <BoxNumber
-        ariaLabel={typeof label === "string" ? label : "Value"}
-        value={value}
-        unit={unit}
-        decimals={decimals}
-        placeholder={placeholder}
-        grouping={grouping}
-        onCommit={(v) => {
-          const e = rangeError(v, min, max, { unit: unitInMessage, optional, integer });
-          setError(e);
-          if (!e) onSave(v);
-        }}
-      />
-    </Field>
-  );
-}
-
-/** A rest time, shown and typed as m:ss ("3:00"); "330", "3.30", minutes ("3") and seconds ("180") work too (see restTime.ts). */
-function RestSetting({
-  label,
-  hint,
-  value,
-  onSave,
-  min,
-  max,
-}: {
-  label: string;
-  hint?: ReactNode;
-  value: number;
-  onSave: (seconds: number) => void;
-  min: number;
-  max: number;
-}) {
-  const [error, setError] = useState<string | null>(null);
-  return (
-    <Field label={label} hint={hint} error={error}>
-      <RestInput
-        label={label}
-        value={value}
-        onCommit={(text) => {
-          const v = parseRest(text);
-          const e =
-            v === null
-              ? "Enter a time like 3:00 (or 330), or seconds."
-              : v < min || v > max
-                ? `Between ${formatRest(min)} and ${formatRest(max)}.`
-                : null;
-          setError(e);
-          if (e || v === null) return false;
-          if (v !== value) onSave(v);
-          return true;
-        }}
-      />
-    </Field>
-  );
-}
-
-function RestInput({ label, value, onCommit }: { label: string; value: number; onCommit: (text: string) => boolean }) {
-  const field = useFieldIds();
-  const [text, setText] = useState(formatRest(value));
-  const [focused, setFocused] = useState(false);
-  useEffect(() => {
-    if (!focused) setText(formatRest(value));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the saved value changes
-  }, [value]);
-  // While typing, how the entry reads ("330" → 3:30), so a keypad without ":" is no guesswork.
-  const parsed = focused ? parseRest(text) : null;
-  const reading = parsed !== null && formatRest(parsed) !== text.trim() ? formatRest(parsed) : null;
-  return (
-    // A <label>, so a tap on the padding focuses the input.
-    <label className="box-field inline-flex cursor-text items-baseline gap-1.5 rounded-xl bg-white/[0.05] px-3 py-2">
-      {reading && (
-        <span aria-hidden className="num text-xs text-mute">
-          {reading}?
-        </span>
-      )}
-      <input
-        aria-label={label}
-        aria-labelledby={field?.labelId}
-        aria-describedby={field?.describedBy}
-        aria-invalid={field?.invalid || undefined}
-        value={text}
-        placeholder="3:00"
-        // The decimal pad: digits and "." ("3.30"); ":" still works from a full keyboard.
-        inputMode="decimal"
-        autoComplete="off"
-        enterKeyHint="done"
-        onFocus={(e) => {
-          setFocused(true);
-          e.currentTarget.select();
-        }}
-        onBlur={() => {
-          setFocused(false);
-          // Valid: show it tidied ("330" → "3:30"); invalid: keep what was typed next to the message.
-          if (onCommit(text)) setText(formatRest(parseRest(text)!));
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") e.currentTarget.blur();
-        }}
-        onChange={(e) => setText(e.target.value)}
-        className="field num w-[5.5ch] min-w-0 text-right text-base"
-      />
-    </label>
-  );
-}
-
-/** The long page's sections, as a jump list under the title. */
+/** The page's sections, as a jump list under the title. */
 const JUMPS = [
   ["targets", "Targets"],
+  ["schedule", "Schedule"],
   ["nutrition", "Nutrition"],
-  ["training", "Training"],
   ["display", "Display"],
-  ["program", "Program"],
   ["sync", "Sync"],
   ["data", "Data"],
 ] as const;
 
-function JumpList() {
-  return (
-    <nav aria-label="Settings sections" className="mt-4 -ml-1.5">
-      <ul className="flex flex-wrap items-center gap-x-3">
-        {JUMPS.map(([id, name]) => (
-          <li key={id}>
-            <a
-              href={`#${id}`}
-              // Underlined (a hairline under the word), so the items read as links, not labels.
-              className="label inline-flex min-h-11 items-center px-1.5 text-fg-2 underline decoration-white/25 decoration-1 underline-offset-[5px] hover:decoration-accent"
-              onClick={(e) => {
-                const section = document.getElementById(id);
-                if (!section) return;
-                e.preventDefault();
-                const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-                section.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
-                // Keyboard and screen-reader users continue from the section's heading.
-                section.querySelector<HTMLElement>("[data-section-heading]")?.focus({ preventScroll: true });
-                history.replaceState(history.state, "", `#${id}`);
-              }}
-            >
-              {name}
-            </a>
-          </li>
-        ))}
-      </ul>
-    </nav>
-  );
+/**
+ * Settings (`/settings`): preferences — targets, schedule, nutrition, display, sync, data. The
+ * training plan lives on Program; an old link to a section that moved there (`/settings#program`,
+ * `#training`) goes to it.
+ */
+export function SettingsScreen() {
+  const { hash } = useLocation();
+  const moved = programPathForSettingsHash(hash);
+  return moved ? <Navigate to={moved} replace /> : <SettingsBody />;
 }
 
-export function SettingsScreen() {
-  const { data } = useData();
-  const saveSettings = useSaveSettings();
-  const s = data.settings;
-  const [error, setError] = useState<string | null>(null);
-  useTitle("Settings");
-
-  const save = (next: Settings) => {
-    // Validate here with the server's own schema, so a bad value never leaves the device.
-    const r = settingsSchema.safeParse(next);
-    if (!r.success) {
-      setError(readableIssue(r.error.issues[0] as unknown as Parameters<typeof readableIssue>[0]));
-      return;
-    }
-    setError(null);
-    saveSettings(next).catch((e: unknown) => setError(e instanceof Error ? e.message : "Couldn't save."));
-  };
-  const setProgram = (p: Partial<Program>) => save({ ...s, program: { ...s.program, ...p } });
-  const training = trainingPrefs(s);
-  const setTraining = (t: Partial<typeof training>) => save({ ...s, training: { ...training, ...t } });
+function SettingsBody() {
+  const { settings: s, error, save } = useSettingsEditor();
   const display = displayPrefs(s);
+  useTitle("Settings");
+  useJumpToHash();
 
   return (
     <div>
@@ -290,11 +47,11 @@ export function SettingsScreen() {
         <Link to="/" aria-label="Back" className="tap -my-2 -ml-3 grid h-11 w-11 place-items-center text-mute">
           <ChevronLeft size={18} />
         </Link>
-        <div className="label text-fg-2">Settings</div>
+        <div className="label text-fg-2">The rules</div>
       </header>
-      <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">The rules</h1>
+      <h1 className="mt-6 text-[2.75rem] leading-none font-light tracking-tight">Settings</h1>
       <p className="mt-3 text-sm text-mute">Nothing here is set in stone. Change it and everything recalculates.</p>
-      <JumpList />
+      <JumpList label="Settings sections" items={JUMPS} />
       {error && (
         <p role="alert" className="mt-4 text-sm text-warn">
           {error}
@@ -325,10 +82,21 @@ export function SettingsScreen() {
         </div>
       </Section>
 
-      <Section label="Schedule">
+      <Section label="Schedule" id="schedule">
         <DayPicker label="Metcon" value={s.schedule.metcon} onChange={(metcon) => save({ ...s, schedule: { ...s.schedule, metcon } })} />
         <div className="h-6" />
         <DayPicker label="Zone 2" value={s.schedule.zone2} onChange={(zone2) => save({ ...s, schedule: { ...s.schedule, zone2 } })} />
+        {/* The lifting days, the cycle and its rules are the plan, not a preference: they live on Program. */}
+        <Link to="/program" className="tap mt-6 flex min-h-11 items-center gap-3 py-2" data-program-link="">
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm text-fg-2">Training program</span>
+            <span className="mt-0.5 block text-xs text-mute">Lifting days, cycle, rules, rest timers and the exercise library</span>
+          </span>
+          <span className="label shrink-0" aria-hidden>
+            Program
+          </span>
+          <ChevronRight size={14} className="shrink-0 text-mute" aria-hidden />
+        </Link>
       </Section>
 
       <Section label="Nutrition" id="nutrition">
@@ -402,38 +170,6 @@ export function SettingsScreen() {
         </div>
       </Section>
 
-      <Section label="Training" id="training">
-        <div className="divide-y divide-white/[0.04]">
-          <RestSetting
-            label="Main lift rest"
-            hint="Rest timer target after a main-lift set"
-            value={training.restSecondsMain}
-            min={10}
-            max={900}
-            onSave={(v) => setTraining({ restSecondsMain: v })}
-          />
-          <RestSetting
-            label="Accessory rest"
-            hint="After accessory and superset sets"
-            value={training.restSecondsAccessory}
-            min={10}
-            max={900}
-            onSave={(v) => setTraining({ restSecondsAccessory: v })}
-          />
-          <NumSetting
-            label="Accessory increment"
-            hint="Suggested jump on a weighted accessory after hitting every target. 0 turns hints off."
-            value={training.accessoryIncrementLb}
-            decimals={1}
-            unit="lb"
-            min={0}
-            max={50}
-            unitInMessage=" lb"
-            onSave={(v) => v !== null && setTraining({ accessoryIncrementLb: v })}
-          />
-        </div>
-      </Section>
-
       <Section label="Display" id="display">
         <Field label="High contrast" hint="Brighter text and stronger edges for gym glare and sunlight">
           <Toggle
@@ -443,10 +179,6 @@ export function SettingsScreen() {
           />
         </Field>
       </Section>
-
-      <ProgramEditor program={s.program} setProgram={setProgram} />
-
-      <LiftsEditor />
 
       <SyncSection />
 
@@ -464,460 +196,6 @@ export function SettingsScreen() {
         Strawvine · built for pushing boundaries
       </p>
     </div>
-  );
-}
-
-function DayPicker({ label, value, onChange }: { label: string; value: boolean[]; onChange: (v: boolean[]) => void }) {
-  return (
-    <div role="group" aria-label={`${label} days`}>
-      <div className="mb-1 text-sm text-fg-2">{label}</div>
-      {/* Seven equal cells: each is a full 44px-tall target around a small round day. */}
-      <div className="grid max-w-sm grid-cols-7">
-        {ORDER.map((d) => (
-          <button
-            key={d}
-            type="button"
-            aria-pressed={value[d]}
-            aria-label={WEEKDAY_SHORT[d]}
-            onClick={() => onChange(value.map((x, i) => (i === d ? !x : x)))}
-            className="tap grid h-11 place-items-center"
-          >
-            <span
-              className={clsx(
-                // 32px round; shrinks (never overlaps its neighbour) when seven don't fit.
-                "grid aspect-square w-full max-w-8 place-items-center rounded-full text-[0.6875rem] font-medium",
-                value[d] ? "bg-accent text-accent-ink" : "bg-white/[0.04] text-mute",
-              )}
-            >
-              {WEEKDAY_SHORT[d]![0]}
-            </span>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function RepsInput({ value, onCommit, ariaLabel }: { value: number[]; onCommit: (v: number[]) => void; ariaLabel: string }) {
-  const [text, setText] = useState(value.join(", "));
-  const [error, setError] = useState<string | null>(null);
-  const errId = useId();
-  return (
-    <div>
-      <input
-        aria-label={ariaLabel}
-        aria-invalid={!!error || undefined}
-        aria-describedby={error ? errId : undefined}
-        value={text}
-        inputMode="numeric"
-        onChange={(e) => setText(e.target.value)}
-        onBlur={() => {
-          const parts = text.split(/[\s,/]+/).filter(Boolean);
-          const reps = parts.map(Number);
-          const ok = reps.length > 0 && reps.length <= 12 && reps.every((n) => Number.isInteger(n) && n > 0 && n <= 50);
-          if (!ok) {
-            setError(
-              reps.length > 12
-                ? "Up to 12 sets."
-                : reps.length === 0
-                  ? "Enter the reps for each set, e.g. 5, 5, 5."
-                  : "Reps are whole numbers from 1 to 50.",
-            );
-            return;
-          }
-          setError(null);
-          if (reps.join() !== value.join()) onCommit(reps);
-          setText(reps.join(", "));
-        }}
-        className="field num w-full rounded-xl bg-white/[0.05] px-3 py-2 text-base"
-      />
-      {error && (
-        <div id={errId} role="alert" className="mt-1.5 text-xs text-warn">
-          {error}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ProgramEditor({ program, setProgram }: { program: Program; setProgram: (p: Partial<Program>) => void }) {
-  const { data } = useData();
-  const toast = useToast();
-  const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
-  const setWeek = (i: number, w: Partial<ProgramWeek>) =>
-    setProgram({ weeks: program.weeks.map((x, j) => (j === i ? { ...x, ...w } : x)) });
-  const tableReps = Object.keys(program.repMaxPct)
-    .map(Number)
-    .sort((a, b) => a - b);
-  // Undo runs from a toast, later: restore into the program as it is then.
-  const latest = useRef(program);
-  latest.current = program;
-
-  return (
-    <>
-      <Section label="Program" id="program">
-        <div className="divide-y divide-white/[0.04]">
-          {/* Long names need the full width: label above, the name below. */}
-          <div className="py-3">
-            <div className="text-sm text-fg-2">Program name</div>
-            <InlineText
-              ariaLabel="Program name"
-              value={program.name}
-              maxLength={60}
-              required
-              requiredMessage="Give the program a name."
-              onCommit={(name) => setProgram({ name })}
-              className="mt-1"
-              inputClassName="text-base"
-            />
-          </div>
-          <Field label="Cycle start date" hint="Snaps to that week's Monday">
-            <input
-              type="date"
-              value={program.cycleStartDate}
-              onChange={(e) => isISODate(e.target.value) && setProgram({ cycleStartDate: startOfWeek(e.target.value) })}
-              className="field num rounded-xl bg-white/[0.05] px-3 py-2 text-base [color-scheme:dark]"
-            />
-          </Field>
-          <NumSetting
-            label="Working weight"
-            hint="% of the N-rep max"
-            value={Math.round(program.intensity * 100)}
-            unit="%"
-            min={30}
-            max={120}
-            unitInMessage="%"
-            onSave={(v) => v !== null && setProgram({ intensity: v / 100 })}
-          />
-          <NumSetting
-            label="Round weights to"
-            hint="Nearest plate increment"
-            value={program.roundToLb}
-            decimals={1}
-            unit="lb"
-            min={0.5}
-            max={25}
-            unitInMessage=" lb"
-            onSave={(v) => v !== null && setProgram({ roundToLb: v })}
-          />
-          <Field label="AMRAP last set" hint="Main lift, non-deload weeks">
-            <Toggle label="AMRAP last set" on={program.amrapLastSet} onChange={(v) => setProgram({ amrapLastSet: v })} />
-          </Field>
-          <Field label="Auto progression" hint="Suggest a max bump when you beat the AMRAP target">
-            <Toggle
-              label="Auto progression"
-              on={program.progression.enabled}
-              onChange={(v) => setProgram({ progression: { ...program.progression, enabled: v } })}
-            />
-          </Field>
-          {program.progression.enabled && (
-            <NumSetting
-              label="Per extra rep"
-              value={program.progression.lbPerExtraRep}
-              decimals={1}
-              unit="lb"
-              min={0}
-              max={25}
-              unitInMessage=" lb"
-              onSave={(v) => v !== null && setProgram({ progression: { ...program.progression, lbPerExtraRep: v } })}
-            />
-          )}
-          <NumSetting
-            label="Deload accessories"
-            hint="% of normal load"
-            value={Math.round(program.deloadAccessoryLoad * 100)}
-            unit="%"
-            min={30}
-            max={100}
-            unitInMessage="%"
-            onSave={(v) => v !== null && setProgram({ deloadAccessoryLoad: v / 100 })}
-          />
-        </div>
-      </Section>
-
-      <Section label="Cycle weeks" right={<span className="label">{program.weeks.length}</span>}>
-        <div className="space-y-6">
-          {program.weeks.map((w, i) => (
-            <div key={i}>
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3">
-                <div className="flex min-w-0 flex-[1_1_8rem] items-center gap-2">
-                  <span className="label w-5 shrink-0 text-accent" aria-hidden>
-                    {String(i + 1).padStart(2, "0")}
-                  </span>
-                  <InlineText
-                    ariaLabel={`Week ${i + 1} name`}
-                    value={w.label}
-                    maxLength={40}
-                    required
-                    requiredMessage="Name the week."
-                    onCommit={(label) => setWeek(i, { label })}
-                    className="w-40 min-w-0 shrink"
-                    inputClassName="text-sm"
-                  />
-                </div>
-                <div className="ml-auto flex shrink-0 items-center gap-3">
-                  <span className="text-xs text-mute" aria-hidden>
-                    Deload
-                  </span>
-                  <Toggle
-                    label={`Week ${i + 1} deload`}
-                    on={w.deload}
-                    onChange={(v) => setWeek(i, { deload: v, basisReps: v ? (w.basisReps ?? 12) : null })}
-                  />
-                  {program.weeks.length > 1 && (
-                    <button
-                      type="button"
-                      aria-label={`Remove week ${i + 1}`}
-                      className="tap -my-2 -mr-3 grid h-11 w-11 place-items-center text-mute"
-                      onClick={() => {
-                        setProgram({ weeks: program.weeks.filter((_, j) => j !== i) });
-                        toast.show({
-                          message: `Week ${i + 1} removed`,
-                          action: {
-                            label: "Undo",
-                            onAction: () => {
-                              const weeks = [...latest.current.weeks];
-                              weeks.splice(Math.min(i, weeks.length), 0, w);
-                              setProgram({ weeks });
-                            },
-                          },
-                        });
-                      }}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className="flex flex-wrap items-start gap-3 pl-7">
-                <div className="min-w-[7rem] flex-1">
-                  <RepsInput
-                    key={w.reps.join()}
-                    ariaLabel={`Week ${i + 1} reps per set`}
-                    value={w.reps}
-                    onCommit={(reps) => setWeek(i, { reps })}
-                  />
-                </div>
-                {w.deload && (
-                  <div className="flex shrink-0 items-center gap-2 pt-1 text-xs text-mute">
-                    <span aria-hidden>@</span>
-                    <BoxNumber
-                      ariaLabel={`Week ${i + 1} load based on rep max`}
-                      value={w.basisReps}
-                      onCommit={(v) => v !== null && v >= 1 && v <= 50 && setWeek(i, { basisReps: Math.round(v) })}
-                      min={1}
-                      max={50}
-                      unit="RM"
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-        <button
-          type="button"
-          className="btn-ghost mt-6"
-          disabled={program.weeks.length >= 16}
-          onClick={() =>
-            setProgram({
-              weeks: [...program.weeks, { label: `Week ${program.weeks.length + 1}`, deload: false, reps: [5, 5, 5, 5], basisReps: null }],
-            })
-          }
-        >
-          <Plus size={16} /> Week
-        </button>
-      </Section>
-
-      <Section label="Weekly layout">
-        <div className="space-y-1">
-          {ORDER.map((wd) => {
-            const day = program.days[String(wd)];
-            const name = WEEKDAY_SHORT[wd]!;
-            const setDay = (patch: Partial<NonNullable<typeof day>> | null) => {
-              const days = { ...program.days };
-              if (patch === null) delete days[String(wd)];
-              else days[String(wd)] = { label: "Training", primaryExerciseId: null, progression: true, ...day, ...patch };
-              setProgram({ days });
-            };
-            return (
-              <div key={wd} className="py-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className={clsx("w-10 shrink-0 text-sm", day ? "text-fg" : "text-mute")}>{name}</span>
-                  {day ? (
-                    <InlineText
-                      ariaLabel={`${name} session name`}
-                      value={day.label}
-                      maxLength={40}
-                      required
-                      requiredMessage="Name the session."
-                      onCommit={(label) => setDay({ label })}
-                      className="flex-1"
-                      inputClassName="text-sm text-fg-2"
-                    />
-                  ) : (
-                    <span className="flex-1 text-sm text-mute">No lifting</span>
-                  )}
-                  <Toggle label={`${name} lifting day`} on={!!day} onChange={(v) => setDay(v ? {} : null)} />
-                </div>
-                {day && (
-                  <div className="mt-2 flex flex-wrap items-center gap-3 min-[25rem]:pl-[3.25rem]">
-                    <select
-                      aria-label={`${name} main lift`}
-                      value={day.primaryExerciseId ?? ""}
-                      onChange={(e) => setDay({ primaryExerciseId: e.target.value ? Number(e.target.value) : null })}
-                      className="field min-w-[8rem] flex-1 rounded-xl bg-white/[0.05] px-3 py-2 text-base [color-scheme:dark]"
-                    >
-                      <option value="">No main lift</option>
-                      {tracked.map((e) => (
-                        <option key={e.id} value={e.id}>
-                          {e.name}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="ml-auto text-xs text-mute" aria-hidden>
-                      AMRAP
-                    </span>
-                    <Toggle label={`${name} AMRAP progression`} on={day.progression} onChange={(v) => setDay({ progression: v })} />
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </Section>
-
-      <Section label="Rep-max table">
-        <p className="mb-4 text-xs text-mute">The % of your max you could lift for N reps. Missing counts are interpolated.</p>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-3 min-[25rem]:grid-cols-3 min-[25rem]:gap-x-5">
-          {tableReps.map((r) => (
-            <div key={r} className="flex items-center justify-between gap-2">
-              <span className="num text-xs text-mute" aria-hidden>
-                {r} RM
-              </span>
-              <BoxNumber
-                ariaLabel={`${r} RM percent of max`}
-                value={Math.round(repMaxPct(program.repMaxPct, r) * 1000) / 10}
-                decimals={1}
-                className="px-2 py-1"
-                onCommit={(v) => {
-                  if (v !== null && (v < 10 || v > 100)) {
-                    toast.show({ message: `${r} RM: enter a percent between 10 and 100.`, tone: "warn" });
-                    return;
-                  }
-                  const next = { ...program.repMaxPct };
-                  if (v === null) delete next[String(r)];
-                  else next[String(r)] = v / 100;
-                  setProgram({ repMaxPct: next });
-                }}
-              />
-            </div>
-          ))}
-        </div>
-      </Section>
-    </>
-  );
-}
-
-/** The library row's tag: the exercise's tag (`exerciseTag`), then "max" when it tracks one (and "archived", shown apart). */
-const libraryTag = (e: Exercise) => [exerciseTag(e), e.tracksMax ? "max" : null].filter(Boolean).join(" · ");
-
-export function LiftsEditor() {
-  const { data } = useData();
-  const createExercise = useCreateExercise();
-  const focusAfter = useFocusAfter();
-  const showArchivedRef = useRef<HTMLButtonElement>(null);
-  const [name, setName] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const editing = editingId === null ? null : (data.exercises.find((e) => e.id === editingId) ?? null);
-  const list = data.exercises.filter((e) => showArchived || !e.archived);
-  /**
-   * After the sheet closes. An exercise archived while archived ones are hidden leaves the list
-   * with the row that opened the sheet: focus goes to the next row (else the one before, else
-   * "show archived") instead of falling to the page.
-   */
-  const closeEditor = (saved?: { archived?: boolean }) => {
-    const id = editingId;
-    setEditingId(null);
-    if (!saved?.archived || showArchived || id === null) return;
-    const at = list.findIndex((e) => e.id === id);
-    const next = list[at + 1] ?? list[at - 1];
-    focusAfter(() => (next ? document.querySelector<HTMLElement>(`[data-exercise="${next.id}"]`) : showArchivedRef.current));
-  };
-  return (
-    <Section
-      label="Exercise library"
-      right={
-        <button
-          ref={showArchivedRef}
-          type="button"
-          aria-pressed={showArchived}
-          className="label hit -my-2 py-2 text-mute"
-          onClick={() => setShowArchived(!showArchived)}
-        >
-          {showArchived ? "hide archived" : "show archived"}
-        </button>
-      }
-    >
-      <ul className="divide-y divide-white/[0.04]">
-        {list.map((e) => (
-          <li key={e.id}>
-            {/* One tap opens the Edit exercise sheet (name, category, measure, load, max, archive). */}
-            <button
-              type="button"
-              aria-describedby={`lib-tag-${e.id}`}
-              aria-haspopup="dialog"
-              data-exercise={e.id}
-              className="tap flex min-h-12 w-full items-center gap-2 py-2.5 text-left"
-              onClick={() => setEditingId(e.id)}
-            >
-              {/* The tag drops under the name (right-aligned) when both don't fit on one line. */}
-              <span className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
-                {/* Named "Edit <name>"; the tag is its description rather than part of its name. An
-                    archived one's name is dimmed; "archived" itself stays readable. */}
-                <span className={clsx("min-w-0 text-sm [overflow-wrap:anywhere]", e.archived && "text-mute")}>
-                  <span className="sr-only">Edit</span> {e.name}
-                </span>
-                <span id={`lib-tag-${e.id}`} aria-hidden className="label ml-auto text-right">
-                  {libraryTag(e)}
-                  {e.archived && (
-                    <>
-                      {" · "}
-                      <span className="text-fg-2">archived</span>
-                    </>
-                  )}
-                </span>
-              </span>
-              <ChevronRight size={14} className="shrink-0 text-mute" aria-hidden />
-            </button>
-          </li>
-        ))}
-      </ul>
-      {/* Closing returns focus to the row that opened it (the sheet does that). */}
-      <EditExerciseSheet exercise={editing} open={!!editing} onClose={closeEditor} />
-      <div className="mt-4 flex gap-3">
-        <input
-          aria-label="New lift name"
-          value={name}
-          maxLength={80}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="New lift…"
-          className="field min-w-0 flex-1 rounded-xl bg-white/[0.05] px-3 py-2 text-base"
-        />
-        <button
-          type="button"
-          disabled={!name.trim()}
-          className="btn-ghost shrink-0"
-          onClick={async () => {
-            await createExercise({ name: name.trim(), category: "primary", measure: "reps", tracksMax: true });
-            setName("");
-          }}
-        >
-          <Plus size={16} /> Tracked lift
-        </button>
-      </div>
-    </Section>
   );
 }
 

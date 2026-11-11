@@ -97,6 +97,7 @@ const SCREENS = [
     "[role=dialog]",
   ],
   ["Settings", "/settings", null],
+  ["Program", "/program", null],
 ];
 
 function guardedDatabaseName() {

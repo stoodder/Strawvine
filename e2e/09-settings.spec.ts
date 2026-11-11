@@ -1,12 +1,12 @@
 /**
- * Settings: the program name is an inline text field (Enter commits, Escape reverts) and the
+ * Program and Settings: the program name is an inline text field (Enter commits, Escape reverts) and the
  * high-contrast switch is mirrored onto <html data-contrast="high">; both survive a reload.
  */
 import { expect, onboardedOn, serverData, test } from "./helpers";
 
 test("rename the program inline: Escape reverts, Enter commits, and it persists", async ({ page }) => {
   await onboardedOn(page);
-  await page.goto("/settings");
+  await page.goto("/program");
 
   const name = page.getByRole("textbox", { name: "Program name" });
   const original = await name.inputValue();

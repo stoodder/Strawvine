@@ -8,7 +8,9 @@ Built to be dogfooded daily by one athlete; see [`docs/SPEC.md`](docs/SPEC.md) f
   max progression, accessories & supersets carried over from last week, rest timer, plate math.
 - **Progress** — weekly check-in, weighted-average weight trend, measured TDEE vs. intake, max history.
 - **Goals** — goal weight with projected date range, strength targets, streak heatmap, achievements.
-- **Settings** — every rule (cycle weeks, rep schemes, percentages, deload, weekly layout, targets, limits) is editable.
+- **Program** (from Train) — the plan: where the cycle is now (move it a week later or earlier in one tap), weekly
+  layout, cycle weeks, rep schemes, percentages, deload, rest timers, rep-max table and the exercise library.
+- **Settings** — the preferences: daily targets, schedule, nutrition, display, sync and data.
 
 ## How the numbers work
 
