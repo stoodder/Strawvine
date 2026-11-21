@@ -109,7 +109,8 @@ test.describe("Tab never lands under the bottom nav or the dock", () => {
     await page.goto("/settings");
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     const { stops, problems } = await tabWalk(page);
-    expect(stops.length, "Tab stops on Settings").toBeGreaterThan(30);
+    // (The targets and training days moved to Program with the plan, SPEC §6.4.)
+    expect(stops.length, "Tab stops on Settings").toBeGreaterThan(20);
     expect(problems).toEqual([]);
   });
 

@@ -23,6 +23,10 @@
   the settings as they are when it is tapped (`liveSettings`), only its own fields — never a remembered document.
 - `limits.minCalories` (the floor under the daily target, SPEC §4.4) is optional in stored settings: read it through
   `minCalories()` in `src/shared/defaults.ts`, never directly.
+- Plans over time (SPEC §6.4): read a date's plan through `src/shared/program.ts` — `cyclePosition`, `planAt` /
+  `planInForce`, `scheduledProgramDay`, `programDayFor`, and `planTargets` for the steps / Zone 2 targets and the
+  metcon / Zone 2 days — never `program.days`, `program.weeks`, `cycleStartDate`, `settings.targets` or
+  `settings.schedule` directly. Edit plans through `src/shared/plans.ts` (`updatePlan`, `startNewCycle`, …).
 - Train: which finished exercises show folded is view state (`components/train/folds.ts`), never saved; nothing folds or
   moves while the page is in use, and no tap is ever intercepted.
 - The field being typed in stays put (e2e/40): a keystroke never changes the page's height except by the field's own

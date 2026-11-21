@@ -166,7 +166,7 @@ export function WeekView({
           </Group>
 
           <Group label="Activity">
-            <Stat label="Avg steps" value={fmt(c.avgSteps)} size="sm" sub={`target ${fmt(data.settings.targets.steps)}`} />
+            <Stat label="Avg steps" value={fmt(c.avgSteps)} size="sm" sub={`target ${fmt(c.stepTarget)}`} />
             <div className="mt-7 grid grid-cols-[repeat(auto-fit,minmax(5rem,1fr))] gap-5">
               {(
                 [

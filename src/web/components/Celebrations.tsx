@@ -4,6 +4,42 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import { addDays } from "../../shared/dates";
 import type { Achievement } from "../../shared/gamify";
+import { offersCycleChoice, repeatCycleKey } from "../../shared/plans";
+import { useCycleActions } from "./program/useCycleChoice";
+
+/**
+ * "Cycle N complete" with the end-of-cycle choice (SPEC §7): Repeat cycle N (what Continue would
+ * do, said and remembered) or Set up a new cycle (from this cycle's Monday, then Program).
+ */
+function CycleChoiceButtons({ cycle, choose }: { cycle: number; choose: (kind: "repeat" | "new") => boolean }) {
+  const actions = useCycleActions();
+  return (
+    <div className="mt-8 flex flex-col items-center gap-2" data-cycle-choice="">
+      <p className="text-xs text-mute">Next:</p>
+      <button
+        type="button"
+        autoFocus
+        onClick={(e) => {
+          e.stopPropagation();
+          choose("repeat");
+        }}
+        className="btn-ghost"
+      >
+        Repeat cycle {cycle}
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          if (choose("new")) actions.setUpNewCycle();
+        }}
+        className="btn-ghost"
+      >
+        Set up a new cycle
+      </button>
+    </div>
+  );
+}
 import { celebrate } from "../lib/haptics";
 import { cycleCelebrationsHeld, isCycleAchievement, subscribeCelebrationHold } from "./celebrationHold";
 import { useData, useMarkSeen } from "../lib/store";
@@ -120,6 +156,20 @@ export function Celebrations() {
     setQueue((q) => q.filter((a) => a.key !== key));
   }, [shown, armed, markSeen]);
 
+  // "Cycle N complete" for the cycle that just ended, before anything is saved in the new one: it
+  // also offers the end-of-cycle choice (SPEC §7). Repeat is what Continue would do, said.
+  const endedCycle = shown && /^cycle-(\d+)$/.exec(shown.key);
+  const choiceFor =
+    endedCycle && offersCycleChoice(data.settings, data.sessions, data.seenAchievements, today, Number(endedCycle[1])) ? Number(endedCycle[1]) : null;
+  /** Files the celebration (and a Repeat with it); false while it can't be dismissed yet. */
+  const choose = (kind: "repeat" | "new"): boolean => {
+    if (!shown || !armed || choiceFor === null) return false;
+    const key = shown.key;
+    markSeen(kind === "repeat" ? [key, repeatCycleKey(choiceFor)] : [key]);
+    setQueue((q) => q.filter((a) => a.key !== key));
+    return true;
+  };
+
   // Modal while open: the app behind is inert, Escape/Enter continue, focus returns afterwards.
   const visible = !!shown;
   const dismissRef = useRef(dismiss);
@@ -234,17 +284,21 @@ export function Celebrations() {
               <p id={detailId} className="mx-auto mt-3 max-w-xs text-sm leading-relaxed text-fg-2 wrap-anywhere">
                 {shown.detail}
               </p>
-              <button
-                type="button"
-                autoFocus
-                onClick={(e) => {
-                  e.stopPropagation();
-                  dismiss();
-                }}
-                className="label mt-8 min-h-11 rounded-full px-5 text-mute"
-              >
-                Continue{more > 0 ? ` · ${more} more` : ""}
-              </button>
+              {choiceFor !== null ? (
+                <CycleChoiceButtons cycle={choiceFor} choose={choose} />
+              ) : (
+                <button
+                  type="button"
+                  autoFocus
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    dismiss();
+                  }}
+                  className="label mt-8 min-h-11 rounded-full px-5 text-mute"
+                >
+                  Continue{more > 0 ? ` · ${more} more` : ""}
+                </button>
+              )}
             </motion.div>
           </motion.div>
         </motion.div>

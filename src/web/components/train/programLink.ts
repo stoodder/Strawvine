@@ -8,7 +8,7 @@
  *     the day's lift has no max to calculate from.
  */
 import { formatShortDate, weekdayName, type ISODate } from "../../../shared/dates";
-import { currentMax, cycleLabel, cyclePosition, programDayFor } from "../../../shared/program";
+import { currentMax, cycleLabel, cyclePosition, planAt, programDayFor } from "../../../shared/program";
 import type { MaxEntry, Program } from "../../../shared/schemas";
 
 export interface ProgramLinkLabel {
@@ -36,12 +36,14 @@ const shortDate = (date: ISODate, relativeTo: ISODate) => formatShortDate(date, 
 export function programLinkLabel(program: Program, date: ISODate, today: ISODate): ProgramLinkLabel {
   const pos = cyclePosition(program, date);
   if (pos) {
-    const text = cycleLabel(pos, program.weeks.length);
-    return { text, short: cycleLabel(pos, program.weeks.length, { short: true }), name: `Program: ${text}`, deload: pos.week.deload };
+    const text = cycleLabel(pos, pos.weeksCount);
+    return { text, short: cycleLabel(pos, pos.weeksCount, { short: true }), name: `Program: ${text}`, deload: pos.week.deload };
   }
+  // The plan the day reads: before the program, the first one.
+  const plan = planAt(program, date);
   // No cycle to place the day in (a program always has a week; this is for a document that doesn't).
-  if (program.weeks.length === 0) return { text: "Program", short: "Program", name: "Program", deload: false };
-  const start = program.cycleStartDate;
+  if (plan.weeks.length === 0) return { text: "Program", short: "Program", name: "Program", deload: false };
+  const start = plan.start;
   const verb = start > today ? "Starts" : "Started";
   const day = weekdayName(start, true);
   const text = `${verb} ${day} ${shortDate(start, today)}`;
@@ -73,8 +75,9 @@ export function mainLiftNotice({
 }): MainLiftNotice {
   if (hasMainLift) return null;
   const exerciseId = programDayFor(program, date)?.primaryExerciseId;
-  if (exerciseId == null || program.weeks.length === 0) return null;
-  if (!cyclePosition(program, date)) return { kind: "not-started", start: program.cycleStartDate };
+  const plan = planAt(program, date);
+  if (exerciseId == null || plan.weeks.length === 0) return null;
+  if (!cyclePosition(program, date)) return { kind: "not-started", start: plan.start };
   // The max is the program day's lift's — there is no main-lift block to read it from.
   return currentMax(maxEntries, exerciseId) ? null : { kind: "needs-max", exerciseId };
 }

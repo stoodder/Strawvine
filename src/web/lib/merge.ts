@@ -10,7 +10,8 @@
  * Whatever this device changed (relative to the ancestor) wins; everything else comes from the
  * server, so the other device's changes are kept.
  */
-import type { Block, BlockExercise, Session, SetEntry, Settings } from "../../shared/schemas";
+import { planList, withPlans } from "../../shared/plans";
+import type { Block, BlockExercise, Plan, Session, SetEntry, Settings } from "../../shared/schemas";
 import { derivedBlockId, MAX_BLOCKS, MAX_SETS, MAX_SUPERSET, normalizeMainLift } from "../../shared/sessionStructure";
 
 /**
@@ -231,21 +232,46 @@ export function mergeFields<T>(ancestor: T | null | undefined, local: T, server:
   return mergeAt(ancestor, local, server, "", null) as T;
 }
 
-/** Settings lists that aren't single values (see `ListRule`). */
+/**
+ * Settings lists that aren't single values (see `ListRule`), in the shape the merge works on
+ * (`plansShape`): the plans by id, and within a plan its weeks and weekdays element by element.
+ */
 const SETTINGS_RULES: Record<string, ListRule> = {
   strengthTargets: "byId",
-  "schedule.metcon": "index",
-  "schedule.zone2": "index",
-  "program.weeks": "index",
+  "program.plans": "byId",
+  "program.plans.#.weeks": "index",
+  "program.plans.#.schedule.metcon": "index",
+  "program.plans.#.schedule.zone2": "index",
 };
 
 /** Readable names for settings paths a conflict can be reported on. */
 const SETTINGS_LABELS: Array<[RegExp, string]> = [
-  [/^program\.weeks/, "program weeks"],
-  [/^program\.days/, "program days"],
+  [/^program\.plans\.#\.weeks/, "program weeks"],
+  [/^program\.plans\.#\.days/, "program days"],
   [/^strengthTargets/, "strength targets"],
-  [/^schedule/, "weekly schedule"],
+  [/^program\.plans\.#\.schedule/, "weekly schedule"],
+  [/^program\.plans/, "program cycles"],
 ];
+
+/**
+ * The settings as the merge sees them: every plan — the latest (the document's top level: the
+ * program's name, start, weeks, days and id, the targets and the schedule) and the earlier ones —
+ * in one list, `program.plans`, matched by id. So a plan added on one device and an edit of a plan
+ * on another both survive, each where it was made: an edit of the plan that was the latest stays
+ * with that plan when the other device has put a new plan after it (SPEC §6.4).
+ */
+function plansShape(s: Settings): Record<string, unknown> {
+  const { earlierPlans: _e, planId: _i, name: _n, cycleStartDate: _c, weeks: _w, days: _d, ...rules } = s.program;
+  const { targets: _t, schedule: _s, ...rest } = s;
+  return { ...rest, program: { ...rules, plans: planList(s) } };
+}
+
+/** `plansShape` back to a settings document (`withPlans`). */
+function fromPlansShape(m: Record<string, unknown>): Settings {
+  const { plans, ...rules } = m.program as Record<string, unknown> & { plans: Plan[] };
+  const latest = plans[plans.length - 1]!;
+  return withPlans({ ...m, targets: latest.targets, schedule: latest.schedule, program: rules } as unknown as Settings, plans);
+}
 
 export interface SettingsMerge {
   value: Settings;
@@ -263,7 +289,17 @@ export interface SettingsMerge {
  */
 export function mergeSettingsDetailed(ancestor: Settings | null | undefined, local: Settings, server: Settings): SettingsMerge {
   const ctx: FieldCtx = { rules: SETTINGS_RULES, conflicts: [] };
-  const value = mergeAt(ancestor, local, server, "", ctx) as Settings;
+  const merged = mergeAt(ancestor ? plansShape(ancestor) : ancestor, plansShape(local), plansShape(server), "", ctx) as Record<string, unknown>;
+  // Both devices set up a new cycle from the same Monday: one plan per start — this device's (else the first).
+  const program = merged.program as { plans: Plan[] };
+  const mine = new Set(planList(local).map((p) => p.id));
+  const rank = (p: Plan) => (mine.has(p.id) ? 0 : 1);
+  const plans = program.plans.filter((p, i, all) => {
+    const twin = all.findIndex((q, j) => j !== i && q.start === p.start && (rank(q) < rank(p) || (rank(q) === rank(p) && j < i)));
+    return twin < 0;
+  });
+  if (plans.length !== program.plans.length) ctx.conflicts.push("program.plans");
+  const value = fromPlansShape({ ...merged, program: { ...program, plans } });
   const conflicts = [...new Set(ctx.conflicts.map((p) => SETTINGS_LABELS.find(([re]) => re.test(p))?.[1] ?? p.replace(/\.#/g, "")))];
   return { value, conflicts };
 }

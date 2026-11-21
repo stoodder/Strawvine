@@ -42,6 +42,7 @@ const checkin = (patch: Partial<WeeklyCheckin> = {}): WeeklyCheckin => ({
   avgProtein: 180,
   calorieAdherence: 6 / 7,
   avgSteps: 9000,
+  stepTarget: 15000,
   zone2: { done: 2, planned: 3 },
   zone2Kcal: null,
   metcon: { done: 2, planned: 2 },

@@ -6,7 +6,7 @@ import { displayPrefs, minCalories } from "../../shared/defaults";
 import { MIN_CALORIES_RANGE } from "../../shared/schemas";
 import { programPathForSettingsHash } from "../components/program/sections";
 import { ScreenHeader } from "../components/ScreenHeader";
-import { DayPicker, NumSetting } from "../components/settings/fields";
+import { NumSetting } from "../components/settings/fields";
 import { JumpList, useJumpToHash } from "../components/settings/JumpList";
 import { useSettingsEditor } from "../components/settings/useSettingsEditor";
 import { useToast } from "../components/Toast";
@@ -18,8 +18,7 @@ import { noteOfflineSignOut } from "./Login";
 
 /** The page's sections, as a jump list under the title. */
 const JUMPS = [
-  ["targets", "Targets"],
-  ["schedule", "Schedule"],
+  ["plan", "Training"],
   ["nutrition", "Nutrition"],
   ["display", "Display"],
   ["sync", "Sync"],
@@ -27,9 +26,10 @@ const JUMPS = [
 ] as const;
 
 /**
- * Settings (`/settings`): preferences — targets, schedule, nutrition, display, sync, data. The
- * training program lives on Program; an old link to a section that moved there (`/settings#program`,
- * `#training`) goes to it.
+ * Settings (`/settings`): preferences — nutrition, display, sync, data — and a link to the training
+ * plan. The training program, with the daily targets and training days that are part of each plan
+ * (SPEC §6.4), lives on Program; an old link to a section that moved there (`/settings#program`,
+ * `#training`, `#targets`, `#schedule`) goes to it.
  */
 export function SettingsScreen() {
   const { hash } = useLocation();
@@ -59,44 +59,16 @@ function SettingsBody() {
         </p>
       )}
 
-      <Section label="Daily targets" id="targets">
-        <div className="divide-y divide-white/[0.04]">
-          <NumSetting
-            label="Steps"
-            value={s.targets.steps}
-            min={0}
-            max={100_000}
-            grouping
-            onSave={(v) => v !== null && save({ ...s, targets: { ...s.targets, steps: v } })}
-          />
-          <NumSetting
-            label="Zone 2"
-            hint="Default duration when you check it off"
-            value={s.targets.zone2Minutes}
-            unit="min"
-            min={0}
-            max={600}
-            unitInMessage=" min"
-            onSave={(v) => v !== null && save({ ...s, targets: { ...s.targets, zone2Minutes: v } })}
-          />
-        </div>
-      </Section>
-
-      <Section label="Schedule" id="schedule">
-        <DayPicker label="Metcon" value={s.schedule.metcon} onChange={(metcon) => save({ ...s, schedule: { ...s.schedule, metcon } })} />
-        <div className="h-6" />
-        <DayPicker label="Zone 2" value={s.schedule.zone2} onChange={(zone2) => save({ ...s, schedule: { ...s.schedule, zone2 } })} />
-        {/* The lifting days, the cycle and its rules are the program, not a preference: they live on
-            Program, whose back control returns here (state.from: this section). */}
-        <Link
-          to="/program"
-          state={{ from: "/settings#schedule" }}
-          className="tap mt-6 flex min-h-11 items-center gap-3 py-2"
-          data-program-link=""
-        >
+      <Section label="Training" id="plan">
+        {/* The daily targets, training days, lifting days, cycle and rules are the plan, not a
+            preference: they live on Program (a new cycle can change them without touching the days
+            before it), whose back control returns here (state.from: this section). */}
+        <Link to="/program" state={{ from: "/settings#plan" }} className="tap flex min-h-11 items-center gap-3 py-2" data-program-link="">
           <span className="min-w-0 flex-1">
             <span className="block text-sm text-fg-2">Training program</span>
-            <span className="mt-0.5 block text-xs text-mute">Lifting days, cycle, rules, rest timers and the exercise library</span>
+            <span className="mt-0.5 block text-xs text-mute">
+              Steps and Zone 2 targets, metcon and Zone 2 days, lifting days, cycles, rules, rest timers and the exercise library
+            </span>
           </span>
           <span className="label shrink-0" aria-hidden>
             Program

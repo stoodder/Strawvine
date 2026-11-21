@@ -3,6 +3,7 @@ import { useNavigationType, useSearchParams } from "react-router";
 import { addDays } from "../../shared/dates";
 import { displayPrefs } from "../../shared/defaults";
 import { computeEnergySeries, energyBalanceSeries } from "../../shared/energy";
+import { planTargets } from "../../shared/program";
 import { computeStepsSeries } from "../../shared/steps";
 import type { Exercise } from "../../shared/schemas";
 import { LineChart, type Series } from "../components/charts";
@@ -136,10 +137,28 @@ export function ProgressScreen() {
     [balance],
   );
 
+  // Each day's steps target is its plan's (`planTargets`): one line while the range has one target,
+  // else a target line that follows the plans.
+  const stepTargets = useMemo(() => steps.map((d) => ({ x: d.date, y: planTargets(data.settings, d.date).steps })), [steps, data.settings]);
+  const stepTarget = planTargets(data.settings, today).steps;
+  const oneStepTarget = stepTargets.every((t) => t.y === stepTarget);
   const stepsSeries = useMemo<Series[]>(() => {
     // A single day is a dot, not a trend: wait for a couple (complete ones: today's is "so far").
     if (steps.filter((d) => d.steps !== null && !d.partial).length < 2) return [];
+    const targetLine: Series[] = oneStepTarget
+      ? []
+      : [
+          {
+            key: "target",
+            label: "Target",
+            kind: "line",
+            color: "var(--color-mute)",
+            points: stepTargets.map((t) => ({ x: t.x, y: t.y > 0 ? t.y : null })),
+            format: (v) => fmt(v),
+          },
+        ];
     return [
+      ...targetLine,
       {
         key: "steps",
         label: "Steps",
@@ -160,9 +179,11 @@ export function ProgressScreen() {
         format: (v) => fmt(v),
       },
     ];
-  }, [steps]);
-  const stepTarget = data.settings.targets.steps;
-  const stepRef = useMemo(() => (stepTarget > 0 ? { y: stepTarget, label: "Target", tone: "target" as const } : undefined), [stepTarget]);
+  }, [steps, oneStepTarget, stepTargets]);
+  const stepRef = useMemo(
+    () => (oneStepTarget && stepTarget > 0 ? { y: stepTarget, label: "Target", tone: "target" as const } : undefined),
+    [stepTarget, oneStepTarget],
+  );
 
   const goal = data.settings.weightGoal;
   const goalRef = useMemo(() => (goal ? { y: goal.targetLb, label: `goal ${goal.targetLb}` } : undefined), [goal]);

@@ -6,15 +6,21 @@
  */
 import { useRef, useState } from "react";
 import { trainingPrefs } from "../../../shared/defaults";
-import { settingsSchema, type Program, type Settings } from "../../../shared/schemas";
+import { planById, updatePlan, type PlanFields } from "../../../shared/plans";
+import { settingsSchema, type Plan, type Program, type Settings } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
 import { useData, useSaveSettings } from "../../lib/store";
 import { liveSettings, useSettingsUndo, type SettingsUndo } from "./undo";
 
 /** Human names for settings paths, so a rejected save reads "Steps target …", not "targets.steps: …". */
 const PATH_NAMES: Array<[RegExp, string]> = [
-  [/^targets\.steps/, "Steps target"],
-  [/^targets\.zone2Minutes/, "Zone 2 minutes"],
+  [/^(program\.earlierPlans\.\d+\.)?targets\.steps/, "Steps target"],
+  [/^(program\.earlierPlans\.\d+\.)?targets\.zone2Minutes/, "Zone 2 minutes"],
+  [/^program\.earlierPlans\.\d+\.name/, "Program name"],
+  [/^program\.earlierPlans\.\d+\.weeks\.(\d+)/, "Week $1"],
+  [/^program\.earlierPlans\.\d+\.weeks/, "Cycle weeks"],
+  [/^program\.earlierPlans\.\d+\.days/, "Weekly layout"],
+  [/^program\.earlierPlans\.\d+\.start/, "Cycle start date"],
   [/^nutrition\.proteinGPerLb/, "Protein"],
   [/^nutrition\.fatGPerLb/, "Fat"],
   [/^nutrition\.initialTdee/, "Maintenance estimate"],
@@ -57,6 +63,15 @@ export function readableIssue(issue: { path: PropertyKey[]; code: string; messag
 }
 
 export type TrainingPrefs = ReturnType<typeof trainingPrefs>;
+
+/** An Undo for a change of one plan (see `SettingsUndo`), in the plan's own terms. */
+export interface PlanUndo<T = undefined> extends Omit<SettingsUndo<T>, "undo" | "holdsCycleCelebrations"> {
+  /**
+   * The plan's fields to put back, from the plan as it is when Undo is tapped; null when the change
+   * can't be undone any more (or the plan is gone).
+   */
+  undo: (now: Plan, from: T) => Partial<PlanFields> | null;
+}
 
 /** An Undo for a program change (see `SettingsUndo`), in the program's own terms. */
 export interface ProgramUndo<T = undefined> extends Omit<SettingsUndo<T>, "undo" | "holdsCycleCelebrations"> {
@@ -119,5 +134,48 @@ export function useSettingsEditor() {
     return true;
   };
 
-  return { settings, training: trainingPrefs(settings), error, save, setProgram, setTraining, undoableProgram };
+  /**
+   * A change of the document with an Undo toast: `change` gets the settings as they are now and
+   * returns the document to save (null: nothing to do). False when nothing was saved (no toast then).
+   */
+  const undoableSettings = <T = undefined>(change: (now: Settings) => Settings | null, u: SettingsUndo<T>): boolean => {
+    const next = change(live());
+    if (!next || !save(next)) return false;
+    raiseUndo<T>(u);
+    return true;
+  };
+
+  /** One plan's fields (SPEC §6.4), on the plan as it is when the edit runs; false when it wasn't saved. */
+  const setPlan = (id: string, patch: Partial<PlanFields>): boolean => {
+    const now = live();
+    return !!planById(now, id) && save(updatePlan(now, id, patch));
+  };
+  /** A change of one plan with an Undo toast (`PlanUndo`); false when the change wasn't saved. */
+  const undoablePlan = <T = undefined>(id: string, patch: Partial<PlanFields>, u: PlanUndo<T>): boolean => {
+    if (!setPlan(id, patch)) return false;
+    raiseUndo<T>({
+      ...u,
+      // The weeks of a plan decide where its cycles fall.
+      holdsCycleCelebrations: true,
+      undo: (now, from) => {
+        const plan = planById(now, id);
+        const back = plan && u.undo(plan, from);
+        return back ? updatePlan(now, id, back) : null;
+      },
+    });
+    return true;
+  };
+
+  return {
+    settings,
+    training: trainingPrefs(settings),
+    error,
+    save,
+    setProgram,
+    setTraining,
+    undoableProgram,
+    undoableSettings,
+    setPlan,
+    undoablePlan,
+  };
 }

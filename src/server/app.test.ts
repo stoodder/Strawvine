@@ -1182,6 +1182,53 @@ describe("export & restore", () => {
     expect(created.id).toBe(Math.max(...exported.exercises.map((e: { id: number }) => e.id)) + 1);
   });
 
+  it("keeps plans over time (SPEC §6.4): stored as sent, through an export and back, and their lifts locked", async () => {
+    // The restore above signed every device out: a fresh app and sign-in for the API calls.
+    const fresh = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false });
+    const signedIn = await login(fresh);
+    const req = (path: string, init: RequestInit = {}) =>
+      fresh.request(path, { ...init, headers: { "content-type": "application/json", cookie: signedIn } });
+    const current = await buildExport(db);
+    const s = current.settings!;
+    const bench = current.exercises.find((e) => e.name === "Bench press")!;
+    const front = current.exercises.find((e) => e.name === "Front squat")!;
+    // A next cycle: bench off the program, the front squat on Monday, its own targets and days.
+    const { "1": _mon, ...days } = s.program.days;
+    const planned: Settings = {
+      ...s,
+      targets: { steps: 9000, zone2Minutes: 40 },
+      schedule: { metcon: [true, false, false, false, false, false, false], zone2: s.schedule.zone2 },
+      program: {
+        ...s.program,
+        cycleStartDate: "2026-12-07",
+        planId: "plan-test",
+        days: { ...days, "1": { label: "Legs", primaryExerciseId: front.id, progression: true } },
+        earlierPlans: [
+          { id: "first", start: s.program.cycleStartDate, name: s.program.name, weeks: s.program.weeks, days: s.program.days, targets: s.targets, schedule: s.schedule },
+        ],
+      },
+    };
+    expect((await req("/api/settings", json("PUT", planned))).status).toBe(200);
+    expect(((await (await req("/api/bootstrap")).json()) as Bootstrap).settings).toEqual(planned);
+    // Bench is only the plan before's lift now: still locked, on the server too.
+    const refused = await req(`/api/exercises/${bench.id}`, json("PATCH", { archived: true }));
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: string }).error).toMatch(/^Bench press is Mon's main lift in the plan before: /);
+    // A plan that isn't well formed is refused, like any settings.
+    const bad = { ...planned, program: { ...planned.program, earlierPlans: [{ ...planned.program.earlierPlans![0]!, weeks: [] }] } };
+    expect((await req("/api/settings", json("PUT", bad))).status).toBe(400);
+
+    const exported = await buildExport(db);
+    expect(exported.settings).toEqual(planned);
+    await restoreExport(db, { ...current, version: 5 }, { force: true });
+    expect((await buildExport(db)).settings).toEqual(s);
+    await restoreExport(db, exported, { force: true });
+    expect((await buildExport(db)).settings).toEqual(planned);
+    // Back to how it was, for the tests below.
+    await restoreExport(db, current, { force: true });
+    expect((await buildExport(db)).settings).toEqual(s);
+  });
+
   it("restores a v2 export (before the weighted flag) as weighted, and refuses newer versions", async () => {
     const current = await buildExport(db);
     expect(current.version).toBe(5);

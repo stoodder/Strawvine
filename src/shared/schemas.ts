@@ -185,11 +185,49 @@ export const programDaySchema = z.object({
 });
 export type ProgramDay = z.infer<typeof programDaySchema>;
 
-export const programSchema = z.object({
+const weekdayFlags = z.array(z.boolean()).length(7);
+/** Keyed by weekday: "0" (Sun) … "6" (Sat). Days without an entry are not lifting days. */
+const programDaysSchema = z.record(z.string().regex(/^[0-6]$/), programDaySchema);
+const programWeeksSchema = z.array(programWeekSchema).min(1).max(16);
+
+/** The steps and Zone 2 targets (one plan's: see `planSchema`). */
+const dailyTargetsSchema = z.object({
+  steps: z.number().int().min(0).max(100_000),
+  zone2Minutes: z.number().min(0).max(600),
+});
+/** Which weekdays (index 0 = Sun) metcon and Zone 2 are expected (one plan's). */
+const weekScheduleSchema = z.object({
+  metcon: weekdayFlags,
+  zone2: weekdayFlags,
+});
+
+/**
+ * An earlier plan (SPEC §6.4): the weekly training plan that was in force from `start` until the
+ * next plan's start. The latest plan is the document's top level (`program.name`, `cycleStartDate`,
+ * `weeks`, `days`, `planId`, and the settings' `targets` and `schedule`), so a build that doesn't
+ * know plans reads the latest one. Read a date's plan through `planAt` / `cyclePosition` /
+ * `planTargets` (program.ts), never through these fields.
+ */
+export const planSchema = z.object({
+  /** Identifies the plan across devices (the settings merge pairs plans by it). */
+  id: safeString().min(1).max(40),
+  /** Monday the plan's first cycle begins. */
+  start: isoDate,
   name: safeString().max(60),
-  /** Monday the first cycle begins. */
+  weeks: programWeeksSchema,
+  days: programDaysSchema,
+  targets: dailyTargetsSchema,
+  schedule: weekScheduleSchema,
+});
+export type Plan = z.infer<typeof planSchema>;
+
+export const programSchema = z.object({
+  /** The latest plan's name. */
+  name: safeString().max(60),
+  /** Monday the latest plan's first cycle begins (with one plan: the first cycle). */
   cycleStartDate: isoDate,
-  weeks: z.array(programWeekSchema).min(1).max(16),
+  /** The latest plan's weeks. */
+  weeks: programWeeksSchema,
   /** Fraction of the N-rep max used as the working weight (0.9). */
   intensity: z.number().min(0.3).max(1.2),
   roundToLb: z.number().min(0.5).max(25),
@@ -201,16 +239,25 @@ export const programSchema = z.object({
     lbPerExtraRep: z.number().min(0).max(25),
   }),
   deloadAccessoryLoad: z.number().min(0.3).max(1),
-  /** Keyed by weekday: "0" (Sun) … "6" (Sat). Days without an entry are not lifting days. */
-  days: z.record(z.string().regex(/^[0-6]$/), programDaySchema),
+  /** The latest plan's days, keyed by weekday: "0" (Sun) … "6" (Sat). Days without an entry are not lifting days. */
+  days: programDaysSchema,
+  /**
+   * The latest plan's id. Absent on a document that has only ever had one plan (its id is then
+   * `FIRST_PLAN_ID`, program.ts).
+   */
+  planId: safeString().min(1).max(40).optional(),
+  /**
+   * The plans before the latest one, oldest first: each ran from its `start` until the next one's
+   * (the last of them until `cycleStartDate`). Absent or empty: one plan, as every document stored
+   * before plans existed.
+   */
+  earlierPlans: z.array(planSchema).max(200).optional(),
 });
 export type Program = z.infer<typeof programSchema>;
 
 // ---------------------------------------------------------------------------
 // Settings (one document)
 // ---------------------------------------------------------------------------
-
-const weekdayFlags = z.array(z.boolean()).length(7);
 
 /**
  * The range of the minimum calorie target (`limits.minCalories`), kcal/day: the one place it is
@@ -221,15 +268,10 @@ export const MIN_CALORIES_RANGE = { min: 800, max: 5000 } as const;
 
 export const settingsSchema = z.object({
   onboarded: z.boolean(),
-  targets: z.object({
-    steps: z.number().int().min(0).max(100_000),
-    zone2Minutes: z.number().min(0).max(600),
-  }),
-  /** Which weekdays (index 0 = Sun) each pillar is expected. */
-  schedule: z.object({
-    metcon: weekdayFlags,
-    zone2: weekdayFlags,
-  }),
+  /** The latest plan's steps and Zone 2 targets (a date's: `planTargets`, program.ts). */
+  targets: dailyTargetsSchema,
+  /** The latest plan's metcon and Zone 2 weekdays, index 0 = Sun (a date's: `planTargets`). */
+  schedule: weekScheduleSchema,
   nutrition: z.object({
     kcalPerLb: z.number().min(1000).max(6000),
     proteinGPerLb: z.number().min(0).max(3),

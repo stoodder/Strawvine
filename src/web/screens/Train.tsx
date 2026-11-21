@@ -21,7 +21,7 @@ import {
 import { addDays, isISODate, weekdayName } from "../../shared/dates";
 import { trainingPrefs } from "../../shared/defaults";
 import { amrapPrs } from "../../shared/gamify";
-import { currentMax, programDayFor, progressionGain } from "../../shared/program";
+import { currentMax, planAt, programDayFor, progressionGain } from "../../shared/program";
 import type { Block, BlockExercise, Exercise, Session, SetEntry } from "../../shared/schemas";
 import {
   accessoryHint,
@@ -44,6 +44,7 @@ import {
   setsForAddedExercise,
   shownLoad,
   targetsMetPhrase,
+  templateSource,
 } from "../../shared/session";
 import {
   accessoryBlocks,
@@ -76,6 +77,8 @@ import { afterLayout, useRevealAboveDock, whenReady } from "../components/train/
 import { AccessorySetRow, MainSetRow } from "../components/train/SetControls";
 import { AmrapSheet, measureUnit, Plates, SetEditSheet, type AmrapRepPr } from "../components/train/SetSheets";
 import { mainLiftNotice, programLinkLabel, programStartSentence } from "../components/train/programLink";
+import { CycleEndNote } from "../components/program/CycleEndNote";
+import { useCycleChoice } from "../components/program/useCycleChoice";
 import {
   checkAction,
   describeSet,
@@ -185,6 +188,7 @@ export function TrainScreen() {
   /** Focus hand-offs wait for an edit that reaches the screen through the store (a frame or more). */
   const focusWhenReady = (find: () => HTMLElement | null) => focusAfter(find, 20);
   const pending = usePendingDates().has(date);
+  const cycleChoice = useCycleChoice();
 
   const saved = data.sessions.find((s) => s.date === date) ?? null;
   const program = data.settings.program;
@@ -478,7 +482,7 @@ export function TrainScreen() {
   const primaryDone = !isPreview && !!primaryBlock && blockComplete(primaryBlock);
   /** Sets the program prescribed for this session's week; any beyond are added back-off sets. */
   const plannedCount =
-    session.week !== null ? (program.weeks[session.week - 1]?.reps.length ?? primaryEx?.sets.length ?? 0) : (primaryEx?.sets.length ?? 0);
+    session.week !== null ? (planAt(program, session.plannedFor ?? date).weeks[session.week - 1]?.reps.length ?? primaryEx?.sets.length ?? 0) : (primaryEx?.sets.length ?? 0);
   /** Prescribed sets the main lift no longer holds ("Skip rest"): its folded row must not read as everything logged. */
   const skippedMain = primaryEx ? Math.max(0, plannedCount - primaryEx.sets.length) : 0;
   /**
@@ -681,6 +685,16 @@ export function TrainScreen() {
   // --- Superset & workout structure (src/shared/sessionStructure) ---------------------------
   const letters = supersetLetters(session);
   const accessories = accessoryBlocks(session);
+  /**
+   * A main-lift day of a later plan that nothing carries into (SPEC §6.5, pre-fill: no earlier day
+   * had its main lift or its name): it starts with its main lift only — said once, while unsaved.
+   */
+  const newProgramDay =
+    !saved &&
+    accessories.length === 0 &&
+    programDay?.primaryExerciseId != null &&
+    planAt(program, plannedFor ?? date).index > 0 &&
+    !templateSource(plannedFor ?? date, data);
   const openManage = (blockId: string, status = "") => {
     setStructureStatus(status);
     setSheetUndo(null);
@@ -1045,6 +1059,12 @@ export function TrainScreen() {
           <ChevronRight size={12} aria-hidden className="opacity-60" />
         </Link>
       </header>
+      {/* A cycle's last week: repeat it, or set up a new one (SPEC §7). Today only. */}
+      {isToday && cycleChoice.card && (
+        <div className="mt-4">
+          <CycleEndNote choice={cycleChoice} reviewFrom={location.pathname} />
+        </div>
+      )}
 
       <div className="mt-6">
         <h1 data-train-title tabIndex={-1} className="text-[clamp(1.75rem,11vw,2.75rem)] leading-none font-light tracking-tight">
@@ -1450,6 +1470,11 @@ export function TrainScreen() {
               ) : undefined
             }
           >
+            {newProgramDay && (
+              <p className="mb-4 text-sm text-mute" data-new-day-hint="">
+                New in this plan: no earlier session to carry accessories from. Add them below.
+              </p>
+            )}
             {accessories.map((b) => {
               const superset = b.exercises.length > 1;
               const letter = letters.get(b.id) ?? "";

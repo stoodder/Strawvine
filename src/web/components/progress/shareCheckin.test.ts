@@ -14,6 +14,7 @@ const base: WeeklyCheckin = {
   avgProtein: 188,
   calorieAdherence: 0.71,
   avgSteps: 9820,
+  stepTarget: 15000,
   zone2: { done: 1, planned: 2 },
   zone2Kcal: null,
   metcon: { done: 2, planned: 3 },

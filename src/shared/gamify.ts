@@ -2,9 +2,9 @@
  * Closing the day, streaks and achievements — all derived from raw data.
  */
 import { benchmarkPrs, type BenchmarkPr } from "./benchmarks";
-import { addDays, dateRange, formatShortDate, toDayNumber, weekdayOf, type ISODate } from "./dates";
+import { addDays, dateRange, daysBetween, formatShortDate, toDayNumber, weekdayOf, type ISODate } from "./dates";
 import { CALIBRATION_DAYS, firstTdeeDate, isLogged } from "./energy";
-import { cyclePosition, scheduledProgramDay } from "./program";
+import { cyclePosition, planTargets, scheduledProgramDay } from "./program";
 import type { DayLog, Exercise, MaxEntry, Session, Settings } from "./schemas";
 import { movedSessionsByPlan, planDateOf, sessionVolume } from "./session";
 
@@ -63,7 +63,9 @@ export function checklist(
   add("morning", "Morning check-in", day?.weightLb != null);
   add("fuel", "Nutrition", day?.calories != null);
   const steps = day?.steps ?? 0;
-  const stepTarget = settings.targets.steps;
+  // The targets and schedule of the plan in force on the day (a later plan never changes how it reads).
+  const plan = planTargets(settings, date);
+  const stepTarget = plan.steps;
   add("steps", "Steps", stepTarget > 0 ? steps >= stepTarget : day?.steps != null, stepTarget > 0 ? steps / stepTarget : 0);
   const movedFrom = session?.plannedFor && session.plannedFor !== date ? session.plannedFor : null;
   if (movedFrom || scheduledProgramDay(settings.program, date)) {
@@ -73,8 +75,8 @@ export function checklist(
     if (!here && early) item.doneOn = early.date;
     if (movedFrom) item.movedFrom = movedFrom;
   }
-  if (settings.schedule.metcon[wd]) add("metcon", "Metcon", !!day?.metconDone);
-  if (settings.schedule.zone2[wd]) add("zone2", "Zone 2", !!day?.zone2Done);
+  if (plan.metcon[wd]) add("metcon", "Metcon", !!day?.metconDone);
+  if (plan.zone2[wd]) add("zone2", "Zone 2", !!day?.zone2Done);
   return items;
 }
 
@@ -461,20 +463,22 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   }
 
   // Completed cycles (at least one completed session in the cycle). A moved session counts
-  // for the cycle of the day it was planned for.
+  // for the cycle of the day it was planned for. Cycle numbers continue across plans, so the
+  // key of a cycle doesn't change when a later plan is added.
   const program = data.settings.program;
-  const cyclesWithWork = new Map<number, ISODate>();
+  const cyclesWithWork = new Map<number, { end: ISODate; weeks: number }>();
   for (const s of data.sessions) {
     if (!s.completedAt) continue;
     const pos = cyclePosition(program, planDateOf(s));
-    if (pos) cyclesWithWork.set(pos.cycle, pos.cycleEnd);
+    // A cycle a later plan cut short banks the weeks it ran.
+    if (pos) cyclesWithWork.set(pos.cycle, { end: pos.cycleEnd, weeks: Math.ceil((daysBetween(pos.cycleStart, pos.cycleEnd) + 1) / 7) });
   }
-  for (const [cycle, end] of cyclesWithWork)
+  for (const [cycle, { end, weeks }] of cyclesWithWork)
     if (end <= today)
       out.push({
         key: `cycle-${cycle}`,
         title: `Cycle ${cycle} complete`,
-        detail: `${program.weeks.length} weeks banked.`,
+        detail: `${weeks} weeks banked.`,
         date: end,
         tier: "milestone",
       });

@@ -6,7 +6,7 @@ import { addDays, dateRange, weekdayOf, type ISODate } from "./dates";
 import { computeEnergySeries, effectiveTdee, type EffectiveTdee, type EnergyDay } from "./energy";
 import { type AppData } from "./gamify";
 import { project, recommend, type Projection, type Recommendation } from "./nutrition";
-import { scheduledProgramDay } from "./program";
+import { planTargets, scheduledProgramDay } from "./program";
 import type { DayLog, Settings } from "./schemas";
 import { recoveryInsight, vo2MaxTrend, type Vo2Trend } from "./recovery";
 import { planDateOf, sessionDoneEarly } from "./session";
@@ -50,6 +50,11 @@ export interface WeeklyCheckin {
   avgProtein: number | null;
   calorieAdherence: number | null;
   avgSteps: number | null;
+  /**
+   * The steps target the week's days were measured by: the target of the plan in force on each
+   * (one plan: its target), averaged over the week's days.
+   */
+  stepTarget: number;
   zone2: { done: number; planned: number };
   /**
    * The week's total of the Zone 2 machine's calorie readings (a reading only, not intake), over the days `zone2.done`
@@ -122,7 +127,7 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
   // Zone 2: the machine total covers the same days as the "done" count beside it (planned and done),
   // so a reading from a day not ticked off, or an unplanned day, doesn't inflate it.
   const zone2 = plannedDone(
-    (d) => !!settings.schedule.zone2[weekdayOf(d)],
+    (d) => !!planTargets(settings, d).zone2[weekdayOf(d)],
     (d) => !!byDate.get(d)?.zone2Done,
   );
   const zone2Readings = zone2.done.map((d) => byDate.get(d)?.zone2Kcal).filter((k): k is number => k != null);
@@ -149,10 +154,11 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     avgProtein: mean(days.filter((d) => d.proteinG !== null).map((d) => d.proteinG!)),
     calorieAdherence: judged.length ? adherent / judged.length : null,
     avgSteps: mean(days.filter((d) => d.steps !== null).map((d) => d.steps!)),
+    stepTarget: Math.round(mean(dates.map((d) => planTargets(settings, d).steps)) ?? planTargets(settings, to).steps),
     zone2: { planned: zone2.planned.length, done: zone2.done.length },
     zone2Kcal: sumOrNull(zone2Readings),
     metcon: count(
-      (d) => !!settings.schedule.metcon[weekdayOf(d)],
+      (d) => !!planTargets(settings, d).metcon[weekdayOf(d)],
       (d) => !!byDate.get(d)?.metconDone,
     ),
     // By plan: each program day counts once, done when its plan was completed — on the day or
@@ -437,10 +443,14 @@ export function insights(data: AppData, series: ReadonlyArray<EnergyDay>, today:
   const recovery = recoveryInsight(byDate, today);
   if (recovery) out.push(recovery);
 
-  // Steps.
-  const steps = last7.filter((d) => d.steps !== null).map((d) => d.steps!);
+  // Steps, each day against the target of the plan in force on it (with one plan: one target).
+  const stepDays = last7
+    .filter((d) => d.steps !== null)
+    .map((d) => ({ steps: d.steps!, target: planTargets(data.settings, d.date).steps }))
+    .filter((d) => d.target > 0);
+  const steps = stepDays.map((d) => d.steps);
   const avgSteps = mean(steps);
-  const stepTarget = data.settings.targets.steps;
+  const stepTarget = Math.round(mean(stepDays.map((d) => d.target)) ?? 0);
   if (avgSteps !== null && steps.length >= 3 && stepTarget > 0) {
     if (avgSteps < stepTarget * 0.9)
       out.push({
@@ -448,7 +458,7 @@ export function insights(data: AppData, series: ReadonlyArray<EnergyDay>, today:
         tone: "info",
         text: `Steps averaging ${Math.round(avgSteps).toLocaleString()} vs ${stepTarget.toLocaleString()} target.`,
       });
-    else if (steps.every((s) => s >= stepTarget) && steps.length >= 5)
+    else if (stepDays.every((d) => d.steps >= d.target) && steps.length >= 5)
       out.push({ key: "steps-good", tone: "good", text: "Step target hit every logged day this week." });
   }
 

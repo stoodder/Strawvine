@@ -118,32 +118,32 @@ test("a double-tap delays one week; taps in a row fold into one Undo that goes b
   expect(await cycleStart(page)).toBe(MONDAY_ISO);
 });
 
-test("Undo tapped on another screen takes back only the move: a steps target changed since stays", async ({ page }) => {
+test("Undo tapped on another screen takes back only the move: a preference changed since stays", async ({ page }) => {
   // Program, opened from Settings: its back control leads back there.
   await page.goto("/settings");
   await page.getByRole("link", { name: /Training program/ }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Program");
   const before = (await serverData(page)).settings;
-  expect(before.targets.steps).not.toBe(12000);
+  expect(before.nutrition.kcalPerLb).not.toBe(3600);
 
   await delayAWeek(page).click();
   await expect(toastMessage(page, "Program delayed a week")).toBeVisible();
   // Off to Settings while the Undo is still on offer, and change something else there.
   await page.getByRole("link", { name: "Back to Settings" }).click();
-  await expect(page).toHaveURL(/\/settings#schedule$/);
+  await expect(page).toHaveURL(/\/settings#plan$/);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Settings");
-  await fillNumber(page, "Steps", "12000");
+  await fillNumber(page, "Calories per lb", "3600");
   await undoButtons(page).click();
 
-  // The cycle start is back; the steps target is the new one — here and on the server.
-  await expect(page.getByRole("textbox", { name: "Steps", exact: true })).toHaveValue("12,000");
+  // The cycle start is back; the calories per lb are the new ones — here and on the server.
+  await expect(page.getByRole("textbox", { name: "Calories per lb", exact: true })).toHaveValue("3,600");
   await expectSynced(page);
-  await expect.poll(async () => (await serverData(page)).settings.targets.steps).toBe(12000);
+  await expect.poll(async () => (await serverData(page)).settings.nutrition.kcalPerLb).toBe(3600);
   const after = (await serverData(page)).settings;
   expect(after.program.cycleStartDate).toBe(MONDAY_ISO);
-  expect(after).toEqual({ ...before, targets: { ...before.targets, steps: 12000 } });
+  expect(after).toEqual({ ...before, nutrition: { ...before.nutrition, kcalPerLb: 3600 } });
   await page.reload();
-  await expect(page.getByRole("textbox", { name: "Steps", exact: true })).toHaveValue("12,000");
+  await expect(page.getByRole("textbox", { name: "Calories per lb", exact: true })).toHaveValue("3,600");
 });
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -157,7 +157,7 @@ for (const [latency, handle] of [
       await route.fulfill({ response });
     },
   ],
-  // The steps target is on the server (and can be read there) well before the Undo that follows it.
+  // The preference is on the server (and can be read there) well before the Undo that follows it.
   [
     "the Undo's own save is slow",
     async (route: Route, n: number) => {
@@ -177,12 +177,12 @@ for (const [latency, handle] of [
     await expect(toastMessage(page, "Program delayed a week")).toBeVisible();
     await page.getByRole("link", { name: "Back to Settings" }).click();
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("Settings");
-    await fillNumber(page, "Steps", "12000");
+    await fillNumber(page, "Calories per lb", "3600");
     await undoButtons(page).click();
 
-    await expect(page.getByRole("textbox", { name: "Steps", exact: true })).toHaveValue("12,000");
+    await expect(page.getByRole("textbox", { name: "Calories per lb", exact: true })).toHaveValue("3,600");
     await expectSynced(page);
-    expect((await serverData(page)).settings).toEqual({ ...before, targets: { ...before.targets, steps: 12000 } });
+    expect((await serverData(page)).settings).toEqual({ ...before, nutrition: { ...before.nutrition, kcalPerLb: 3600 } });
     await expect(toastMessage(page, /Merged changes/)).toHaveCount(0);
   });
 }

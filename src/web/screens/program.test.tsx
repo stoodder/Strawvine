@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultSettings } from "../../shared/defaults";
 import { MIN_CALORIES_RANGE, settingsSchema, type Exercise, type Program, type Settings } from "../../shared/schemas";
 import { shiftEffect, SHIFT_GUARD_MS } from "../components/program/ProgramSections";
+import { startNewCycle } from "../../shared/plans";
 import { programPathForSettingsHash } from "../components/program/sections";
 import { UNDO_MS } from "../components/settings/undo";
 import { readableIssue } from "../components/settings/useSettingsEditor";
@@ -34,7 +35,7 @@ const store = vi.hoisted(() => {
   type S = import("../../shared/schemas").Settings;
   type E = import("../../shared/schemas").Exercise;
   const state = {
-    data: null as unknown as { settings: S; exercises: E[] },
+    data: null as unknown as { settings: S; exercises: E[]; sessions: unknown[]; seenAchievements: string[] },
     today: "",
     listeners,
     saved: [] as S[],
@@ -43,14 +44,17 @@ const store = vi.hoisted(() => {
     toasts: [] as Array<{ message: string; tone?: string; duration?: number; action?: { label: string; onAction: () => void } }>,
     dismissed: [] as number[],
     created: [] as unknown[],
+    /** Keys filed as seen (`useMarkSeen`). */
+    seen: [] as string[],
     reset(settings: S, exercises: E[], today: string) {
       state.saved = [];
       state.toasts = [];
       state.dismissed = [];
       state.created = [];
+      state.seen = [];
       state.failNext = undefined;
       state.today = today;
-      state.data = { settings, exercises };
+      state.data = { settings, exercises, sessions: [], seenAchievements: [] };
     },
     arrive(next: S) {
       state.data = { ...state.data, settings: next };
@@ -84,6 +88,7 @@ vi.mock("../lib/store", async () => {
       return Promise.resolve(input);
     },
     useEditExercise: () => vi.fn(),
+    useMarkSeen: () => (keys: string[]) => void store.seen.push(...keys),
     useSyncInfo: () => ({
       online: true,
       pending: 0,
@@ -193,12 +198,12 @@ const delay = () => screen.getByRole("button", { name: "Delay a week" });
 const skip = () => screen.getByRole("button", { name: "Skip ahead a week" });
 const dateField = () => screen.getByLabelText<HTMLInputElement>("Cycle start date");
 const described = (el: HTMLElement) => document.getElementById(el.getAttribute("aria-describedby")!)!.textContent;
-/** Leaves Program for Settings and changes the steps target there. */
-const changeStepsOnSettings = async (user: ReturnType<typeof userEvent.setup>) => {
+/** Leaves Program for Settings and changes a preference there (calories per lb). */
+const changePreferenceOnSettings = async (user: ReturnType<typeof userEvent.setup>) => {
   await user.click(screen.getByRole("link", { name: "go to settings" }));
   expect(where()).toBe("/settings");
-  await type(user, screen.getByRole("textbox", { name: "Steps" }), "12000");
-  expect(store.data.settings.targets.steps).toBe(12000);
+  await type(user, screen.getByRole("textbox", { name: "Calories per lb" }), "3600");
+  expect(store.data.settings.nutrition.kcalPerLb).toBe(3600);
 };
 
 describe("Program", () => {
@@ -208,10 +213,18 @@ describe("Program", () => {
     expect(h1.textContent).toBe("Program");
     expect(document.querySelector("[data-program-name]")!.textContent).toBe(base().program.name);
     expect(h1.nextElementSibling!.textContent).toBe("The program Train follows. Change it and the sessions ahead recalculate.");
-    expect(sectionHeadings()).toEqual(["Now", "Weekly layout", "Cycle weeks", "Rules", "Rep-max table", "Exercise library"]);
+    expect(sectionHeadings()).toEqual([
+      "Now",
+      "Weekly layout",
+      "Targets & days",
+      "Cycle weeks",
+      "Rules",
+      "Rep-max table",
+      "Exercise library",
+    ]);
     expect(screen.getByRole("link", { name: "Back to Train" }).getAttribute("href")).toBe("/train");
     const jumps = within(screen.getByRole("navigation", { name: "Program sections" })).getAllByRole("link");
-    expect(jumps.map((a) => a.getAttribute("href"))).toEqual(["#now", "#layout", "#weeks", "#rules", "#rep-max", "#library"]);
+    expect(jumps.map((a) => a.getAttribute("href"))).toEqual(["#now", "#layout", "#targets", "#weeks", "#rules", "#rep-max", "#library"]);
     for (const a of jumps) expect(document.getElementById(a.getAttribute("href")!.slice(1))?.tagName).toBe("SECTION");
   });
 
@@ -220,7 +233,7 @@ describe("Program", () => {
       ["/train", "/train", "Back to Train"],
       ["/train/2026-10-19", "/train/2026-10-19", "Back to Train"],
       ["/settings", "/settings", "Back to Settings"],
-      ["/settings#schedule", "/settings#schedule", "Back to Settings"],
+      ["/settings#plan", "/settings#plan", "Back to Settings"],
     ])("from %s it leads back there", (from, to, label) => {
       expect(programBackTarget({ from })).toEqual({ to, label });
     });
@@ -271,9 +284,9 @@ describe("Program", () => {
       expect(where()).toBe("/program");
       expect(screen.queryByRole("link", { name: "Back to Train" })).toBeNull();
       await user.click(screen.getByRole("link", { name: "Back to Settings" }));
-      expect(where()).toBe("/settings#schedule");
+      expect(where()).toBe("/settings#plan");
       expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Settings");
-      expect(document.activeElement?.textContent).toBe("Schedule");
+      expect(document.activeElement?.textContent).toBe("Training");
     });
   });
 
@@ -520,9 +533,9 @@ describe("Program", () => {
       const user = userEvent.setup();
       show();
       await user.click(screen.getByRole("button", { name: "Remove week 2" }));
-      await changeStepsOnSettings(user);
+      await changePreferenceOnSettings(user);
       undo();
-      expect(store.data.settings.targets.steps).toBe(12000);
+      expect(store.data.settings.nutrition.kcalPerLb).toBe(3600);
       expect(store.data.settings.program.weeks).toEqual(base().program.weeks);
     });
 
@@ -881,17 +894,17 @@ describe("Program", () => {
       expect(lastToast().action).toBeUndefined();
     });
 
-    it("Undo after leaving for Settings and changing the steps target there keeps the new target", async () => {
+    it("Undo after leaving for Settings and changing a preference there keeps it", async () => {
       const user = userEvent.setup();
       show();
       await user.click(delay());
       expect(start()).toBe("2026-11-09");
       const toast = lastToast();
-      await changeStepsOnSettings(user);
+      await changePreferenceOnSettings(user);
       undo(toast);
-      expect(store.data.settings.targets.steps).toBe(12000);
+      expect(store.data.settings.nutrition.kcalPerLb).toBe(3600);
       expect(start()).toBe("2026-11-02");
-      expect(lastSaved()).toEqual({ ...base(), targets: { ...base().targets, steps: 12000 } });
+      expect(lastSaved()).toEqual({ ...base(), nutrition: { ...base().nutrition, kcalPerLb: 3600 } });
     });
 
     it("Undo keeps a change that arrived from another device after the screen was left", async () => {
@@ -969,9 +982,9 @@ describe("Program", () => {
       show();
       fireEvent.change(dateField(), { target: { value: "2026-11-23" } });
       const toast = lastToast();
-      await changeStepsOnSettings(user);
+      await changePreferenceOnSettings(user);
       undo(toast);
-      expect(store.data.settings.targets.steps).toBe(12000);
+      expect(store.data.settings.nutrition.kcalPerLb).toBe(3600);
       expect(start()).toBe("2026-11-02");
 
       // Changed again since: nothing is overwritten.
@@ -1056,9 +1069,9 @@ describe("Program", () => {
       const user = userEvent.setup();
       show();
       await user.click(lifting("Fri"));
-      await changeStepsOnSettings(user);
+      await changePreferenceOnSettings(user);
       undo();
-      expect(store.data.settings.targets.steps).toBe(12000);
+      expect(store.data.settings.nutrition.kcalPerLb).toBe(3600);
       expect(store.data.settings.program.days).toEqual(base().program.days);
     });
 
@@ -1149,10 +1162,8 @@ describe("Settings", () => {
     expect(h1.previousElementSibling!.textContent).toBe("Preferences");
     expect(screen.queryByText("The rules")).toBeNull();
     expect(screen.getByRole("link", { name: "Back to Today" }).getAttribute("href")).toBe("/");
-    expect(sectionHeadings()).toEqual(["Daily targets", "Schedule", "Nutrition", "Display", "Sync", "Data"]);
+    expect(sectionHeadings()).toEqual(["Training", "Nutrition", "Display", "Sync", "Data"]);
     for (const name of [
-      "Steps",
-      "Zone 2",
       "Protein",
       "Fat",
       "Maintenance estimate",
@@ -1162,13 +1173,15 @@ describe("Settings", () => {
       "Minimum calories",
     ])
       expect(screen.getByRole("textbox", { name })).toBeTruthy();
-    expect(screen.getByRole("group", { name: "Metcon days" })).toBeTruthy();
-    expect(screen.getByRole("group", { name: "Zone 2 days" })).toBeTruthy();
+    // The daily targets and training days are the plan's: they live on Program (SPEC §6.4).
+    expect(screen.queryByRole("textbox", { name: "Steps" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Metcon days" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Zone 2 days" })).toBeNull();
     expect(screen.getByRole("switch", { name: "High contrast" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Sync now/ })).toBeTruthy();
     expect(screen.getByRole("link", { name: /Export JSON/ })).toBeTruthy();
     const jumps = within(screen.getByRole("navigation", { name: "Settings sections" })).getAllByRole("link");
-    expect(jumps.map((a) => a.getAttribute("href"))).toEqual(["#targets", "#schedule", "#nutrition", "#display", "#sync", "#data"]);
+    expect(jumps.map((a) => a.getAttribute("href"))).toEqual(["#plan", "#nutrition", "#display", "#sync", "#data"]);
     for (const a of jumps) expect(document.getElementById(a.getAttribute("href")!.slice(1))?.tagName).toBe("SECTION");
   });
 
@@ -1194,10 +1207,8 @@ describe("Settings", () => {
     const user = userEvent.setup();
     show("/settings");
     const before = store.data.settings;
-    await type(user, screen.getByRole("textbox", { name: "Steps" }), "12000");
-    expect(lastSaved()).toEqual({ ...before, targets: { ...before.targets, steps: 12000 } });
-    await user.click(within(screen.getByRole("group", { name: "Metcon days" })).getByRole("button", { name: "Sun" }));
-    expect(lastSaved().schedule.metcon[0]).toBe(!before.schedule.metcon[0]);
+    await type(user, screen.getByRole("textbox", { name: "Calories per lb" }), "3600");
+    expect(lastSaved()).toEqual({ ...before, nutrition: { ...before.nutrition, kcalPerLb: 3600 } });
     expect(lastSaved().program).toEqual(before.program);
   });
 
@@ -1329,7 +1340,7 @@ describe("Settings", () => {
 describe("number settings: an out-of-range entry and the value typed back", () => {
   /** Each field: where it lives, an entry out of its range, its message, and the value it has. */
   const FIELDS = [
-    ["/settings", "Steps", "200000", "Between 0 and 100,000.", "15000", "15,000"],
+    ["/program", "Steps", "200000", "Between 0 and 100,000.", "15000", "15,000"],
     ["/settings", "Max loss", "9", "Between 0% and 3%.", "1", "1"],
     ["/settings", "Calories per lb", "10", "Between 1,000 and 6,000.", "3500", "3,500"],
     ["/program", "Accessory increment", "99", null, "5", "5"],
@@ -1366,7 +1377,11 @@ describe("number settings: an out-of-range entry and the value typed back", () =
     expect(estimate().getAttribute("aria-invalid")).toBeNull();
     await type(user, estimate(), "2600");
     expect(lastSaved().nutrition.initialTdee).toBe(2600);
-    // Steps: a whole number, as typed or rounded to one.
+  });
+
+  it("the steps target is a whole number, as typed or rounded to one", async () => {
+    const user = userEvent.setup();
+    show("/program");
     await type(user, screen.getByRole("textbox", { name: "Steps" }), "12000.4");
     expect(lastSaved().targets.steps).toBe(12000);
   });
@@ -1376,10 +1391,21 @@ describe("old Settings anchors", () => {
   it("map the moved sections to Program and leave the rest on Settings", () => {
     expect(programPathForSettingsHash("#program")).toBe("/program");
     expect(programPathForSettingsHash("#training")).toBe("/program#rules");
-    for (const id of ["now", "layout", "weeks", "rules", "rep-max", "library"])
+    for (const id of ["now", "layout", "targets", "weeks", "rules", "rep-max", "library"])
       expect(programPathForSettingsHash(`#${id}`)).toBe(`/program#${id}`);
-    for (const hash of ["", "#", "#targets", "#schedule", "#nutrition", "#display", "#sync", "#data", "#nope"])
+    // The daily targets and schedule are the plan's now.
+    expect(programPathForSettingsHash("#schedule")).toBe("/program#targets");
+    for (const hash of ["", "#", "#plan", "#nutrition", "#display", "#sync", "#data", "#nope"])
       expect(programPathForSettingsHash(hash)).toBeNull();
+  });
+
+  it("/settings#targets and /settings#schedule land on Program's targets and training days", () => {
+    for (const hash of ["#targets", "#schedule"]) {
+      const view = show(`/settings${hash}`);
+      expect(where()).toBe("/program#targets");
+      expect(document.activeElement?.textContent).toBe("Targets & days");
+      view.unmount();
+    }
   });
 
   it("/settings#program lands on Program", () => {
@@ -1424,13 +1450,13 @@ describe("A number typed into a setting and not yet committed", () => {
   it("Settings: is saved when the app is hidden — one save, and none more when the field is then left", async () => {
     const user = userEvent.setup();
     show("/settings");
-    const steps = screen.getByRole("textbox", { name: "Steps" });
-    await user.clear(steps);
-    await user.type(steps, "12000");
+    const kcal = screen.getByRole("textbox", { name: "Calories per lb" });
+    await user.clear(kcal);
+    await user.type(kcal, "3600");
     expect(store.saved).toHaveLength(0);
     hide("hidden");
     expect(store.saved).toHaveLength(1);
-    expect(lastSaved()).toEqual({ ...base(), targets: { ...base().targets, steps: 12_000 } });
+    expect(lastSaved()).toEqual({ ...base(), nutrition: { ...base().nutrition, kcalPerLb: 3600 } });
     hide("visible");
     await user.tab();
     expect(store.saved).toHaveLength(1);
@@ -1439,19 +1465,19 @@ describe("A number typed into a setting and not yet committed", () => {
   it("Settings: is saved when the screen is left with the field still focused (no blur reaches a removed field)", async () => {
     const user = userEvent.setup();
     show("/settings");
-    const steps = screen.getByRole("textbox", { name: "Steps" });
-    await user.clear(steps);
-    await user.type(steps, "12000");
+    const kcal = screen.getByRole("textbox", { name: "Calories per lb" });
+    await user.clear(kcal);
+    await user.type(kcal, "3600");
     // A tap that takes no focus from the field, on the link to Program.
     act(() => document.querySelector<HTMLElement>("[data-program-link]")!.click());
     expect(where()).toBe("/program");
     expect(store.saved).toHaveLength(1);
-    expect(lastSaved().targets.steps).toBe(12_000);
+    expect(lastSaved().nutrition.kcalPerLb).toBe(3600);
   });
 
   it("Settings: a number the setting wouldn't take is not saved for the app being hidden, nor an emptied field", async () => {
     const user = userEvent.setup();
-    show("/settings");
+    show("/program");
     const steps = screen.getByRole("textbox", { name: "Steps" });
     await user.clear(steps);
     hide("hidden");
@@ -1474,5 +1500,122 @@ describe("A number typed into a setting and not yet committed", () => {
     hide("visible");
     await user.tab();
     expect(store.saved).toHaveLength(1);
+  });
+});
+
+describe("Program: the next cycle (SPEC §6.4, §6.6)", () => {
+  /** The default program with a session saved in cycle 1, so a new cycle starts after it (Mon Dec 7). */
+  const withSession = () => {
+    store.data = { ...store.data, sessions: [{ date: "2026-11-03", plannedFor: null }] };
+  };
+  const startButton = () => screen.getByRole("button", { name: "Start a new cycle" });
+  const pressed = (section: string) =>
+    within(within(document.getElementById(section)!).getByRole("group", { name: "Plan to edit" }))
+      .getAllByRole("button", { pressed: true })
+      .map((b) => b.textContent);
+
+  it("Start a new cycle: a copy of the plan from the next cycle's Monday, Program's plan sections on it, and an Undo that removes it", async () => {
+    const user = userEvent.setup();
+    withSession();
+    show();
+    expect(described(startButton())).toMatch(/from Mon Dec 7, when cycle 1 ends\. Until then nothing changes\.$/);
+    await user.click(startButton());
+    const saved = lastSaved();
+    expect(saved.program.cycleStartDate).toBe("2026-12-07");
+    expect(saved.program.earlierPlans).toHaveLength(1);
+    expect(saved.program.earlierPlans![0]).toMatchObject({ id: "first", start: "2026-11-02", days: base().program.days });
+    expect(lastToast().message).toBe("New cycle set up from Mon Dec 7");
+    expect(where()).toBe("/program#layout");
+    // Now and the plan sections show it, on Next by default.
+    expect(document.querySelector("[data-next-cycle]")!.textContent).toContain("Next cycle · from Mon Dec 7");
+    for (const id of ["layout", "targets", "weeks"]) expect(pressed(id)).toEqual(["Next cycle"]);
+    expect(screen.queryByRole("button", { name: "Start a new cycle" })).toBeNull();
+    undo();
+    expect(lastSaved()).toEqual(base());
+  });
+
+  it("edits the plan picked with the switch: the next cycle's leaves this one alone, and the other way round", async () => {
+    const user = userEvent.setup();
+    withSession();
+    show();
+    await user.click(startButton());
+    // Next cycle: Monday off, steps target down.
+    await user.click(screen.getByRole("switch", { name: "Mon lifting day" }));
+    expect(lastSaved().program.days["1"]).toBeUndefined();
+    expect(lastSaved().program.earlierPlans![0]!.days["1"]).toEqual(base().program.days["1"]);
+    await type(user, screen.getByRole("textbox", { name: "Steps" }), "9000");
+    expect(lastSaved().targets.steps).toBe(9000);
+    expect(lastSaved().program.earlierPlans![0]!.targets.steps).toBe(15000);
+    // This cycle: its own fields only.
+    await user.click(within(document.getElementById("targets")!).getByRole("button", { name: "This cycle" }));
+    for (const id of ["layout", "targets", "weeks"]) expect(pressed(id)).toEqual(["This cycle"]);
+    expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Steps" }).value).toBe("15,000");
+    expect(screen.getByRole("switch", { name: "Mon lifting day" }).getAttribute("aria-checked")).toBe("true");
+    await user.click(within(screen.getByRole("group", { name: "Metcon days" })).getByRole("button", { name: "Sun" }));
+    expect(lastSaved().program.earlierPlans![0]!.schedule.metcon[0]).toBe(!base().schedule.metcon[0]);
+    expect(lastSaved().schedule).toEqual(base().schedule);
+  });
+
+  it("Cancel the new cycle: back to repeating, with an Undo that puts it back", async () => {
+    const user = userEvent.setup();
+    withSession();
+    show();
+    await user.click(startButton());
+    await type(user, screen.getByRole("textbox", { name: "Next cycle's program name" }), "Heavier");
+    const scheduled = lastSaved();
+    await user.click(screen.getByRole("button", { name: "Cancel the new cycle" }));
+    expect(lastSaved()).toEqual(base());
+    expect(lastToast().message).toBe("New cycle cancelled — this cycle repeats");
+    expect(screen.queryByRole("group", { name: "Plan to edit" })).toBeNull();
+    undo();
+    expect(lastSaved()).toEqual(scheduled);
+  });
+
+  it("with nothing saved in the cycle yet, the new cycle starts on its Monday", () => {
+    // Cycle 2 (from Mon Dec 7), seen on its Wednesday, nothing saved in it.
+    reset(base(), "2026-12-09");
+    withSession();
+    show();
+    expect(described(startButton())).toMatch(/from Mon Dec 7: nothing is logged in this cycle yet, so it starts over now\.$/);
+  });
+
+  it("a move of the start moves the plan in force and the next one, and its Undo takes both back", async () => {
+    const user = userEvent.setup();
+    withSession();
+    show();
+    await user.click(startButton());
+    clock += 10_000;
+    await user.click(delay());
+    expect(lastSaved().program.cycleStartDate).toBe("2026-12-14");
+    expect(lastSaved().program.earlierPlans![0]!.start).toBe("2026-11-09");
+    undo();
+    expect(lastSaved().program.cycleStartDate).toBe("2026-12-07");
+    expect(lastSaved().program.earlierPlans![0]!.start).toBe("2026-11-02");
+  });
+
+  it("the move lines say when a move crosses into another plan", () => {
+    // Cycle 1 runs Nov 2 – Dec 6; the next plan starts Dec 7.
+    const s = startNewCycle(base(), [{ date: "2026-11-03", plannedFor: null } as never], "2026-11-04", "p2")!.settings;
+    // In the last week, skipping ahead brings the next plan into this week.
+    expect(shiftEffect(s.program, -1, "2026-12-02")).toBe("This week becomes Week 1 (cycle 2), on the next cycle's plan; next Monday is Week 2 · Push.");
+    // In the next plan's first week, a delay puts this week back under the plan before.
+    // (The plan before runs one more week, cycle 2 of its own; the next plan starts as cycle 3.)
+    expect(shiftEffect(s.program, 1, "2026-12-09")).toBe("This week goes back to the plan before: Week 1; next Monday is Week 1 (cycle 3) · Push.");
+    // Skipping ahead within the next plan stays in it.
+    expect(shiftEffect(s.program, -1, "2026-12-09")).toBe("This week becomes Week 2; next Monday is Week 3 · Push.");
+  });
+
+  it("in a cycle's last week, Now has the note: Repeat files the choice, and the note goes", async () => {
+    const user = userEvent.setup();
+    reset(base(), "2026-12-02");
+    show();
+    const note = () => document.querySelector("[data-cycle-end]");
+    expect(note()!.textContent).toContain("Cycle 1 ends Sun Dec 6.");
+    await user.click(screen.getByRole("button", { name: "Repeat cycle 1" }));
+    expect(store.seen).toEqual(["repeat-cycle-1"]);
+    act(() => store.remote({ ...store.data.settings }));
+    store.data = { ...store.data, seenAchievements: ["repeat-cycle-1"] };
+    act(() => store.remote({ ...store.data.settings }));
+    expect(note()).toBeNull();
   });
 });

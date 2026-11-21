@@ -29,10 +29,13 @@ const store = vi.hoisted(() => {
 vi.mock("../lib/store", async () => {
   const { useSyncExternalStore } = await import("react");
   const subscribe = (l: () => void) => (store.listeners.add(l), () => void store.listeners.delete(l));
+  // A program that starts after TODAY: no cycle runs, so "Cycle N complete" offers no choice here.
+  const { defaultSettings } = await import("../../shared/defaults");
+  const settings = defaultSettings({ bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 }, "2026-11-05");
   return {
     useData: () => {
       const s = useSyncExternalStore(subscribe, () => store.snapshot);
-      return { data: { seenAchievements: s.seen }, today: TODAY, achievements: s.achievements };
+      return { data: { seenAchievements: s.seen, settings, sessions: [] }, today: TODAY, achievements: s.achievements };
     },
     useMarkSeen: () => (keys: string[]) => {
       store.marked.push(keys);

@@ -45,6 +45,9 @@ All fields are optional and can be edited at any time during the day (or later).
 | Lifting          | the session (see §6)                                                                                                                            |
 | Journal          | free-form text for the day                                                                                                                      |
 
+- The **steps target**, **Zone 2's minutes and days** and the **metcon days** are part of the training plan (§6.4),
+  edited on Program › Targets & days: each day is measured by those of the plan in force on it, so a new
+  cycle with other targets never changes how an earlier day reads.
 - The day ends at **midnight local time**.
 - Raw entries are the source of truth; **all derived numbers are recomputed** from them, so editing
   any past day ripples forward correctly.
@@ -119,7 +122,8 @@ tile.
   scale) and labelled "so far" in the legend and the table, and it is kept out of the trend, the y-scale and its
   labels, the weekly means, and the chart's "from … to" summary. It joins all of them once the day is done.
 - The step target is a neutral dashed reference line, named in the legend row ("Target 15,000") rather than on the
-  line, where it would sit on the data.
+  line, where it would sit on the data. It is today's plan's target (§6.4); when the range shown spans plans with
+  different targets, the target is drawn instead as a line of its own ("Target") that follows each day's plan.
 - The chart follows the same 30 / 90 / All range as the bodyweight and energy charts: one control, at the top of each
   chart view (§4.7).
 - It needs counts on at least two complete days.
@@ -290,7 +294,8 @@ into milestones (first weigh-in → averages online → first TDEE → calibrate
 
 Smoothed TDEE, actual vs target rate, adherence (each day's calories against the target that day showed, within
 ±10%), averages (intake, protein, steps, sleep, HRV, and resting HR once logged), the latest VO2 max with its change
-over ~30 days (§3.3), lifts / metcon / Zone 2 done against planned (Zone 2 with the week's total machine kcal once
+over ~30 days (§3.3), lifts / metcon / Zone 2 done against planned — each day planned by the plan in force on it, §6.4,
+and the steps target under "Avg steps" the week's days' targets averaged — (Zone 2 with the week's total machine kcal once
 logged, §3.5), and next week's recommended calories & macros (with "Held at your 1,500 kcal minimum." under them
 while the minimum is holding the target up, §4.4). The Zone 2 kcal total covers the same days as the count's
 "done": planned days with Zone 2 done; a reading on a day not done, or on an unplanned day, isn't in it.
@@ -460,6 +465,39 @@ optional note.
 | Thu | Push           | Strict press                                           |
 | Fri | Carries & pull | — (sandbag cleans/carries, farmer's carries, pull-ups) |
 
+#### Plans over time
+
+The weekly training plan is a **sequence of plans**, each in force from its Monday until the next one starts. A plan
+holds: a **name**, the cycle's **weeks** (§6.2's rep scheme), the **lifting days** (the table above: per weekday a
+label, a main lift, AMRAP on/off), the **steps target**, **Zone 2's minutes and days** and the **metcon days** (§3).
+The rules — working weight %, rounding, the rep-max table, AMRAP last set, auto progression, deload accessory load,
+accessory increment, rest timers — are one global set, not part of a plan.
+
+- Cycles repeat within a plan; **cycle numbers continue across plans** (the first cycle of a plan that follows two
+  cycles of another is "Cycle 3"). A plan that ends mid-cycle (the next one started early) ends that cycle there: it
+  counts as a cycle, banking the weeks it ran.
+- **A date is always read under the plan that was in force on that date** — its checklist (lift, steps, metcon, Zone 2),
+  streak and heatmap, the weekly check-in's planned counts and step target, cycle numbers and completions, Train's
+  label and week, the plan-changed check of a saved session. Starting a new plan never changes how an earlier date
+  reads. Before the first plan's start a date reads the first plan's days, targets and schedule (as with one plan).
+  One resolver does this (`planAt`, `planInForce`, `cyclePosition`, `scheduledProgramDay`, `planTargets` in
+  `src/shared/program.ts`); nothing reads the stored fields directly for a date.
+- Editing the plan in force behaves as with one plan: it changes how every date of that plan reads, earlier ones
+  included (a steps target changed mid-cycle applies to the plan's earlier days too). Only a new plan protects the
+  past.
+- **Stored** in the settings document: the latest plan is the document's top level (`program.name`,
+  `cycleStartDate`, `weeks`, `days`, `planId`, and `targets`, `schedule`), the plans before it are
+  `program.earlierPlans` (oldest first, each with its `id`, `start`, name, weeks, days, targets and schedule). Absent =
+  one plan: every document stored before plans existed reads exactly as before, and no migration was needed. A build
+  that doesn't know plans reads the latest plan (from its start on, as cycle 1) and saves the plans along untouched.
+- **Setting up a new cycle** (§6.6, §7) adds a copy of the plan in force — everything it holds — as the latest plan,
+  starting on the next cycle's Monday; or on the current cycle's Monday when nothing has been saved in the current cycle
+  yet (the choice made on the new cycle's first days) and that isn't the plan's own first day. Its Undo removes it
+  entirely. A scheduled plan can be **cancelled** (back to repeating, with Undo) until it starts; once in force the
+  plan before it is history (read-only: its labels and cycle numbers are all that show of it).
+- The settings merge (two devices, §8) pairs plans by id: a plan set up on one device and an edit made on another both
+  survive, each in the plan it was made in; two plans set up from the same Monday keep this device's.
+
 ### 6.5 Accessories & supersets
 
 - Exercises and their sets can be grouped into **supersets** (covers core couplets and any pairing).
@@ -583,7 +621,10 @@ optional note.
   that changed, as one patch, so edits of different fields from two devices both survive. Closing the sheet with
   unsaved changes (Escape, the backdrop, a swipe down, Close) asks "Discard changes?" first. A lift a program day
   calculates as its main lift keeps its category, measure and max tracking and can't be archived (the sheet says which
-  days use it and links to the weekly layout; change that first); only its name is free. A lift with a strength target
+  days use it and links to the weekly layout; change that first); only its name is free. "A program day" is one of the
+  latest plan or of the plan before it (§6.4) — so a lift picked for a scheduled next cycle is locked, and so is this
+  cycle's while the next is scheduled ("Wed's main lift this cycle and Mon's next cycle"); which plans count doesn't
+  depend on the date, so the server enforces exactly what the sheet shows. A lift with a strength target
   keeps tracking its max. The server enforces both locks for every client (a stale device, an older build): a patch
   that would archive such a lift, turn its max tracking off, move it out of the barbell category or change its measure
   — or turn off max tracking on a lift with a strength target — is refused (409 with the reason, nothing written), and
@@ -600,7 +641,14 @@ optional note.
     skipped exercise carries from a performance in another measure, the set count carries (and the loads, if weighted,
     scaled as usual) but every target resets to the new measure's default; progression hints are read in the measure
     the session's exercise is shown in and pass over performances in another measure.
-- Sessions pre-fill from the last session of the same day type (exercises, sets, target reps, last weights). Reps
+- Sessions pre-fill from the last session of the **same program day** (exercises, sets, target reps, last weights).
+  Within a plan that is the same weekday. Across plans (§6.4) it follows the day, not the weekday: a day's counterpart in
+  an earlier plan is the day with **the same main lift**, else **the same name** (among several: the one matching the
+  other too, then the same weekday, then the first from Monday); a day without a main lift falls back to **the same
+  weekday**. So a rearranged week (Pull moved to Monday) pre-fills Monday from the last Pull day. A day whose main lift
+  and name are both new has no counterpart: it starts with its main lift only, and Train says so under Accessories
+  ("New in this plan: no earlier session to carry accessories from. Add them below."). The same rule picks "the same
+  day" when an added or skipped exercise is carried from its last performance (same day first). Reps
   carry over as **targets** — a missed rep never becomes next week's target (sets added without a target carry what was
   done). On deload weeks accessory loads pre-fill at 80% — for weighted holds and carries too; deload loads never carry
   into a normal week (a normal week pre-fills from the last normal performance, or scales a deload-only one back up).
@@ -653,6 +701,18 @@ Settings, through the same save path:
   of …" when that is more than a week away); a deload week whose name doesn't say so is "Easy (deload)", a week of
   another cycle "Week 1 (cycle 2)"; a one-week program only changes its cycle count. The program name is edited here
   too.
+  - **With more than one plan** (§6.4) the start date is the start of the plan in force today (before the program:
+    the first plan's), and a move — either button or the date field — moves **that plan and every later plan** by the
+    same amount, never an earlier plan's start. A move that would put the plan's start at or before the start of the
+    plan before it is refused, and says why ("This cycle can't start before the plan before it, which began Mon Oct
+    5."): the button is switched off with that as its line; the date field leaves a warning toast and saves nothing.
+    Delaying a plan in its first week puts this week back under the plan before, and the line says so ("This week goes
+    back to the plan before: Week 1 (cycle 3); …"). The previews are worked out on the moved plans, so they stay true.
+  - **The next cycle.** In a cycle's last week Now shows the end-of-cycle note (§7). **Start a new cycle** sets one up
+    at any time (same start rule as the note's, §6.4; its line says from when, and whether it starts over now because
+    nothing is logged in the cycle yet; not offered before the program starts, where the plan itself is edited). Once a
+    new cycle is set up, Now shows **"Next cycle · from Mon Nov 30"** with its name and **Cancel the new cycle** (back
+    to repeating, with Undo).
   - A move of the start — by either button or the date field — leaves **one Undo toast** ("Program delayed a week",
     "Program moved ahead 2 weeks", "Program starts Mon Nov 9"). Moves made while it is on offer fold into it: its
     Undo goes back to the start before the first of them (a move back there leaves nothing to undo). A double-tap is
@@ -662,12 +722,19 @@ Settings, through the same save path:
   and an **AMRAP** switch. The stored program has no entry for a day that is off, so switching one off is made
   harmless another way: it leaves an Undo toast, and while the screen stays open switching it back on restores its
   name, main lift and AMRAP setting.
+- **Targets & days** (§3, §6.4) — the steps target, Zone 2's default minutes, and the metcon and Zone 2 days.
 - **Cycle weeks** (§6.2; at least 1, at most 16; removing a week leaves an Undo), **Rules** (working weight %,
   rounding, AMRAP last set, auto progression and lb per extra rep, deload accessory load, accessory increment, rest
   timers), **Rep-max table** (§6.2) and the **Exercise library** (§6.5).
+- The Weekly layout, Targets & days and Cycle weeks edit **a plan**. While a next cycle is set up, each starts
+  with the same switch, **This cycle / Next cycle** (Next by default, and again whenever a next cycle is set up), with a
+  line saying from or until when ("From Mon Nov 30. This cycle stays as it is."). Editing the next cycle changes nothing
+  before it starts: no plan-changed flag on this week's sessions, no change to this week's checklist.
 
-Settings keeps the preferences (daily targets, schedule, nutrition, display, sync, data) and a link to Program. Old
-links to the sections that moved (`/settings#program`, `/settings#training`) redirect to Program (`#training` → `#rules`).
+Settings keeps the preferences (nutrition, display, sync, data) and one **Training** row linking to Program (the
+targets and training days are part of the plan). Old links to the sections that moved (`/settings#program`,
+`/settings#training`, `/settings#targets`, `/settings#schedule`) redirect to Program (`#training` → `#rules`, `#targets`
+and `#schedule` → `#targets`).
 
 **Undo of a settings change** (Program's, and Goals' pace / cleared goal / removed target) works on the settings as
 they are when Undo is tapped — the toast outlives the screen, and another device may have saved meanwhile — and puts
@@ -680,12 +747,29 @@ there is one), the title in the same size and at the same height as Today's and 
 
 - **Close the day**: today's checklist (morning check-in — done by the weigh-in alone — nutrition, steps target,
   zone 2, metcon, lift as scheduled or moved — see "Do this session today") — closing every item extends the streak.
+  Every day's checklist is the one of the plan in force on that day (§6.4): its steps target, metcon and Zone 2 days,
+  lifting days. A new cycle with other targets or days never changes whether an earlier day closed.
 - Today's header places the day in the program in words (`cycleLabel`, `src/shared/program.ts`): "Week 2 of 5",
   "Deload week", and from the second cycle on "Cycle 2 · Week 2 of 5". It sits on a line of its own under what is left
   of the day ("6 left to close the day"), so the pair never runs past two lines; where the header's text column is
   narrow (a 320 px phone) each line drops its tail instead of wrapping: "6 left to close" over the short label
   ("Cycle 2 · Week 1", "Deload").
-- Streaks, PR moments, cycle completions, calibration milestones, strength-target hits, goal weight.
+- Streaks, PR moments, cycle completions, calibration milestones, strength-target hits, goal weight. A cycle
+  completion is keyed by its number (`cycle-N`), and numbers continue across plans (§6.4), so adding, cancelling or
+  starting a plan never re-celebrates or loses a completed cycle.
+- **The choice at the end of a cycle.** During a cycle's last seven days, Train's header area (today only) and
+  Program › Now show a quiet note: "Cycle 2 ends Sun Nov 29. Next: **Repeat cycle 2** · **Set up a new cycle**".
+  Today doesn't show it.
+  - **Repeat** is what happens anyway if nothing is chosen: the plan continues. Tapping it only acknowledges: it files
+    `repeat-cycle-N` with the seen achievements — a set that only grows and syncs by union — so the note goes for that
+    cycle on every device and no merge can lose it or ask again.
+  - **Set up a new cycle** adds the next plan as a copy of the current one (§6.4: from the next cycle's Monday, or this
+    cycle's when nothing is saved in it yet) and goes to Program (Weekly layout, on Next cycle) to change it, with an
+    Undo toast ("New cycle set up from Mon Nov 30") that removes the new plan entirely.
+  - Once a new cycle is set up, the note says so instead: "Next: a new cycle from Mon Nov 30 · Review" (to Program).
+  - **"Cycle N complete"** offers the same two choices (instead of Continue) when N is the cycle that ended most
+    recently, nothing has been saved in the new cycle yet, Repeat wasn't chosen and no new plan starts with it; a new
+    cycle set up from there starts on the new cycle's Monday. Escape or a tap outside still just continues.
 - Each achievement is celebrated once. A max gain the screen already showed (applying an AMRAP bump) is filed as seen
   in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or
   only after the device comes back online.

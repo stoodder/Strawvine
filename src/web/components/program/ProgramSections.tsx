@@ -1,22 +1,36 @@
 /**
- * The Program screen's sections (see screens/Program.tsx): where the cycle is now, the weekly
- * layout, the cycle's weeks, the rules and the rep-max table. Each edits the program (or the
- * training preferences) through the setters of `useSettingsEditor`; nothing here calculates —
- * positions, shifts and percentages come from src/shared/program.ts. Changes that are easy to make
- * by accident (moving the cycle, switching a lifting day off, removing a week) leave an Undo.
+ * The Program screen's sections (see screens/Program.tsx): where the cycle is now (and the next
+ * cycle, when one is set up), the weekly layout, the targets and training days, the cycle's weeks,
+ * the rules and the rep-max table. Each edits the settings through the setters of
+ * `useSettingsEditor` — the plan sections the plan picked with the "This cycle / Next cycle" switch
+ * (SPEC §6.4); nothing here calculates — positions, shifts, plans and percentages come from
+ * src/shared (program.ts, plans.ts). Changes that are easy to make by accident (moving the cycle,
+ * switching a lifting day off, removing a week, cancelling the next cycle) leave an Undo.
  */
 import clsx from "clsx";
-import { useId, useRef, useState, type RefObject } from "react";
+import { useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { daysBetween, formatShortDate, isISODate, startOfWeek, weekdayName, WEEKDAY_SHORT, type ISODate } from "../../../shared/dates";
-import { cyclePosition, previewCycleShift, repMaxPct, snapCycleStart, type CyclePosition } from "../../../shared/program";
-import type { Program, ProgramDay, ProgramWeek } from "../../../shared/schemas";
+import { newCycleStart, type PlanFields } from "../../../shared/plans";
+import {
+  cyclePosition,
+  movePlanStart,
+  movingPlan,
+  planAt,
+  planTimeline,
+  previewCycleShift,
+  repMaxPct,
+  snapCycleStart,
+  type CyclePosition,
+} from "../../../shared/program";
+import type { Plan, Program, ProgramDay, ProgramWeek, Session } from "../../../shared/schemas";
 import { useData } from "../../lib/store";
 import { InlineText } from "../InlineText";
-import { NumSetting, RestSetting, WEEK_ORDER } from "../settings/fields";
-import type { ProgramUndo, TrainingPrefs } from "../settings/useSettingsEditor";
+import { DayPicker, NumSetting, RestSetting, WEEK_ORDER } from "../settings/fields";
+import type { PlanUndo, ProgramUndo, TrainingPrefs } from "../settings/useSettingsEditor";
 import { useToast } from "../Toast";
 import { BoxNumber, Field, Section, Toggle } from "../ui";
+import { CycleEndNote, type CycleChoice } from "./CycleEndNote";
 
 interface ProgramEdit {
   program: Program;
@@ -26,6 +40,60 @@ interface ProgramEdit {
 }
 /** A program change with an Undo toast (`useSettingsEditor().undoableProgram`); false when it wasn't saved. */
 type UndoableProgram = <T = undefined>(p: Partial<Program>, undo: ProgramUndo<T>) => boolean;
+
+/** Editing one plan (SPEC §6.4): the plan picked with the switch, and its setters. */
+export interface PlanEdit {
+  plan: Plan;
+  setPlan: (p: Partial<PlanFields>) => void;
+  /** A change of the plan with an Undo toast; false when it wasn't saved. */
+  undoable: <T = undefined>(p: Partial<PlanFields>, undo: PlanUndo<T>) => boolean;
+  /** The "This cycle / Next cycle" switch, while a next cycle is set up (null otherwise). */
+  switcher: ReactNode;
+  /** Section id (jump target). */
+  id?: string;
+}
+
+// ---------------------------------------------------------------------------
+// This cycle / Next cycle
+// ---------------------------------------------------------------------------
+
+export type PlanChoice = "this" | "next";
+
+/**
+ * Which plan the plan sections edit while a next cycle is set up: this cycle's (the plan in force)
+ * or the next one's. One switch per section, all showing the same choice.
+ */
+export function PlanSwitch({ value, onChange, nextStart }: { value: PlanChoice; onChange: (v: PlanChoice) => void; nextStart: ISODate }) {
+  const options: Array<[PlanChoice, string]> = [
+    ["this", "This cycle"],
+    ["next", "Next cycle"],
+  ];
+  return (
+    <div className="mb-4">
+      <div role="group" aria-label="Plan to edit" className="inline-flex rounded-full bg-white/[0.04] p-1" data-plan-switch="">
+        {options.map(([v, label]) => (
+          <button
+            key={v}
+            type="button"
+            aria-pressed={value === v}
+            onClick={() => onChange(v)}
+            className={clsx(
+              "tap min-h-11 rounded-full px-4 text-sm",
+              value === v ? "bg-white/[0.08] text-fg" : "text-mute",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-mute">
+        {value === "next"
+          ? `From ${weekdayName(nextStart, true)} ${formatShortDate(nextStart)}. This cycle stays as it is.`
+          : `Until ${weekdayName(nextStart, true)} ${formatShortDate(nextStart)}, when the next cycle starts.`}
+      </p>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Now
@@ -61,12 +129,16 @@ const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1
  *   "This week becomes Week 3; next Monday is Week 4 · Push."        (skip ahead)
  *   "Starts Mon Nov 9 instead of Nov 2: this week is before the program; next Monday is Week 1 · Push."
  *   "Starts Mon Nov 23 instead of Nov 16."                           (still more than a week away)
+ *   "This week goes back to the plan before: Deload (cycle 2); …"   (delaying a new plan's first week)
+ *
+ * The plan in force moves with every later plan, never an earlier one; a move that can't be made
+ * says why (`refused`).
  */
 export function shiftEffect(program: Program, weeks: 1 | -1, today: ISODate): string {
-  const { program: shifted, before, position: after, nextWeek } = previewCycleShift(program, weeks, today);
-  const to = shifted.cycleStartDate;
-  if (to === program.cycleStartDate) return "The program can't move any further.";
-  const starts = `Starts ${weekdayName(to, true)} ${formatShortDate(to)} instead of ${formatShortDate(program.cycleStartDate)}`;
+  const { refused, from, to, before, position: after, nextWeek } = previewCycleShift(program, weeks, today);
+  if (refused) return refused;
+  if (to === from) return "The program can't move any further.";
+  const starts = `Starts ${weekdayName(to, true)} ${formatShortDate(to)} instead of ${formatShortDate(from)}`;
   /** "next Monday is Week 3 · Push", or from its first lifting day when that isn't the Monday. */
   const nextWeekIs = (inCycle: number): string | null => {
     if (!nextWeek.position) return null;
@@ -82,8 +154,14 @@ export function shiftEffect(program: Program, weeks: 1 | -1, today: ISODate): st
   // Afterwards the first cycle hasn't started yet: say when it does — and, when that is next
   // week, what this week and the next turn into.
   if (!after) return nextWeek.position ? `${starts}: ${sentence("this week is before the program", nextWeekIs(1))}` : `${starts}.`;
+  // Delayed into the plan before: this week reads under it again. Skipped ahead into the next
+  // cycle's plan (it moves up too): this week is under it already.
+  if (before && after.plan.index < before.plan.index)
+    return sentence(`This week goes back to the plan before: ${weekName(after, before.cycle)}`, nextWeekIs(after.cycle));
+  if (before && after.plan.index > before.plan.index)
+    return sentence(`This week becomes ${weekName(after, before.cycle)}, on the next cycle's plan`, nextWeekIs(after.cycle));
   // A one-week program has one week to be in: only the count of cycles moves.
-  if (before && program.weeks.length === 1)
+  if (before && after.weeksCount === 1 && before.weeksCount === 1)
     return `Every week is ${weekName(after, after.cycle)}, so only the cycle count changes: this week is cycle ${after.cycle} instead of ${before.cycle}.`;
   // Delayed, this week is last week's over again; skipping ahead, it turns into next week's.
   const thisWeek = `This week ${weeks > 0 ? "repeats" : "becomes"} ${weekName(after, before?.cycle ?? after.cycle)}`;
@@ -117,7 +195,7 @@ function ShiftAction({
 }) {
   const effectId = useId();
   const button = useRef<HTMLButtonElement>(null);
-  const to = previewCycleShift(program, weeks, today).program.cycleStartDate;
+  const preview = previewCycleShift(program, weeks, today);
   return (
     <div className="py-3">
       <button
@@ -125,8 +203,8 @@ function ShiftAction({
         type="button"
         className="btn-ghost"
         aria-describedby={effectId}
-        disabled={to === program.cycleStartDate}
-        onClick={() => onShift(to, button)}
+        disabled={!!preview.refused || preview.to === preview.from}
+        onClick={() => onShift(preview.to, button)}
       >
         {label}
       </button>
@@ -137,35 +215,86 @@ function ShiftAction({
   );
 }
 
+/** What the Now section does with the next cycle (`useCycleChoice`). */
+export interface NextCycleActions extends CycleChoice {
+  /** Cancels the scheduled next cycle (with Undo): the cycle in force repeats. */
+  cancelNext: (plan: Plan) => void;
+}
+
 /**
  * Where the program is today — cycle, week, the week's dates — and the controls that move it:
  * the cycle start date, and delaying it / skipping ahead a week in one tap. Every move of the
  * start leaves one Undo toast: moves made while it is up fold into it (its Undo goes back to
  * where the start was before the first), and it only undoes a start that is still where it put it.
+ * With more than one plan a move is of the plan in force now (before the program: the first) and
+ * every later plan, never an earlier plan's start.
+ *
+ * Then the next cycle: when one is set up, "Next cycle · from Mon Nov 30" with its name and a way to
+ * cancel it; otherwise "Start a new cycle" (and, in a cycle's last week, the end-of-cycle note).
  */
-export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEdit & { undoable: UndoableProgram; today: ISODate }) {
+export function CycleNow({
+  program,
+  current,
+  next,
+  setPlan,
+  undoable,
+  today,
+  sessions,
+  settingsForStart,
+  actions,
+  id,
+}: {
+  program: Program;
+  /** The plan in force (before the program: the first). */
+  current: Plan;
+  /** The next cycle's plan, when one is set up. */
+  next: Plan | null;
+  setPlan: (id: string, p: Partial<PlanFields>) => void;
+  undoable: UndoableProgram;
+  today: ISODate;
+  sessions: ReadonlyArray<Session>;
+  /** The settings, to say where a new cycle would start (`newCycleStart`). */
+  settingsForStart: Parameters<typeof newCycleStart>[0];
+  actions: NextCycleActions;
+  id?: string;
+}) {
+  const toast = useToast();
   const pos = cyclePosition(program, today);
-  const n = program.weeks.length;
-  const startsIn = daysBetween(today, program.cycleStartDate);
+  const moving = movingPlan(program, today);
+  const firstUp = planAt(program, today);
+  const startsIn = daysBetween(today, firstUp.start);
   // "Week 2" as a week's name adds nothing next to "Week 2 of 5"; a name of its own ("Heavy") does.
   const ownLabel = pos && pos.week.label.trim().toLowerCase() !== `week ${pos.weekIndex + 1}` ? pos.week.label : null;
   const deloadNote = pos?.week.deload && !/deload/i.test(ownLabel ?? "") ? "Deload week" : null;
   const dateField = useRef<HTMLInputElement>(null);
   const lastShift = useRef(0);
+  const newStart = newCycleStart(settingsForStart, sessions, today);
+  const startId = useId();
 
   const moveStart = (to: ISODate, message: (from: ISODate) => string, control: RefObject<HTMLElement | null>) => {
-    const was = program.cycleStartDate;
+    const planId = moving.id;
+    const was = moving.start;
     if (to === was) return;
+    const moved = movePlanStart(program, planId, to);
+    if (moved.refused) {
+      toast.show({ message: moved.refused, tone: "warn" });
+      return;
+    }
+    const { cycleStartDate, earlierPlans } = moved.program;
     undoable<ISODate>(
-      { cycleStartDate: to },
+      { cycleStartDate, ...(earlierPlans ? { earlierPlans } : {}) },
       {
-        fold: { key: "cycle-start", before: was, after: to },
+        fold: { key: `cycle-start-${planId}`, before: was, after: to },
         message,
         undo: (now, from) => {
           // A tap after an Undo is a new decision, however soon it comes.
           lastShift.current = 0;
           // Relative: only a start that is still where this put it goes back.
-          return now.cycleStartDate === to ? { cycleStartDate: from } : null;
+          const plan = movingPlanById(now, planId);
+          if (!plan || plan.start !== to) return null;
+          const back = movePlanStart(now, planId, from);
+          if (back.refused) return null;
+          return { cycleStartDate: back.program.cycleStartDate, ...(back.program.earlierPlans ? { earlierPlans: back.program.earlierPlans } : {}) };
         },
         cantUndo: "Can't undo: the cycle start was changed again since.",
         focus: () => control.current,
@@ -186,7 +315,7 @@ export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEd
         {pos ? (
           <>
             <p className="text-2xl leading-tight font-light tracking-tight">
-              Cycle {pos.cycle} <span aria-hidden>·</span> Week {pos.weekIndex + 1} of {n}
+              Cycle {pos.cycle} <span aria-hidden>·</span> Week {pos.weekIndex + 1} of {pos.weeksCount}
             </p>
             <p className="mt-1.5 text-sm text-mute">
               {(ownLabel || deloadNote) && <span className="text-fg-2">{[ownLabel, deloadNote].filter(Boolean).join(" · ")} · </span>}
@@ -195,20 +324,25 @@ export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEd
           </>
         ) : (
           <>
-            <p className="text-2xl leading-tight font-light tracking-tight">Starts {dayFromToday(program.cycleStartDate, today)}</p>
+            <p className="text-2xl leading-tight font-light tracking-tight">Starts {dayFromToday(firstUp.start, today)}</p>
             <p className="mt-1.5 text-sm text-mute">
-              Cycle 1 · Week 1 of {n} begins {weekdayName(program.cycleStartDate, true)} {formatShortDate(program.cycleStartDate)}
+              Cycle 1 · Week 1 of {firstUp.weeks.length} begins {weekdayName(firstUp.start, true)} {formatShortDate(firstUp.start)}
               {startsIn > 1 && `, in ${startsIn} days`}
             </p>
           </>
         )}
       </div>
+      {actions.card && !actions.card.next && (
+        <div className="mt-4">
+          <CycleEndNote choice={actions} />
+        </div>
+      )}
       <div className="mt-3 divide-y divide-white/[0.04]">
-        <Field label="Cycle start date" hint="Snaps to that week's Monday">
+        <Field label="Cycle start date" hint={program.earlierPlans?.length ? "This cycle's plan began on this Monday" : "Snaps to that week's Monday"}>
           <input
             ref={dateField}
             type="date"
-            value={program.cycleStartDate}
+            value={moving.start}
             onChange={(e) => {
               if (!isISODate(e.target.value)) return;
               const to = snapCycleStart(e.target.value);
@@ -224,18 +358,68 @@ export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEd
           <div className="text-sm text-fg-2">Program name</div>
           <InlineText
             ariaLabel="Program name"
-            value={program.name}
+            value={current.name}
             maxLength={60}
             required
             requiredMessage="Give the program a name."
-            onCommit={(name) => setProgram({ name })}
+            onCommit={(name) => setPlan(current.id, { name })}
             className="mt-1"
             inputClassName="text-base"
           />
         </div>
+        {next ? (
+          <div className="py-4" data-next-cycle="">
+            <p className="text-sm text-fg-2">
+              Next cycle <span aria-hidden>·</span> from {weekdayName(next.start, true)} {formatShortDate(next.start)}
+            </p>
+            <p className="mt-1 text-xs text-mute">
+              Cycle {pos ? pos.cycle + 1 : 1} onward follows the plan below (Next cycle). Until then this cycle stays as it is.
+            </p>
+            <div className="mt-3">
+              <div className="text-xs text-mute">Its name</div>
+              <InlineText
+                ariaLabel="Next cycle's program name"
+                value={next.name}
+                maxLength={60}
+                required
+                requiredMessage="Give the program a name."
+                onCommit={(name) => setPlan(next.id, { name })}
+                className="mt-1"
+                inputClassName="text-base"
+              />
+            </div>
+            <button type="button" className="btn-ghost mt-3" onClick={() => actions.cancelNext(next)}>
+              Cancel the new cycle
+            </button>
+          </div>
+        ) : pos ? (
+          <div className="py-3">
+            <button
+              type="button"
+              className="btn-ghost"
+              aria-describedby={startId}
+              disabled={!newStart}
+              onClick={() => actions.setUpNewCycle()}
+            >
+              Start a new cycle
+            </button>
+            <p id={startId} className="mt-2 text-xs text-mute">
+              {newStart && newStart <= today
+                ? `A copy of this plan to change — the days, lifts, weeks and targets — from ${weekdayName(newStart, true)} ${formatShortDate(newStart)}: nothing is logged in this cycle yet, so it starts over now.`
+                : newStart
+                  ? `A copy of this plan to change — the days, lifts, weeks and targets — from ${weekdayName(newStart, true)} ${formatShortDate(newStart)}, when cycle ${pos.cycle} ends. Until then nothing changes.`
+                  : "A new cycle can be set up once this one is under way."}
+            </p>
+          </div>
+        ) : null}
       </div>
     </Section>
   );
+}
+
+/** The plan `id` on the program's timeline (an Undo finds the moved plan by it). */
+function movingPlanById(program: Program, id: string): { start: ISODate } | null {
+  return planTimeline(program).find((s) => s.id === id) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +428,7 @@ export function CycleNow({ program, setProgram, undoable, today, id }: ProgramEd
 
 const WEEKDAY_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
 
-export function WeeklyLayout({ program, setProgram, undoable, id }: ProgramEdit & { undoable: UndoableProgram }) {
+export function WeeklyLayout({ plan, setPlan, undoable, switcher, id }: PlanEdit) {
   const { data } = useData();
   const tracked = data.exercises.filter((e) => e.tracksMax && !e.archived);
   // The stored program has no place for a day that is off (days are keyed by weekday; a day
@@ -253,27 +437,26 @@ export function WeeklyLayout({ program, setProgram, undoable, id }: ProgramEdit 
   const switchedOff = useRef<Record<string, ProgramDay>>({});
   return (
     <Section label="Weekly layout" id={id}>
+      {switcher}
       <div className="space-y-1">
         {WEEK_ORDER.map((wd) => {
           const key = String(wd);
-          const day = program.days[key];
+          const offKey = `${plan.id}:${key}`;
+          const day = plan.days[key];
           const name = WEEKDAY_SHORT[wd]!;
-          const setDay = (patch: Partial<ProgramDay>) => day && setProgram({ days: { ...program.days, [key]: { ...day, ...patch } } });
+          const setDay = (patch: Partial<ProgramDay>) => day && setPlan({ days: { ...plan.days, [key]: { ...day, ...patch } } });
           const DAY_DEFAULT: ProgramDay = { label: "Training", primaryExerciseId: null, progression: true };
           const setLifting = (on: boolean) => {
-            const fold = { key: `lifting-${key}`, before: true, after: on };
+            const fold = { key: `lifting-${plan.id}-${key}`, before: true, after: on };
             if (on) {
               // Back on, as it was. That is what the "switched off" toast's Undo would do: the fold
               // ends where it began, so a toast still on offer goes (and none is raised).
-              undoable<boolean>(
-                { days: { ...program.days, [key]: switchedOff.current[key] ?? DAY_DEFAULT } },
-                { fold, message: "", undo: () => null },
-              );
+              undoable<boolean>({ days: { ...plan.days, [key]: switchedOff.current[offKey] ?? DAY_DEFAULT } }, { fold, message: "", undo: () => null });
               return;
             }
             if (!day) return;
-            switchedOff.current[key] = day;
-            const { [key]: _off, ...days } = program.days;
+            switchedOff.current[offKey] = day;
+            const { [key]: _off, ...days } = plan.days;
             undoable<boolean>(
               { days },
               {
@@ -343,6 +526,48 @@ export function WeeklyLayout({ program, setProgram, undoable, id }: ProgramEdit 
 }
 
 // ---------------------------------------------------------------------------
+// Targets and training days
+// ---------------------------------------------------------------------------
+
+/**
+ * The plan's daily targets and training days (SPEC §3, §6.4): the steps target, Zone 2's minutes and
+ * days, the metcon days. Part of the plan, so a new cycle can change them and the days before it
+ * keep reading by the ones they had.
+ */
+export function PlanTargetsSection({ plan, setPlan, switcher, id }: PlanEdit) {
+  return (
+    <Section label="Targets & days" id={id}>
+      {switcher}
+      <div className="divide-y divide-white/[0.04]">
+        <NumSetting
+          label="Steps"
+          value={plan.targets.steps}
+          min={0}
+          max={100_000}
+          grouping
+          onSave={(v) => v !== null && setPlan({ targets: { ...plan.targets, steps: v } })}
+        />
+        <NumSetting
+          label="Zone 2"
+          hint="Default duration when you check it off"
+          value={plan.targets.zone2Minutes}
+          unit="min"
+          min={0}
+          max={600}
+          unitInMessage=" min"
+          onSave={(v) => v !== null && setPlan({ targets: { ...plan.targets, zone2Minutes: v } })}
+        />
+      </div>
+      <div className="mt-6">
+        <DayPicker label="Metcon" value={plan.schedule.metcon} onChange={(metcon) => setPlan({ schedule: { ...plan.schedule, metcon } })} />
+        <div className="h-6" />
+        <DayPicker label="Zone 2" value={plan.schedule.zone2} onChange={(zone2) => setPlan({ schedule: { ...plan.schedule, zone2 } })} />
+      </div>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Cycle weeks
 // ---------------------------------------------------------------------------
 
@@ -388,13 +613,14 @@ function RepsInput({ value, onCommit, ariaLabel }: { value: number[]; onCommit: 
   );
 }
 
-export function CycleWeeks({ program, setProgram, undoable, id }: ProgramEdit & { undoable: UndoableProgram }) {
+export function CycleWeeks({ plan, setPlan, undoable, switcher, id }: PlanEdit) {
   const setWeek = (i: number, w: Partial<ProgramWeek>) =>
-    setProgram({ weeks: program.weeks.map((x, j) => (j === i ? { ...x, ...w } : x)) });
+    setPlan({ weeks: plan.weeks.map((x, j) => (j === i ? { ...x, ...w } : x)) });
   return (
-    <Section label="Cycle weeks" id={id} right={<span className="label">{program.weeks.length}</span>}>
+    <Section label="Cycle weeks" id={id} right={<span className="label">{plan.weeks.length}</span>}>
+      {switcher}
       <div className="space-y-6">
-        {program.weeks.map((w, i) => (
+        {plan.weeks.map((w, i) => (
           <div key={i}>
             <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3">
               <div className="flex min-w-0 flex-[1_1_8rem] items-center gap-2">
@@ -421,14 +647,14 @@ export function CycleWeeks({ program, setProgram, undoable, id }: ProgramEdit & 
                   on={w.deload}
                   onChange={(v) => setWeek(i, { deload: v, basisReps: v ? (w.basisReps ?? 12) : null })}
                 />
-                {program.weeks.length > 1 && (
+                {plan.weeks.length > 1 && (
                   <button
                     type="button"
                     aria-label={`Remove week ${i + 1}`}
                     className="tap -my-2 -mr-3 grid h-11 w-11 place-items-center text-mute"
                     onClick={() =>
                       undoable(
-                        { weeks: program.weeks.filter((_, j) => j !== i) },
+                        { weeks: plan.weeks.filter((_, j) => j !== i) },
                         {
                           message: `Week ${i + 1} removed`,
                           // Undo runs from a toast, later: the week goes back into the weeks as they are then.
@@ -476,10 +702,10 @@ export function CycleWeeks({ program, setProgram, undoable, id }: ProgramEdit & 
       <button
         type="button"
         className="btn-ghost mt-6"
-        disabled={program.weeks.length >= 16}
+        disabled={plan.weeks.length >= 16}
         onClick={() =>
-          setProgram({
-            weeks: [...program.weeks, { label: `Week ${program.weeks.length + 1}`, deload: false, reps: [5, 5, 5, 5], basisReps: null }],
+          setPlan({
+            weeks: [...plan.weeks, { label: `Week ${plan.weeks.length + 1}`, deload: false, reps: [5, 5, 5, 5], basisReps: null }],
           })
         }
       >

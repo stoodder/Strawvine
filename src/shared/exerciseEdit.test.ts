@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
-import { exerciseDraft, exerciseEditPatch, exerciseLocks, exercisePatchRefusal, programDayList } from "./exerciseEdit";
+import { exerciseDraft, exerciseEditPatch, exerciseLocks, exercisePatchRefusal, mainLiftOf, programDayList } from "./exerciseEdit";
+import { startNewCycle, updatePlan } from "./plans";
 import type { Exercise } from "./schemas";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -27,15 +28,15 @@ describe("exerciseLocks", () => {
         days: { ...settings.program.days, "0": { label: "Extra", primaryExerciseId: 1, progression: true } },
       },
     };
-    expect(exerciseLocks(bench, withSunday)).toEqual({ programDays: [1, 0], structure: true, keepsMax: true });
+    expect(exerciseLocks(bench, withSunday)).toEqual({ programDays: [1, 0], earlierPlanDays: [], structure: true, keepsMax: true });
     expect(exerciseLocks(bench, settings).programDays).toEqual([1]);
   });
 
   it("leaves a lift the program doesn't use free, unless a strength target needs its max", () => {
-    expect(exerciseLocks(front, settings)).toEqual({ programDays: [], structure: false, keepsMax: false });
+    expect(exerciseLocks(front, settings)).toEqual({ programDays: [], earlierPlanDays: [], structure: false, keepsMax: false });
     const targeted = { ...settings, strengthTargets: [{ id: "t", exerciseId: 4, targetLb: 405, setOn: "2026-11-01" }] };
-    expect(exerciseLocks(front, targeted)).toEqual({ programDays: [], structure: false, keepsMax: true });
-    expect(exerciseLocks(row, settings)).toEqual({ programDays: [], structure: false, keepsMax: false });
+    expect(exerciseLocks(front, targeted)).toEqual({ programDays: [], earlierPlanDays: [], structure: false, keepsMax: true });
+    expect(exerciseLocks(row, settings)).toEqual({ programDays: [], earlierPlanDays: [], structure: false, keepsMax: false });
   });
 });
 
@@ -119,5 +120,37 @@ describe("exercisePatchRefusal (the server's locks)", () => {
     expect(programDayList([1])).toBe("Mon");
     expect(programDayList([1, 4])).toBe("Mon & Thu");
     expect(programDayList([1, 3, 5])).toBe("Mon, Wed & Fri");
+  });
+});
+
+describe("locks with plans over time (SPEC §6.4)", () => {
+  // The next cycle swaps the back squat (Wed) for the front squat, and moves bench to Tuesday.
+  const made = startNewCycle({ ...settings, onboarded: true }, [], "2026-11-09", "p2")!.settings;
+  const next = updatePlan(made, "p2", {
+    days: {
+      ...settings.program.days,
+      "1": { label: "Pull", primaryExerciseId: 2, progression: true },
+      "2": { label: "Push", primaryExerciseId: 1, progression: true },
+      "3": { label: "Legs", primaryExerciseId: 4, progression: true },
+    },
+  });
+  const squat = ex({ id: 3, name: "Back squat", category: "primary", tracksMax: true });
+
+  it("a lift the next cycle picks is locked as a program day's is", () => {
+    expect(exerciseLocks(front, next)).toEqual({ programDays: [3], earlierPlanDays: [], structure: true, keepsMax: true });
+    expect(exercisePatchRefusal(front, { archived: true }, next)).toBe(
+      "Front squat is Wed's main lift: the program calculates it, so it keeps its category, measure and max tracking and can't be archived. Change the weekly layout first.",
+    );
+  });
+
+  it("so is one the plan before it still uses (this cycle's, while the next is scheduled)", () => {
+    expect(exerciseLocks(squat, next)).toEqual({ programDays: [], earlierPlanDays: [3], structure: true, keepsMax: true });
+    expect(exercisePatchRefusal(squat, { archived: true }, next)).toMatch(/^Back squat is Wed's main lift in the plan before: /);
+    expect(mainLiftOf(exerciseLocks(squat, next), { latest: "next cycle", earlier: "this cycle" })).toBe("Wed's main lift this cycle");
+    expect(mainLiftOf(exerciseLocks(bench, next), { latest: "next cycle", earlier: "this cycle" })).toBe(
+      "Tue's main lift next cycle and Mon's this cycle",
+    );
+    // The same days in both plans: said once.
+    expect(mainLiftOf(exerciseLocks(ex({ id: 5, name: "Strict press", category: "primary", tracksMax: true }), next))).toBe("Thu's main lift");
   });
 });

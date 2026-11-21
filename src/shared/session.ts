@@ -4,8 +4,8 @@
  * session of the same day type (deloaded when appropriate).
  */
 import { addDays, formatShortDate, weekdayOf, type ISODate } from "./dates";
-import { cyclePosition, currentMax, mainLiftSets, programDayFor, roundTo, scheduledProgramDay } from "./program";
-import type { Block, BlockExercise, Exercise, Measure, MaxEntry, Session, SetEntry, Settings } from "./schemas";
+import { cyclePosition, currentMax, mainLiftSets, planAt, programDayFor, roundTo, scheduledProgramDay, type PlanSpan } from "./program";
+import type { Block, BlockExercise, Exercise, Measure, MaxEntry, Program, ProgramDay, Session, SetEntry, Settings } from "./schemas";
 
 export function newId(): string {
   const c = globalThis.crypto;
@@ -113,11 +113,67 @@ export interface BuildContext {
  */
 export const planDateOf = (s: Pick<Session, "date" | "plannedFor">): ISODate => s.plannedFor ?? s.date;
 
-/** Most recent earlier session of the same day type (weekday of its plan), preferring non-deload weeks. */
-function templateSource(date: ISODate, sessions: ReadonlyArray<Session>): Session | null {
+/** Weekdays Monday first, for picking among several matching days of a plan. */
+const MONDAY_FIRST = [1, 2, 3, 4, 5, 6, 0];
+
+/**
+ * The weekday of `plan` that is the same program day as `day` (on weekday `wd` of another plan):
+ * the day with the same main lift (`primaryExerciseId`), else the one with the same name; among
+ * several, the one also matching the other (name, then lift), then the same weekday, then the first
+ * from Monday. A day without a main lift (or not a program day) falls back to the same weekday. A
+ * day whose main lift and name are both new to `plan` has none (null): it carries nothing from it.
+ */
+function counterpartWeekday(day: ProgramDay | null, wd: number, plan: PlanSpan): number | null {
+  const name = (d: ProgramDay) => d.label.trim().toLowerCase();
+  const pick = (cands: number[], prefer?: (d: ProgramDay) => boolean): number | null => {
+    if (!cands.length) return null;
+    const better = prefer ? cands.filter((w) => prefer(plan.days[String(w)]!)) : [];
+    const pool = better.length ? better : cands;
+    return pool.includes(wd) ? wd : pool[0]!;
+  };
+  const days = MONDAY_FIRST.filter((w) => plan.days[String(w)]);
+  if (day?.primaryExerciseId != null) {
+    const byLift = days.filter((w) => plan.days[String(w)]!.primaryExerciseId === day.primaryExerciseId);
+    if (byLift.length) return pick(byLift, (d) => name(d) === name(day));
+  }
+  if (day) {
+    const byName = days.filter((w) => name(plan.days[String(w)]!) === name(day));
+    if (byName.length) return pick(byName, (d) => d.primaryExerciseId === day.primaryExerciseId);
+    if (day.primaryExerciseId != null) return null;
+  }
+  return wd;
+}
+
+/**
+ * Which earlier sessions follow the same program day as `date` (SPEC §6.5, pre-fill): in the plan
+ * `date` reads, the same weekday (as with one plan); in an earlier plan, the weekday of that plan's
+ * counterpart of the day (`counterpartWeekday`: by main lift, then by name). A session counts by
+ * its plan date (`planDateOf`).
+ */
+export function sameProgramDay(program: Program, date: ISODate): (planDate: ISODate) => boolean {
   const wd = weekdayOf(date);
-  const prior = sessions
-    .filter((s) => s.date < date && weekdayOf(planDateOf(s)) === wd && s.blocks.some((b) => b.kind === "accessory"))
+  if (!program.earlierPlans?.length) return (d) => weekdayOf(d) === wd;
+  const plan = planAt(program, date);
+  const day = plan.days[String(wd)] ?? null;
+  const counterpart = new Map<number, number | null>();
+  return (d) => {
+    const other = planAt(program, d);
+    if (other.index === plan.index) return weekdayOf(d) === wd;
+    let w = counterpart.get(other.index);
+    if (w === undefined) counterpart.set(other.index, (w = counterpartWeekday(day, wd, other)));
+    return w !== null && weekdayOf(d) === w;
+  };
+}
+
+/**
+ * The session `date`'s accessories are pre-filled from: the most recent earlier session of the same
+ * program day (`sameProgramDay`) that has accessories, preferring non-deload weeks. Null when there
+ * is none — a day new to the program starts with its main lift only.
+ */
+export function templateSource(date: ISODate, ctx: Pick<BuildContext, "settings" | "sessions">): Session | null {
+  const same = sameProgramDay(ctx.settings.program, date);
+  const prior = ctx.sessions
+    .filter((s) => s.date < date && same(planDateOf(s)) && s.blocks.some((b) => b.kind === "accessory"))
     .sort((a, b) => (a.date < b.date ? 1 : -1));
   return prior.find((s) => !s.deload) ?? prior[0] ?? null;
 }
@@ -175,23 +231,25 @@ const byDateDesc = (a: Session, b: Session) => (a.date < b.date ? 1 : a.date > b
 /**
  * The most recent time `exerciseId` was actually done (not skipped) in an accessory block of a
  * session before `date`. Normal weeks win over deload weeks (a deload's lighter loads must not
- * become the new normal), then the same weekday as `planDate` over others. Used to carry a skipped
- * exercise forward from real numbers, and to pre-fill one added by hand.
+ * become the new normal), then the same program day as `planDate` (`sameProgramDay`: with one plan,
+ * the same weekday) over others. Used to carry a skipped exercise forward from real numbers, and to
+ * pre-fill one added by hand.
  */
 function lastPerformance(
   exerciseId: number,
   date: ISODate,
-  sessions: ReadonlyArray<Session>,
+  ctx: Pick<BuildContext, "settings" | "sessions">,
   planDate: ISODate = date,
 ): { session: Session; exercise: BlockExercise } | null {
-  const wd = weekdayOf(planDate);
+  const { sessions } = ctx;
+  const same = sameProgramDay(ctx.settings.program, planDate);
   const prior = sessions.filter((s) => s.date < date).sort(byDateDesc);
   const find = (s: Session) =>
     s.blocks.flatMap((b) => (b.kind === "accessory" ? b.exercises : [])).find((e) => e.exerciseId === exerciseId && !e.skipped);
   for (const deload of [false, true])
     for (const sameDay of [true, false])
       for (const s of prior) {
-        if (s.deload !== deload || (weekdayOf(planDateOf(s)) === wd) !== sameDay) continue;
+        if (s.deload !== deload || same(planDateOf(s)) !== sameDay) continue;
         const exercise = find(s);
         if (exercise) return { session: s, exercise };
       }
@@ -222,7 +280,7 @@ export function setsForAddedExercise(
   ctx: Pick<BuildContext, "settings" | "sessions">,
 ): SetEntry[] {
   const { program } = ctx.settings;
-  const done = lastPerformance(exercise.id, into.date, ctx.sessions, planDateOf(into));
+  const done = lastPerformance(exercise.id, into.date, ctx, planDateOf(into));
   const factor = done ? loadFactor(program, into.deload, done.session.deload) : 1;
   const carried = done ? carryOverExercise(done.exercise, factor, program.roundToLb, exercise).sets : [];
   return carried.length ? carried : Array.from({ length: 3 }, () => blankSet({ targetReps: defaultTarget(exercise.measure) }));
@@ -266,7 +324,7 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
   const { day, pos, block: primary, primaryMaxLb } = plannedPrimary(date, ctx);
   const blocks: Block[] = primary ? [primary] : [];
 
-  const source = templateSource(date, ctx.sessions);
+  const source = templateSource(date, ctx);
   if (source) {
     // Loads are scaled from the week they come from to this one: down into a deload, and back up
     // when only a deload performance exists, so deload loads never carry into a normal week.
@@ -277,7 +335,7 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
         const ex = ctx.exercises.find((x) => x.id === e.exerciseId && !x.archived);
         if (!ex) return [];
         // Skipped last time: still on the plan, prefilled from the last time it was really done.
-        const done = e.skipped ? lastPerformance(e.exerciseId, date, ctx.sessions) : null;
+        const done = e.skipped ? lastPerformance(e.exerciseId, date, ctx) : null;
         return [
           done
             ? carryOverExercise(done.exercise, factorFrom(done.session), program.roundToLb, ex)

@@ -5,10 +5,11 @@ import {
   exerciseDraft,
   exerciseEditPatch,
   exerciseLocks,
-  programDayList,
+  mainLiftOf,
   type ExerciseDraft,
   type ExerciseEditPatch,
 } from "../../../shared/exerciseEdit";
+import { nextPlan } from "../../../shared/plans";
 import type { Exercise, Measure } from "../../../shared/schemas";
 import { defaultTarget, isWeighted } from "../../../shared/session";
 import { useData, useEditExercise } from "../../lib/store";
@@ -39,7 +40,7 @@ export function EditExerciseSheet({
   open: boolean;
   onClose: (saved?: ExerciseEditPatch) => void;
 }) {
-  const { data } = useData();
+  const { data, today } = useData();
   const location = useLocation();
   const editExercise = useEditExercise();
   const toast = useToast();
@@ -63,6 +64,8 @@ export function EditExerciseSheet({
   if (!exercise || !draft) return null;
 
   const locks = exerciseLocks(exercise, data.settings);
+  // With a next cycle set up, the plan before it is this cycle's (SPEC §6.4).
+  const lockedAs = mainLiftOf(locks, nextPlan(data.settings, today) ? { latest: "next cycle", earlier: "this cycle" } : {}).replace(/'/g, "’");
   const set = (patch: Partial<ExerciseDraft>) => setDraft({ ...draft, ...patch });
   const blank = !draft.name.trim();
   const patch = exerciseEditPatch(exercise, draft, locks);
@@ -138,7 +141,7 @@ export function EditExerciseSheet({
 
         {locks.structure && (
           <p id={lockNoteId} className="mt-4 text-xs text-fg-2">
-            {programDayList(locks.programDays)}&rsquo;s main lift: the program calculates it from its max, so its category, measure and max
+            {lockedAs}: the program calculates it from its max, so its category, measure and max
             stay as they are and it can&rsquo;t be archived. Change the{" "}
             {/* Program's back control returns to where the sheet was opened (a Train day). Following the link closes the sheet. */}
             <Link

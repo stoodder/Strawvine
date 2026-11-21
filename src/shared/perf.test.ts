@@ -9,6 +9,7 @@ import { defaultSettings } from "./defaults";
 import { achievements, amrapPrs, closedDates, streaks, type AppData } from "./gamify";
 import { buildModel } from "./insights";
 import { emptyDayLog, type DayLog, type Exercise, type MaxEntry, type Session } from "./schemas";
+import { startNewCycle } from "./plans";
 import { blankSet, buildSession, buildSessionFrom } from "./session";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
@@ -139,5 +140,29 @@ describe("ten years of data", () => {
     expect(prs.length).toBeGreaterThan(0);
     expect(amrapPrs(data.sessions, "2020-01-01").every((p) => p.date <= "2020-01-01")).toBe(true);
     expect(time(() => amrapPrs([...data.sessions]))).toBeLessThan(25);
+  });
+});
+
+describe("ten years of data with a new plan every 15 weeks (SPEC §6.4)", () => {
+  /** The same history read under ~35 plans: every date resolves its plan. */
+  const withPlans = (): AppData => {
+    const data = fixture();
+    let s = data.settings;
+    for (let d = addDays(start, 105), i = 0; d < today; d = addDays(d, 105), i++)
+      s = startNewCycle(s, [{ ...data.sessions[0]!, date: addDays(d, -1), plannedFor: null }], addDays(d, -3), `p${i}`)?.settings ?? s;
+    return { ...data, settings: s };
+  };
+  const data = withPlans();
+
+  it("derives the model, streaks and achievements within the same budget", () => {
+    expect(data.settings.program.earlierPlans!.length).toBeGreaterThan(30);
+    const warm = withPlans();
+    buildModel(warm, today);
+    streaks(warm, today);
+    achievements(warm, today);
+    expect(time(() => buildModel(data, today))).toBeLessThan(50);
+    expect(time(() => streaks(data, today))).toBeLessThan(50);
+    expect(time(() => achievements(data, today))).toBeLessThan(50);
+    expect(time(() => buildSession(today, data))).toBeLessThan(25);
   });
 });

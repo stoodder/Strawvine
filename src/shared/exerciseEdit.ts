@@ -3,18 +3,25 @@
  * session side of a measure change (pre-fill, hints, the session in progress) lives in session.ts.
  */
 import { WEEKDAY_SHORT } from "./dates";
-import type { Exercise, ExerciseCategory, Measure, Settings } from "./schemas";
+import type { Exercise, ExerciseCategory, Measure, ProgramDay, Settings } from "./schemas";
 import { isMainLift, isWeighted } from "./session";
 
 export interface ExerciseLocks {
   /**
-   * Weekdays (0 = Sun … 6 = Sat) whose program day calculates this exercise as its main lift, Monday
-   * first.
+   * Weekdays (0 = Sun … 6 = Sat) whose program day in the latest plan calculates this exercise as its
+   * main lift, Monday first.
    */
   programDays: number[];
   /**
-   * The program calculates it: its category, measure and max tracking stay as they are and it can't
-   * be archived, or those days would lose their main lift. (Change the program's days first.)
+   * The same in the plan before the latest one (SPEC §6.4) — the plan still in force while the
+   * latest is the next cycle, scheduled. Empty with one plan.
+   */
+  earlierPlanDays: number[];
+  /**
+   * The program calculates it — in the latest plan or the one before: its category, measure and max
+   * tracking stay as they are and it can't be archived, or those days would lose their main lift.
+   * (Change the program's days first.) Which plans count doesn't depend on the date, so the server
+   * enforces exactly what the sheet shows.
    */
   structure: boolean;
   /**
@@ -29,13 +36,33 @@ export function exerciseLocks(
   exercise: Pick<Exercise, "id" | "tracksMax">,
   settings: Pick<Settings, "program" | "strengthTargets">,
 ): ExerciseLocks {
-  const programDays = Object.entries(settings.program.days)
-    .filter(([, d]) => d.primaryExerciseId === exercise.id)
-    .map(([k]) => Number(k))
-    .sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
-  const structure = programDays.length > 0;
+  const daysUsing = (days: Record<string, ProgramDay>) =>
+    Object.entries(days)
+      .filter(([, d]) => d.primaryExerciseId === exercise.id)
+      .map(([k]) => Number(k))
+      .sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
+  const programDays = daysUsing(settings.program.days);
+  const before = settings.program.earlierPlans?.at(-1);
+  const earlierPlanDays = before ? daysUsing(before.days) : [];
+  const structure = programDays.length > 0 || earlierPlanDays.length > 0;
   const targeted = settings.strengthTargets.some((t) => t.exerciseId === exercise.id);
-  return { programDays, structure, keepsMax: exercise.tracksMax && (structure || targeted) };
+  return { programDays, earlierPlanDays, structure, keepsMax: exercise.tracksMax && (structure || targeted) };
+}
+
+/**
+ * Whose main lift a locked exercise is, for a sentence: "Mon & Thu's main lift". With two plans the
+ * days are told apart — `when` names them ("next cycle" / "this cycle"; by default the plan before
+ * the latest is "in the plan before" and the latest goes unnamed): "Wed's main lift this cycle and
+ * Mon's next cycle". Days the two plans share are said once, without a name.
+ */
+export function mainLiftOf(locks: Pick<ExerciseLocks, "programDays" | "earlierPlanDays">, when: { latest?: string; earlier?: string } = {}): string {
+  const { programDays: latest, earlierPlanDays: earlier } = locks;
+  const same = latest.length === earlier.length && latest.every((d, i) => earlier[i] === d);
+  if (!earlier.length || same) return `${programDayList(latest)}'s main lift`;
+  const earlierText = `${programDayList(earlier)}'s ${latest.length ? "" : "main lift "}${when.earlier ?? "in the plan before"}`;
+  if (!latest.length) return earlierText;
+  const latestText = `${programDayList(latest)}'s main lift${when.latest ? ` ${when.latest}` : ""}`;
+  return `${latestText} and ${earlierText}`;
 }
 
 /** Program days as words: "Mon", "Mon & Thu", "Mon, Wed & Fri". */
@@ -65,7 +92,7 @@ export function exercisePatchRefusal(
       (patch.category !== undefined && patch.category !== exercise.category && patch.category !== "primary") ||
       (patch.measure !== undefined && patch.measure !== exercise.measure);
     if (breaks)
-      return `${exercise.name} is ${programDayList(locks.programDays)}'s main lift: the program calculates it, so it keeps its category, measure and max tracking and can't be archived. Change the weekly layout first.`;
+      return `${exercise.name} is ${mainLiftOf(locks)}: the program calculates it, so it keeps its category, measure and max tracking and can't be archived. Change the weekly layout first.`;
   }
   if (dropsMax && locks.keepsMax) return `${exercise.name} has a strength target, so it keeps tracking its max.`;
   return null;

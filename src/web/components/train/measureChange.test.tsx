@@ -27,6 +27,7 @@ vi.mock("../../lib/store", () => ({
   useCreateExercise: () => vi.fn(),
   useEditExercise: () => vi.fn(),
   useMarkSeen: () => vi.fn(),
+  useSaveSettings: () => vi.fn(() => Promise.resolve()),
   usePendingDates: () => new Set<string>(),
 }));
 vi.mock("../../lib/sync", () => ({ currentData: () => store.data }));

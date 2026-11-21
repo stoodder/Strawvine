@@ -7,7 +7,7 @@ import { CALIBRATION_DAYS } from "../../shared/energy";
 import { dayChecklist, isClosed } from "../../shared/gamify";
 import { targetsFor } from "../../shared/insights";
 import { isOnHold, overTarget, PROTEIN_OVER_TARGET_SCALE, remainingKcal, type OverTargetScale } from "../../shared/nutrition";
-import { cycleLabel, cyclePosition, programDayFor, type CyclePosition } from "../../shared/program";
+import { cycleLabel, cyclePosition, planTargets, programDayFor, type CyclePosition } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
@@ -78,7 +78,9 @@ export function TodayScreen() {
 
   const programDay = programDayFor(data.settings.program, date);
   const pos = cyclePosition(data.settings.program, date);
-  const cycle = pos ? cycleParts(pos, data.settings.program.weeks.length) : null;
+  const cycle = pos ? cycleParts(pos, pos.weeksCount) : null;
+  // The steps and Zone 2 targets of the plan in force on the day.
+  const dayTargets = planTargets(data.settings, date);
   // This day's plan, moved to (and maybe done on) another day ("Do this session today").
   const doneEarly = session ? null : sessionDoneEarly(date, data.sessions);
   const draft = programDay && !session && !doneEarly ? buildSession(date, data) : null;
@@ -350,8 +352,8 @@ export function TodayScreen() {
           items={items}
           day={day}
           patch={patch}
-          stepTarget={data.settings.targets.steps}
-          zone2Minutes={data.settings.targets.zone2Minutes}
+          stepTarget={dayTargets.steps}
+          zone2Minutes={dayTargets.zone2Minutes}
           lift={lift}
           holding={typing}
           saved={saved}

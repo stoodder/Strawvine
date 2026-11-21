@@ -16,6 +16,7 @@ import {
 } from "./outbox-core";
 import { fitSession, mergeFields, mergeSession, mergeSettings, mergeSettingsDetailed } from "./merge";
 import { MAX_BLOCKS, moveBlock, moveExerciseToBlock, splitOut } from "../../shared/sessionStructure";
+import { cancelPlan, planList, startNewCycle, updatePlan } from "../../shared/plans";
 
 const settings = defaultSettings({ bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 }, "2026-11-01");
 
@@ -1022,5 +1023,104 @@ describe("version-checked ops: deletes, rejected copies and conflicts", () => {
     // Another window's later copy, merged in (addOp would have replaced it).
     s = { ...s, entries: [...s.entries, { seq: 99, op: sessionOp(doc("later")), state: "acked", result: doc("later"), ackNo: 1 }] };
     expect(overlay(b, s.entries, {}).sessions[0]!.notes).toBe("server");
+  });
+});
+
+/**
+ * Plans over time (SPEC §6.4) through the three-way merge and a 409: a plan added on one device and
+ * an edit on another both survive, each where it was made; nothing is lost when an older build (that
+ * doesn't know plans) saves.
+ */
+describe("mergeSettings: plans over time", () => {
+  const S0: Settings = { ...settings, onboarded: true };
+  const today = "2026-11-25"; // cycle 1, week 4 (the program starts Mon Nov 2)
+  const sessions: Session[] = [sess([], { date: "2026-11-03" })];
+  const withNew = startNewCycle(S0, sessions, today, "p2")!.settings;
+  const steps = (s: Settings, n: number): Settings => ({ ...s, targets: { ...s.targets, steps: n } });
+
+  it("a new cycle set up there + a steps target changed here: the target goes to the plan it was changed in", () => {
+    const m = mergeSettingsDetailed(S0, steps(S0, 12_000), withNew);
+    expect(m.conflicts).toEqual([]);
+    const plans = planList(m.value);
+    expect(plans.map((p) => [p.id, p.start, p.targets.steps])).toEqual([
+      ["first", "2026-11-02", 12_000],
+      ["p2", "2026-12-07", 15_000],
+    ]);
+    expect(settingsSchema.safeParse(m.value).success).toBe(true);
+  });
+
+  it("…and the other way round: set up here, the target changed there", () => {
+    const m = mergeSettingsDetailed(S0, withNew, steps(S0, 12_000));
+    expect(m.conflicts).toEqual([]);
+    expect(planList(m.value).map((p) => [p.id, p.targets.steps])).toEqual([
+      ["first", 12_000],
+      ["p2", 15_000],
+    ]);
+  });
+
+  it("the next cycle edited here while this cycle's is edited there: both kept", () => {
+    const mine = updatePlan(withNew, "p2", { targets: { steps: 9000, zone2Minutes: 40 } });
+    const theirs = updatePlan(withNew, "first", { schedule: { ...S0.schedule, metcon: S0.schedule.metcon.map(() => true) } });
+    const m = mergeSettingsDetailed(withNew, mine, theirs);
+    expect(m.conflicts).toEqual([]);
+    const [first, next] = planList(m.value);
+    expect(first!.schedule.metcon.every(Boolean)).toBe(true);
+    expect(first!.targets.steps).toBe(15_000);
+    expect(next!.targets).toEqual({ steps: 9000, zone2Minutes: 40 });
+    expect(next!.schedule).toEqual(S0.schedule);
+  });
+
+  it("both devices set up a new cycle from the same Monday: one plan, this device's, and it says so", () => {
+    const other = startNewCycle(S0, sessions, today, "p3")!.settings;
+    const m = mergeSettingsDetailed(S0, updatePlan(withNew, "p2", { name: "Mine" }), updatePlan(other, "p3", { name: "Theirs" }));
+    expect(planList(m.value).map((p) => [p.id, p.name])).toEqual([
+      ["first", S0.program.name],
+      ["p2", "Mine"],
+    ]);
+    expect(m.conflicts).toEqual(["program cycles"]);
+  });
+
+  it("cancelled there while edited here: the edit keeps the plan (as an edited strength target would be)", () => {
+    const edited = updatePlan(withNew, "p2", { name: "Heavier" });
+    const m = mergeSettingsDetailed(withNew, edited, cancelPlan(withNew, "p2", today)!);
+    expect(planList(m.value).map((p) => [p.id, p.name])).toEqual([
+      ["first", S0.program.name],
+      ["p2", "Heavier"],
+    ]);
+  });
+
+  it("cancelled here, untouched there: gone, and the document is as before plans", () => {
+    const m = mergeSettingsDetailed(withNew, cancelPlan(withNew, "p2", today)!, withNew);
+    expect(m.value).toEqual(S0);
+  });
+
+  it("a document without plans merges to the same shape (no plan keys appear)", () => {
+    const m = mergeSettings(S0, steps(S0, 12_000), { ...S0, onboarded: false });
+    expect(m.program).not.toHaveProperty("earlierPlans");
+    expect(m.program).not.toHaveProperty("planId");
+    expect(m).toEqual({ ...steps(S0, 12_000), onboarded: false });
+  });
+
+  it("an older build's save keeps the plans: its stale copy never had them, so the server's stand", () => {
+    // That build's edit (the protein target), made on a copy from before the new cycle.
+    const old = { ...S0, nutrition: { ...S0.nutrition, proteinGPerLb: 1.1 } };
+    const m = mergeSettings(S0, old, withNew);
+    expect(planList(m)).toEqual(planList(withNew));
+    expect(m.nutrition.proteinGPerLb).toBe(1.1);
+    // And a save from a copy that has them (it spreads what it was sent) carries them as they are.
+    const spread = { ...withNew, program: { ...withNew.program, intensity: 0.85 } };
+    expect(planList(mergeSettings(withNew, spread, withNew))).toEqual(planList(withNew));
+  });
+
+  it("a 409 for a settings save resolves through the same merge", () => {
+    let s = addOp(emptyOutbox(), { kind: "settings", settings: steps(S0, 12_000), baseRev: "r0", base: S0 }, null);
+    const r = resolveConflict(s, s.entries[0]!.seq, { current: withNew, rev: "r1" }, true);
+    expect(r.kind).toBe("retry");
+    s = (r as { state: typeof s }).state;
+    const merged = (s.entries[0]!.op as { settings: Settings }).settings;
+    expect(planList(merged).map((p) => [p.id, p.targets.steps])).toEqual([
+      ["first", 12_000],
+      ["p2", 15_000],
+    ]);
   });
 });
