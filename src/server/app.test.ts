@@ -305,7 +305,7 @@ describe("api", () => {
       const res = await req(`/api/exercises/${mainId}`, json("PATCH", patch));
       expect(res.status, JSON.stringify(patch)).toBe(409);
       expect(((await res.json()) as { error: string }).error).toMatch(
-        new RegExp(`^${main.name} is .*'s main lift: .*Change the weekly layout first\\.$`),
+        new RegExp(`^${main.name} is .*'s main lift: .*Change the weekly layout on Program first\\.$`),
       );
     }
     // Nothing of a refused patch was written; a rename (or a field set to what it is) passes.
@@ -1184,7 +1184,9 @@ describe("export & restore", () => {
 
   it("keeps plans over time (SPEC §6.4): stored as sent, through an export and back, and their lifts locked", async () => {
     // The restore above signed every device out: a fresh app and sign-in for the API calls.
-    const fresh = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false });
+    // The server's date: Fri Nov 20, the next cycle (from Mon Dec 7) still ahead.
+    let serverToday = "2026-11-20";
+    const fresh = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false, today: () => serverToday });
     const signedIn = await login(fresh);
     const req = (path: string, init: RequestInit = {}) =>
       fresh.request(path, { ...init, headers: { "content-type": "application/json", cookie: signedIn } });
@@ -1210,10 +1212,17 @@ describe("export & restore", () => {
     };
     expect((await req("/api/settings", json("PUT", planned))).status).toBe(200);
     expect(((await (await req("/api/bootstrap")).json()) as Bootstrap).settings).toEqual(planned);
-    // Bench is only the plan before's lift now: still locked, on the server too.
+    // Bench is only this cycle's lift now (the plan before the next one): locked until the next cycle starts, on the server too.
     const refused = await req(`/api/exercises/${bench.id}`, json("PATCH", { archived: true }));
     expect(refused.status).toBe(409);
-    expect(((await refused.json()) as { error: string }).error).toMatch(/^Bench press is Mon's main lift in the plan before: /);
+    expect(((await refused.json()) as { error: string }).error).toBe(
+      "Bench press is Mon's main lift this cycle: the program calculates it, so it keeps its category, measure and max tracking and can't be archived. Change this cycle's weekly layout on Program first.",
+    );
+    // The server checks on its date plus a day (time zones): on Sun Dec 6 it lets it go, as a phone already on Monday would.
+    serverToday = "2026-12-06";
+    expect((await req(`/api/exercises/${bench.id}`, json("PATCH", { archived: true }))).status).toBe(200);
+    expect((await req(`/api/exercises/${bench.id}`, json("PATCH", { archived: false }))).status).toBe(200);
+    serverToday = "2026-11-20";
     // A plan that isn't well formed is refused, like any settings.
     const bad = { ...planned, program: { ...planned.program, earlierPlans: [{ ...planned.program.earlierPlans![0]!, weeks: [] }] } };
     expect((await req("/api/settings", json("PUT", bad))).status).toBe(400);

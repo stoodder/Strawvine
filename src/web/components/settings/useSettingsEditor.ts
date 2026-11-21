@@ -6,7 +6,7 @@
  */
 import { useRef, useState } from "react";
 import { trainingPrefs } from "../../../shared/defaults";
-import { planById, updatePlan, type PlanFields } from "../../../shared/plans";
+import { editPlan, planById, type PlanFields } from "../../../shared/plans";
 import { settingsSchema, type Plan, type Program, type Settings } from "../../../shared/schemas";
 import { fmt } from "../../lib/format";
 import { useData, useSaveSettings } from "../../lib/store";
@@ -20,7 +20,7 @@ const PATH_NAMES: Array<[RegExp, string]> = [
   [/^program\.earlierPlans\.\d+\.weeks\.(\d+)/, "Week $1"],
   [/^program\.earlierPlans\.\d+\.weeks/, "Cycle weeks"],
   [/^program\.earlierPlans\.\d+\.days/, "Weekly layout"],
-  [/^program\.earlierPlans\.\d+\.start/, "Cycle start date"],
+  [/^program\.earlierPlans\.\d+\.(start|end)/, "Cycle start date"],
   [/^nutrition\.proteinGPerLb/, "Protein"],
   [/^nutrition\.fatGPerLb/, "Fat"],
   [/^nutrition\.initialTdee/, "Maintenance estimate"],
@@ -73,17 +73,8 @@ export interface PlanUndo<T = undefined> extends Omit<SettingsUndo<T>, "undo" | 
   undo: (now: Plan, from: T) => Partial<PlanFields> | null;
 }
 
-/** An Undo for a program change (see `SettingsUndo`), in the program's own terms. */
-export interface ProgramUndo<T = undefined> extends Omit<SettingsUndo<T>, "undo" | "holdsCycleCelebrations"> {
-  /**
-   * The program's fields to put back, from the program as it is when Undo is tapped; null when
-   * the change can't be undone any more.
-   */
-  undo: (now: Program, from: T) => Partial<Program> | null;
-}
-
 export function useSettingsEditor() {
-  const { data } = useData();
+  const { data, today } = useData();
   const saveSettings = useSaveSettings();
   const settings = data.settings;
   /** The last rejected save, as a sentence for the screen's alert (null once a save goes through). */
@@ -116,25 +107,6 @@ export function useSettingsEditor() {
   };
   const raiseUndo = useSettingsUndo(save, () => rendered.current);
   /**
-   * A program change with an Undo toast; false when the change wasn't saved (no toast then). The
-   * Undo runs later, perhaps from another screen: it gets the program as it is at that moment and
-   * returns only what to put back (see components/settings/undo.ts).
-   */
-  const undoableProgram = <T = undefined>(p: Partial<Program>, u: ProgramUndo<T>): boolean => {
-    if (!setProgram(p)) return false;
-    raiseUndo<T>({
-      ...u,
-      // Every program change with an Undo may move the cycles (start date, number of weeks).
-      holdsCycleCelebrations: true,
-      undo: (now, from) => {
-        const back = u.undo(now.program, from);
-        return back && { ...now, program: { ...now.program, ...back } };
-      },
-    });
-    return true;
-  };
-
-  /**
    * A change of the document with an Undo toast: `change` gets the settings as they are now and
    * returns the document to save (null: nothing to do). False when nothing was saved (no toast then).
    */
@@ -145,10 +117,20 @@ export function useSettingsEditor() {
     return true;
   };
 
-  /** One plan's fields (SPEC §6.4), on the plan as it is when the edit runs; false when it wasn't saved. */
+  /**
+   * One plan's fields (SPEC §6.4), on the plan as it is when the edit runs (a next plan set up for
+   * the end of this cycle stays there when this cycle's weeks change: `editPlan`); false when it
+   * wasn't saved.
+   */
   const setPlan = (id: string, patch: Partial<PlanFields>): boolean => {
     const now = live();
-    return !!planById(now, id) && save(updatePlan(now, id, patch));
+    if (!planById(now, id)) return false;
+    const edit = editPlan(now, id, patch, today);
+    if (edit.refused) {
+      setError(edit.refused);
+      return false;
+    }
+    return save(edit.settings);
   };
   /** A change of one plan with an Undo toast (`PlanUndo`); false when the change wasn't saved. */
   const undoablePlan = <T = undefined>(id: string, patch: Partial<PlanFields>, u: PlanUndo<T>): boolean => {
@@ -160,7 +142,9 @@ export function useSettingsEditor() {
       undo: (now, from) => {
         const plan = planById(now, id);
         const back = plan && u.undo(plan, from);
-        return back ? updatePlan(now, id, back) : null;
+        if (!back) return null;
+        const edit = editPlan(now, id, back, today);
+        return edit.refused ? null : edit.settings;
       },
     });
     return true;
@@ -173,7 +157,6 @@ export function useSettingsEditor() {
     save,
     setProgram,
     setTraining,
-    undoableProgram,
     undoableSettings,
     setPlan,
     undoablePlan,

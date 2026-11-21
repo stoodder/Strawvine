@@ -11,6 +11,7 @@
  * server, so the other device's changes are kept.
  */
 import { planList, withPlans } from "../../shared/plans";
+import { byStart, planTimeline } from "../../shared/program";
 import type { Block, BlockExercise, Plan, Session, SetEntry, Settings } from "../../shared/schemas";
 import { derivedBlockId, MAX_BLOCKS, MAX_SETS, MAX_SUPERSET, normalizeMainLift } from "../../shared/sessionStructure";
 
@@ -273,6 +274,44 @@ function fromPlansShape(m: Record<string, unknown>): Settings {
   return withPlans({ ...m, targets: latest.targets, schedule: latest.schedule, program: rules } as unknown as Settings, plans);
 }
 
+/**
+ * The merged plans as a timeline (SPEC §6.4): one plan per start, in order of their starts — so no
+ * plan is ever stored where a later one hides it. Of two plans with the same start (both devices
+ * set up a new cycle from the same Monday, or a document an older build left with a hidden plan)
+ * the one kept is the latest plan of either document, else one in force in its own document, else
+ * the later one; never a hidden plan in place of the latest or its edits. `superseded`: a plan was
+ * dropped, one would have been hidden (out of order), or both devices set up new plans — each
+ * device's plan no longer runs as that device set it up, so the merge says so ("program cycles").
+ */
+function timelineOfPlans(
+  merged: Plan[],
+  local: Settings,
+  server: Settings,
+  ancestor: Settings | null | undefined,
+): { list: Plan[]; superseded: boolean } {
+  const latest = new Set([planList(local).at(-1)!.id, planList(server).at(-1)!.id]);
+  const hidden = new Set(
+    [local, server].flatMap((s) =>
+      planTimeline(s.program)
+        .filter((p) => p.empty)
+        .map((p) => p.id),
+    ),
+  );
+  const rank = (p: Plan) => (latest.has(p.id) ? 0 : hidden.has(p.id) ? 2 : 1);
+  const kept = merged.filter((p, i) => {
+    const twin = merged.findIndex((q, j) => j !== i && q.start === p.start && (rank(q) < rank(p) || (rank(q) === rank(p) && j > i)));
+    return twin < 0;
+  });
+  const list = byStart(kept);
+  const reordered = list.some((p, i) => p !== kept[i]);
+  const added = (s: Settings) => {
+    const before = new Set(ancestor ? planList(ancestor).map((p) => p.id) : []);
+    return planList(s).some((p) => !before.has(p.id));
+  };
+  const bothAdded = !!ancestor && added(local) && added(server) && planList(local).at(-1)!.id !== planList(server).at(-1)!.id;
+  return { list, superseded: kept.length !== merged.length || reordered || bothAdded };
+}
+
 export interface SettingsMerge {
   value: Settings;
   /**
@@ -289,17 +328,14 @@ export interface SettingsMerge {
  */
 export function mergeSettingsDetailed(ancestor: Settings | null | undefined, local: Settings, server: Settings): SettingsMerge {
   const ctx: FieldCtx = { rules: SETTINGS_RULES, conflicts: [] };
-  const merged = mergeAt(ancestor ? plansShape(ancestor) : ancestor, plansShape(local), plansShape(server), "", ctx) as Record<string, unknown>;
-  // Both devices set up a new cycle from the same Monday: one plan per start — this device's (else the first).
+  const merged = mergeAt(ancestor ? plansShape(ancestor) : ancestor, plansShape(local), plansShape(server), "", ctx) as Record<
+    string,
+    unknown
+  >;
   const program = merged.program as { plans: Plan[] };
-  const mine = new Set(planList(local).map((p) => p.id));
-  const rank = (p: Plan) => (mine.has(p.id) ? 0 : 1);
-  const plans = program.plans.filter((p, i, all) => {
-    const twin = all.findIndex((q, j) => j !== i && q.start === p.start && (rank(q) < rank(p) || (rank(q) === rank(p) && j < i)));
-    return twin < 0;
-  });
-  if (plans.length !== program.plans.length) ctx.conflicts.push("program.plans");
-  const value = fromPlansShape({ ...merged, program: { ...program, plans } });
+  const plans = timelineOfPlans(program.plans, local, server, ancestor);
+  if (plans.superseded) ctx.conflicts.push("program.plans");
+  const value = fromPlansShape({ ...merged, program: { ...program, plans: plans.list } });
   const conflicts = [...new Set(ctx.conflicts.map((p) => SETTINGS_LABELS.find(([re]) => re.test(p))?.[1] ?? p.replace(/\.#/g, "")))];
   return { value, conflicts };
 }

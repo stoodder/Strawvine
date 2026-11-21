@@ -62,19 +62,33 @@ function SettingsBody() {
       <Section label="Training" id="plan">
         {/* The daily targets, training days, lifting days, cycle and rules are the plan, not a
             preference: they live on Program (a new cycle can change them without touching the days
-            before it), whose back control returns here (state.from: this section). */}
-        <Link to="/program" state={{ from: "/settings#plan" }} className="tap flex min-h-11 items-center gap-3 py-2" data-program-link="">
-          <span className="min-w-0 flex-1">
-            <span className="block text-sm text-fg-2">Training program</span>
-            <span className="mt-0.5 block text-xs text-mute">
-              Steps and Zone 2 targets, metcon and Zone 2 days, lifting days, cycles, rules, rest timers and the exercise library
-            </span>
-          </span>
-          <span className="label shrink-0" aria-hidden>
-            Program
-          </span>
-          <ChevronRight size={14} className="shrink-0 text-mute" aria-hidden />
-        </Link>
+            before it), whose back control returns here (state.from: this section). Two rows: the
+            targets people come here for go straight to theirs. */}
+        <div className="divide-y divide-white/[0.04]">
+          {(
+            [
+              ["/program#targets", "Steps, Zone 2 & metcon", "Daily targets and training days", "targets"],
+              ["/program", "Training program", "Lifting days, cycles, rules, rest timers and the exercise library", "program"],
+            ] as const
+          ).map(([to, title, hint, key]) => (
+            <Link
+              key={key}
+              to={to}
+              state={{ from: "/settings#plan" }}
+              className="tap flex min-h-11 items-center gap-3 py-2"
+              data-program-link={key}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm text-fg-2">{title}</span>
+                <span className="mt-0.5 block text-xs text-mute">{hint}</span>
+              </span>
+              <span className="label shrink-0" aria-hidden>
+                Program
+              </span>
+              <ChevronRight size={14} className="shrink-0 text-mute" aria-hidden />
+            </Link>
+          ))}
+        </div>
       </Section>
 
       <Section label="Nutrition" id="nutrition">

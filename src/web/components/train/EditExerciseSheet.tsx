@@ -63,9 +63,10 @@ export function EditExerciseSheet({
   }, [confirming]);
   if (!exercise || !draft) return null;
 
-  const locks = exerciseLocks(exercise, data.settings);
-  // With a next cycle set up, the plan before it is this cycle's (SPEC §6.4).
-  const lockedAs = mainLiftOf(locks, nextPlan(data.settings, today) ? { latest: "next cycle", earlier: "this cycle" } : {}).replace(/'/g, "’");
+  const locks = exerciseLocks(exercise, data.settings, today);
+  const lockedAs = mainLiftOf(locks).replace(/'/g, "’");
+  // Only the next cycle's days use it: the link opens Program on the next cycle (SPEC §6.4).
+  const layoutPlan = nextPlan(data.settings, today) && !locks.earlierPlanDays.length ? "next" : undefined;
   const set = (patch: Partial<ExerciseDraft>) => setDraft({ ...draft, ...patch });
   const blank = !draft.name.trim();
   const patch = exerciseEditPatch(exercise, draft, locks);
@@ -141,12 +142,12 @@ export function EditExerciseSheet({
 
         {locks.structure && (
           <p id={lockNoteId} className="mt-4 text-xs text-fg-2">
-            {lockedAs}: the program calculates it from its max, so its category, measure and max
-            stay as they are and it can&rsquo;t be archived. Change the{" "}
+            {lockedAs}: the program calculates it from its max, so its category, measure and max stay as they are and it can&rsquo;t be
+            archived. Change the{" "}
             {/* Program's back control returns to where the sheet was opened (a Train day). Following the link closes the sheet. */}
             <Link
               to="/program#layout"
-              state={{ from: location.pathname }}
+              state={{ from: location.pathname, ...(layoutPlan ? { plan: layoutPlan } : {}) }}
               className="text-accent underline underline-offset-2"
               onClick={() => onClose()}
             >

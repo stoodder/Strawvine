@@ -71,48 +71,64 @@ export const FIRST_PLAN_ID = "first";
  * Cycles repeat within a plan; cycle numbers continue from the plans before it.
  */
 export interface PlanSpan {
-  /** Position on the timeline: 0 is the first plan, the last one is the latest (the document's top level). */
+  /** Position on the timeline (plans in order of their starts): 0 is the first plan, the last one is the latest. */
   index: number;
   id: string;
   /** Monday the plan's first cycle begins. */
   start: ISODate;
-  /** The first day of the next plan (null: the latest plan, which runs on). */
+  /**
+   * The first day the plan is no longer in force (null: the latest plan, which runs on): the next
+   * plan's start — or, when the next plan was moved later than it was set up to start, the day this
+   * plan was set up to end (its stored `end`): the days in between are a pause.
+   */
   end: ISODate | null;
+  /** The next plan's start (null: the latest plan). From `end` until then nothing is in force. */
+  nextStart: ISODate | null;
   name: string;
   weeks: ProgramWeek[];
   days: Record<string, ProgramDay>;
   /** Cycles the plans before this one ran (its first cycle is number `cyclesBefore + 1`). */
   cyclesBefore: number;
-  /** Never in force: a later plan starts on or before its start. */
+  /** Never in force: the next plan starts on the same day (only a merge or an older build could do that). */
   empty: boolean;
+}
+
+/** Plans in order of their starts; plans that start on the same day keep their stored order (stable). */
+export function byStart<T extends { start: ISODate }>(plans: ReadonlyArray<T>): T[] {
+  return [...plans].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 }
 
 const timelineMemo = new WeakMap<Program, { key: readonly unknown[]; spans: PlanSpan[] }>();
 
 /**
- * The program's plans in time order (`program.earlierPlans`, then the top level as the latest),
- * each with where it ends — where the next one starts — and the cycles before it. Read every date
- * through this (`planAt`, `cyclePosition`, `scheduledProgramDay`, `planTargets`): a date always
- * reads under the plan that was in force on it. A plan that a later one starts on or before (only
- * an older build moving the start could do that) is `empty`: never in force, its cycles count 0.
+ * The program's plans in time order (`program.earlierPlans` and the top level, the latest, sorted
+ * by start — a document stored out of order reads as if it were in order), each with where it ends
+ * and the cycles before it. Read every date through this (`planAt`, `cyclePosition`,
+ * `scheduledProgramDay`, `planTargets`): a date always reads under the plan that was in force on it.
+ *
+ * A plan ends where the next one starts, but never later than its stored `end` (the Monday it was
+ * set up to end on): moving the next plan's start later leaves a pause in between, with no cycle
+ * position — like the days before the first plan's week 1 — instead of lengthening this plan into
+ * a cycle nobody trained. Plans that start on the same day: the later stored one is in force, the
+ * other is `empty` (never in force, its cycles count 0).
  */
 export function planTimeline(program: Program): PlanSpan[] {
   const key = [program.cycleStartDate, program.weeks, program.days, program.name, program.planId, program.earlierPlans];
   const memo = timelineMemo.get(program);
   if (memo && memo.key.every((k, i) => k === key[i])) return memo.spans;
   const earlier = program.earlierPlans ?? [];
-  const raw = [
-    ...earlier.map((p) => ({ id: p.id, start: p.start, name: p.name, weeks: p.weeks, days: p.days })),
-    { id: program.planId ?? FIRST_PLAN_ID, start: program.cycleStartDate, name: program.name, weeks: program.weeks, days: program.days },
-  ];
+  const raw = byStart([
+    ...earlier.map((p) => ({ id: p.id, start: p.start, setEnd: p.end ?? null, name: p.name, weeks: p.weeks, days: p.days })),
+    { id: program.planId ?? FIRST_PLAN_ID, start: program.cycleStartDate, setEnd: null, name: program.name, weeks: program.weeks, days: program.days },
+  ]);
   const spans: PlanSpan[] = [];
   let cycles = 0;
   for (let i = 0; i < raw.length; i++) {
-    const p = raw[i]!;
-    let end: ISODate | null = null;
-    for (let j = i + 1; j < raw.length; j++) if (end === null || raw[j]!.start < end) end = raw[j]!.start;
-    const empty = end !== null && end <= p.start;
-    spans.push({ index: i, ...p, end, cyclesBefore: cycles, empty });
+    const { setEnd, ...p } = raw[i]!;
+    const nextStart = raw[i + 1]?.start ?? null;
+    const empty = nextStart !== null && nextStart <= p.start;
+    const end = nextStart !== null && setEnd !== null && setEnd > p.start && setEnd < nextStart ? setEnd : nextStart;
+    spans.push({ index: i, ...p, end, nextStart, cyclesBefore: cycles, empty });
     if (!empty && end !== null && p.weeks.length > 0) cycles += Math.ceil(daysBetween(p.start, end) / (p.weeks.length * 7));
   }
   timelineMemo.set(program, { key, spans });
@@ -143,11 +159,19 @@ function firstPlan(program: Program): PlanSpan {
 }
 
 /**
- * The plan a date reads: the one in force on it, or — before the program starts — the first one
- * (its days, targets and schedule are what a day before the first cycle is measured by, as with one plan).
+ * The plan a date reads: the one in force on it, or — on a day no plan is in force — the next one to
+ * start: before the program starts, the first one (its days, targets and schedule are what a day
+ * before the first cycle is measured by, as with one plan); in a pause before a later plan (its
+ * start moved later than the plan before was set up to end), that plan.
  */
 export function planAt(program: Program, date: ISODate): PlanSpan {
-  return planInForce(program, date) ?? firstPlan(program);
+  return planInForce(program, date) ?? upcomingPlan(program, date) ?? latestPlan(program);
+}
+
+/** The first plan that starts after `date` (and is ever in force). */
+function upcomingPlan(program: Program, date: ISODate): PlanSpan | null {
+  for (const s of planTimeline(program)) if (!s.empty && s.start > date) return s;
+  return null;
 }
 
 /** Whether the program has more than one plan. */
@@ -178,10 +202,11 @@ export function planTargets(settings: Pick<Settings, "program" | "targets" | "sc
 export function planTargetsOf(settings: Pick<Settings, "program" | "targets" | "schedule">, index: number): PlanTargets {
   let list = targetsMemo.get(settings);
   if (!list) {
-    list = [
-      ...(settings.program.earlierPlans ?? []).map((p) => ({ ...p.targets, ...p.schedule })),
-      { ...settings.targets, ...settings.schedule },
-    ];
+    // In the timeline's order (`planTimeline`: by start, stable).
+    list = byStart([
+      ...(settings.program.earlierPlans ?? []).map((p) => ({ start: p.start, ...p.targets, ...p.schedule })),
+      { start: settings.program.cycleStartDate, ...settings.targets, ...settings.schedule },
+    ]).map(({ start: _s, ...t }) => t);
     targetsMemo.set(settings, list);
   }
   return list[index] ?? list[list.length - 1]!;
@@ -280,18 +305,37 @@ export function snapCycleStart(date: ISODate): ISODate {
 }
 
 /**
- * The plan a move of the start moves, seen from `today`: the plan in force (before the program:
- * the first). It moves together with every plan after it; the plans before it stay.
+ * The plan a move of the start moves, seen from `today`: the plan `today` reads (`planAt`: the one
+ * in force; before the program the first; in a pause the one that starts after it); without
+ * `today`, the first. It moves together with every plan after it; the plans before it stay.
  */
 export function movingPlan(program: Program, today?: ISODate): PlanSpan {
-  return (today !== undefined && planInForce(program, today)) || firstPlan(program);
+  return today !== undefined ? planAt(program, today) : firstPlan(program);
 }
 
-/** A program whose plan `from` (by timeline index) and every later plan start `days` days later. */
+/**
+ * A program whose plan `from` (by timeline index) and every later plan start `days` days later
+ * (their stored ends with them). The plan before keeps where it ends: its `end` is written down
+ * when it wasn't yet, so a later start leaves a pause after it rather than more of it, and a move
+ * back closes the pause again.
+ */
 function movePlansFrom(program: Program, from: number, days: number): Program {
   const move = (d: ISODate) => snapCycleStart(addDays(snapCycleStart(d), days));
-  const earlier = program.earlierPlans?.map((p, i) => (i >= from ? { ...p, start: move(p.start) } : p));
-  return { ...program, cycleStartDate: move(program.cycleStartDate), ...(earlier ? { earlierPlans: earlier } : {}) };
+  const spans = planTimeline(program);
+  const moving = new Set(spans.filter((s) => s.index >= from).map((s) => s.id));
+  let before: PlanSpan | null = null;
+  for (const s of spans) if (s.index < from && !s.empty) before = s;
+  const earlier = program.earlierPlans?.map((p) => {
+    if (moving.has(p.id)) return { ...p, start: move(p.start), ...(p.end ? { end: move(p.end) } : {}) };
+    if (before && p.id === before.id && !p.end && before.end) return { ...p, end: before.end };
+    return p;
+  });
+  const topMoves = moving.has(program.planId ?? FIRST_PLAN_ID);
+  return {
+    ...program,
+    ...(topMoves ? { cycleStartDate: move(program.cycleStartDate) } : {}),
+    ...(earlier ? { earlierPlans: earlier } : {}),
+  };
 }
 
 /**
@@ -383,9 +427,8 @@ function firstLiftingDay(program: Program, from: ISODate, days: number): { date:
 export function previewCycleShift(program: Program, weeks: number, date: ISODate): CycleShiftPreview {
   const plan = movingPlan(program, date);
   const { program: shifted, refused } = moveStartTo(program, plan, Math.trunc(weeks) * 7);
-  // Before the (shifted) start nothing is scheduled: look from the start on.
-  const firstStart = firstPlan(shifted).start;
-  const from = daysBetween(firstStart, date) < 0 ? firstStart : date;
+  // On a day nothing is in force (before the program, a pause) look from the next plan's start on.
+  const from = planInForce(shifted, date) ? date : planAt(shifted, date).start;
   const first = firstLiftingDay(shifted, from, 7);
   const position = first && cyclePosition(shifted, first.date);
   const start = addDays(startOfWeek(date), 7);
@@ -393,7 +436,7 @@ export function previewCycleShift(program: Program, weeks: number, date: ISODate
     program: shifted,
     refused,
     from: plan.start,
-    to: planTimeline(shifted)[plan.index]!.start,
+    to: planTimeline(shifted).find((s) => s.id === plan.id)?.start ?? plan.start,
     before: cyclePosition(program, date),
     position: cyclePosition(shifted, date),
     next: first && position ? { ...first, position } : null,

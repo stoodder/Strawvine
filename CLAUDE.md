@@ -26,7 +26,9 @@
 - Plans over time (SPEC §6.4): read a date's plan through `src/shared/program.ts` — `cyclePosition`, `planAt` /
   `planInForce`, `scheduledProgramDay`, `programDayFor`, and `planTargets` for the steps / Zone 2 targets and the
   metcon / Zone 2 days — never `program.days`, `program.weeks`, `cycleStartDate`, `settings.targets` or
-  `settings.schedule` directly. Edit plans through `src/shared/plans.ts` (`updatePlan`, `startNewCycle`, …).
+  `settings.schedule` directly. Edit plans through `src/shared/plans.ts` (`editPlan`, `startNewCycle`, …) and move
+  starts through `program.ts` (`movePlanStart`, …), never by writing `start` / `end` / `cycleStartDate` by hand: an
+  earlier plan's `end` is what keeps a delayed plan's gap a pause instead of a phantom cycle.
 - Train: which finished exercises show folded is view state (`components/train/folds.ts`), never saved; nothing folds or
   moves while the page is in use, and no tap is ever intercepted.
 - The field being typed in stays put (e2e/40): a keystroke never changes the page's height except by the field's own

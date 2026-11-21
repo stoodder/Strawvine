@@ -100,38 +100,62 @@ const showCelebrations = () =>
   );
 
 describe("Cycle N complete with the choice", () => {
-  it("Repeat cycle 1 files the celebration and the choice together", () => {
+  it("Keep this plan files the celebration and the choice together, and says so (with a way to change it)", () => {
     showCelebrations();
     act(() => store.set({ achievements: [cycle1] }));
     wait();
     expect(screen.queryByRole("button", { name: /^Continue/ })).toBeNull();
-    act(() => screen.getByRole("button", { name: "Repeat cycle 1" }).click());
+    expect(document.querySelector("[data-cycle-choice]")!.textContent).toContain("For cycle 2:");
+    // The default: focused first.
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep this plan" }));
+    act(() => screen.getByRole("button", { name: "Keep this plan" }).click());
     expect(store.marked).toEqual([["cycle-1", "repeat-cycle-1"]]);
     expect(store.saved).toEqual([]);
+    const toast = store.toasts.at(-1)!;
+    expect([toast.message, toast.action?.label]).toEqual(["Cycle 2 keeps this plan", "Change"]);
+    act(() => toast.action!.onAction());
+    expect(screen.getByTestId("where").textContent).toBe("/program#now");
   });
 
-  it("Set up a new cycle starts the copy on this cycle's Monday and goes to Program; Undo removes it", () => {
+  it("Set up a new plan starts the copy on this cycle's Monday and goes to Program; Undo removes it", () => {
     showCelebrations();
     act(() => store.set({ achievements: [cycle1] }));
     wait();
-    act(() => screen.getByRole("button", { name: "Set up a new cycle" }).click());
+    act(() => screen.getByRole("button", { name: "Set up a new plan" }).click());
     expect(store.marked).toEqual([["cycle-1"]]);
     const s = store.saved.at(-1)!;
     expect(s.program.cycleStartDate).toBe("2026-11-09");
     expect(s.program.earlierPlans!.map((p) => [p.id, p.start])).toEqual([["first", "2026-10-05"]]);
     expect(screen.getByTestId("where").textContent).toBe("/program#layout");
-    expect(store.toasts.at(-1)!.message).toBe("New cycle set up from Mon Nov 9");
+    expect(store.toasts.at(-1)!.message).toBe("New plan set up from Mon Nov 9");
     act(() => store.toasts.at(-1)!.action!.onAction());
     expect(store.saved.at(-1)!.program).not.toHaveProperty("earlierPlans");
     expect(store.saved.at(-1)!.program.cycleStartDate).toBe("2026-10-05");
   });
 
-  it("isn't offered once something is saved in the new cycle (or Repeat was chosen): just Continue", () => {
+  it("Undo of Set up a new plan declines once the new plan was changed: the edits stay", async () => {
+    const { updatePlan } = await import("../../shared/plans");
+    showCelebrations();
+    act(() => store.set({ achievements: [cycle1] }));
+    wait();
+    act(() => screen.getByRole("button", { name: "Set up a new plan" }).click());
+    const undo = store.toasts.at(-1)!;
+    // Its steps target changed (here, or on another device) before Undo is tapped.
+    const id = store.saved.at(-1)!.program.planId!;
+    store.settings = updatePlan(store.settings, id, { targets: { steps: 9000, zone2Minutes: 30 } });
+    const saves = store.saved.length;
+    act(() => undo.action!.onAction());
+    expect(store.saved.length).toBe(saves);
+    expect(store.toasts.at(-1)!.message).toBe("Can't undo: the new plan was changed since.");
+    expect(store.settings.targets.steps).toBe(9000);
+  });
+
+  it("isn't offered once something is saved in the new cycle (or Keep was chosen): just Continue", () => {
     store.sessions = [{ date: "2026-11-09", plannedFor: null } as unknown as Session];
     showCelebrations();
     act(() => store.set({ achievements: [cycle1] }));
     wait();
-    expect(screen.queryByRole("button", { name: "Repeat cycle 1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Keep this plan" })).toBeNull();
     expect(screen.getByRole("button", { name: /^Continue/ })).toBeTruthy();
   });
 });
@@ -139,21 +163,34 @@ describe("Cycle N complete with the choice", () => {
 describe("the end-of-cycle note", () => {
   function Note() {
     const choice = useCycleChoice();
-    return <CycleEndNote choice={choice} />;
+    return (
+      <>
+        <h1 data-train-title="" tabIndex={-1}>
+          Push
+        </h1>
+        <CycleEndNote choice={choice} />
+      </>
+    );
   }
-
-  it("in a cycle's last week: Repeat files the choice and the note goes; seen on another device, it never shows", () => {
-    store.settings = { ...store.settings, program: { ...store.settings.program, cycleStartDate: "2026-10-12" } };
+  const lastWeek = () => {
     // Cycle 1 runs Oct 12 – Nov 15: today (Nov 10) is its last week.
+    store.settings = { ...store.settings, program: { ...store.settings.program, cycleStartDate: "2026-10-12" } };
+  };
+
+  it("in a cycle's last week: Keep this plan files the choice, the note goes, focus goes to the title; seen on another device, it never shows", () => {
+    lastWeek();
     const view = render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/train"]}>
         <Note />
       </MemoryRouter>,
     );
-    expect(document.querySelector("[data-cycle-end]")!.textContent).toContain("Cycle 1 ends Sun Nov 15.");
-    act(() => screen.getByRole("button", { name: "Repeat cycle 1" }).click());
+    expect(document.querySelector("[data-cycle-end]")!.textContent).toBe("Cycle 1 ends Sun Nov 15.For cycle 2: Keep this plan · Set up a new plan");
+    act(() => screen.getByRole("button", { name: "Keep this plan" }).click());
     expect(store.marked).toEqual([["repeat-cycle-1"]]);
     expect(document.querySelector("[data-cycle-end]")).toBeNull();
+    expect(store.toasts.at(-1)!.message).toBe("Cycle 2 keeps this plan");
+    wait(100);
+    expect(document.activeElement).toBe(document.querySelector("[data-train-title]"));
     view.unmount();
     // Another device: the mark arrived with the data.
     render(
@@ -162,5 +199,46 @@ describe("the end-of-cycle note", () => {
       </MemoryRouter>,
     );
     expect(document.querySelector("[data-cycle-end]")).toBeNull();
+  });
+
+  it("Set up a new plan from the note starts the next cycle, even with nothing saved in this one", () => {
+    lastWeek();
+    render(
+      <MemoryRouter initialEntries={["/train"]}>
+        <Note />
+        <Routes>
+          <Route path="*" element={<Where />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    act(() => screen.getByRole("button", { name: "Set up a new plan" }).click());
+    expect(store.saved.at(-1)!.program.cycleStartDate).toBe("2026-11-16");
+    expect(store.toasts.at(-1)!.message).toBe("New plan set up from Mon Nov 16");
+    expect(screen.getByTestId("where").textContent).toBe("/program#layout");
+    // Now the note says what comes next.
+    expect(document.querySelector("[data-cycle-end]")!.textContent).toBe("Cycle 1 ends Sun Nov 15.Next: a new plan from Mon Nov 16 · Review");
+  });
+
+  it("when no new plan can be set up, the tap says why instead of doing nothing", async () => {
+    lastWeek();
+    const { useCycleActions } = await import("./program/useCycleChoice");
+    function SetUp() {
+      const actions = useCycleActions();
+      return (
+        <button type="button" onClick={() => actions.setUpNewCycle()}>
+          Set up
+        </button>
+      );
+    }
+    // Before the program starts: the plan itself is edited.
+    store.settings = { ...store.settings, program: { ...store.settings.program, cycleStartDate: "2026-11-30" } };
+    render(
+      <MemoryRouter>
+        <SetUp />
+      </MemoryRouter>,
+    );
+    act(() => screen.getByRole("button", { name: "Set up" }).click());
+    expect(store.saved).toEqual([]);
+    expect(store.toasts.at(-1)).toMatchObject({ message: "The program hasn't started yet: change the plan itself on Program.", tone: "warn" });
   });
 });

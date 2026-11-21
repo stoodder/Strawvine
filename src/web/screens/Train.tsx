@@ -1425,7 +1425,7 @@ export function TrainScreen() {
                 {mainNotice.kind === "not-started" ? (
                   // Before the first cycle nothing is calculated, whatever maxes exist: say when it starts.
                   <>
-                    {programStartSentence(mainNotice.start, today)}{" "}
+                    {programStartSentence(mainNotice.start, today, mainNotice.cycle)}{" "}
                     <Link to="/program" state={toProgram} className="-mx-1 -my-3 inline-block px-1 py-3 whitespace-nowrap text-accent">
                       Open the program →
                     </Link>

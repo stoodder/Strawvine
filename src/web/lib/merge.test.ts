@@ -16,7 +16,8 @@ import {
 } from "./outbox-core";
 import { fitSession, mergeFields, mergeSession, mergeSettings, mergeSettingsDetailed } from "./merge";
 import { MAX_BLOCKS, moveBlock, moveExerciseToBlock, splitOut } from "../../shared/sessionStructure";
-import { cancelPlan, planList, startNewCycle, updatePlan } from "../../shared/plans";
+import { cancelPlan, newCycleRefusal, nextPlan, planList, startNewCycle, updatePlan } from "../../shared/plans";
+import { planTimeline } from "../../shared/program";
 
 const settings = defaultSettings({ bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 }, "2026-11-01");
 
@@ -1082,7 +1083,7 @@ describe("mergeSettings: plans over time", () => {
 
   it("cancelled there while edited here: the edit keeps the plan (as an edited strength target would be)", () => {
     const edited = updatePlan(withNew, "p2", { name: "Heavier" });
-    const m = mergeSettingsDetailed(withNew, edited, cancelPlan(withNew, "p2", today)!);
+    const m = mergeSettingsDetailed(withNew, edited, cancelPlan(withNew, "p2", sessions, today)!);
     expect(planList(m.value).map((p) => [p.id, p.name])).toEqual([
       ["first", S0.program.name],
       ["p2", "Heavier"],
@@ -1090,7 +1091,7 @@ describe("mergeSettings: plans over time", () => {
   });
 
   it("cancelled here, untouched there: gone, and the document is as before plans", () => {
-    const m = mergeSettingsDetailed(withNew, cancelPlan(withNew, "p2", today)!, withNew);
+    const m = mergeSettingsDetailed(withNew, cancelPlan(withNew, "p2", sessions, today)!, withNew);
     expect(m.value).toEqual(S0);
   });
 
@@ -1110,6 +1111,61 @@ describe("mergeSettings: plans over time", () => {
     // And a save from a copy that has them (it spreads what it was sent) carries them as they are.
     const spread = { ...withNew, program: { ...withNew.program, intensity: 0.85 } };
     expect(planList(mergeSettings(withNew, spread, withNew))).toEqual(planList(withNew));
+  });
+
+  describe("two devices setting up plans from different Mondays (no plan is ever hidden)", () => {
+    // The program from Mon Oct 5: cycle 1 Oct 5 – Nov 8, cycle 2 Nov 9 – Dec 13.
+    const A: Settings = { ...S0, program: { ...S0.program, cycleStartDate: "2026-10-05" } };
+    // On Thu Nov 12, one device with nothing saved in cycle 2 sets up a plan from its Monday;
+    // the other, with Tuesday saved, from the next cycle's Monday.
+    const early = startNewCycle(A, [], "2026-11-12", "pS")!.settings;
+    const late = startNewCycle(A, [sess([], { date: "2026-11-10" })], "2026-11-12", "pL")!.settings;
+    const timeline = (s: Settings) => planTimeline(s.program).map((p) => `${p.id}:${p.start}${p.empty ? ":hidden" : ""}`);
+
+    it("either device merging: both plans in force in turn, in order of their starts, and it says so", () => {
+      expect(early.program.cycleStartDate).toBe("2026-11-09");
+      expect(late.program.cycleStartDate).toBe("2026-12-14");
+      for (const [local, server] of [
+        [early, late],
+        [late, early],
+      ] as const) {
+        const m = mergeSettingsDetailed(A, local, server);
+        expect(timeline(m.value)).toEqual(["first:2026-10-05", "pS:2026-11-09", "pL:2026-12-14"]);
+        expect(m.value.program.planId).toBe("pL");
+        expect(m.value.program.earlierPlans!.map((p) => p.id)).toEqual(["first", "pS"]);
+        expect(m.conflicts).toEqual(["program cycles"]);
+        expect(settingsSchema.safeParse(m.value).success).toBe(true);
+        // Nothing stands in the way of what comes next: the next plan is the other device's.
+        expect(nextPlan(m.value, "2026-12-08")?.id).toBe("pL");
+        expect(newCycleRefusal(m.value, [], "2026-12-08")).toBe("A new plan is already set up from Mon Dec 14. Review it on Program.");
+      }
+    });
+
+    it("same start, a hidden plan and the latest: the latest plan and its edits are kept, never the hidden one", () => {
+      // A document an older build could leave: Z (Dec 14) stored before L (Nov 9), then the latest N (Dec 14).
+      const plans = planList(A);
+      const Z = { ...plans[0]!, id: "Z", start: "2026-12-14", name: "Zombie" };
+      const L = { ...plans[0]!, id: "L", start: "2026-11-09" };
+      const N = { ...plans[0]!, id: "N", start: "2026-12-14", name: "My new program" };
+      const doc: Settings = {
+        ...A,
+        program: { ...A.program, cycleStartDate: N.start, name: N.name, planId: N.id, earlierPlans: [plans[0]!, Z, L] },
+      };
+      // The resolver already reads N as the plan in force from Dec 14 (Z never is).
+      expect(timeline(doc)).toEqual(["first:2026-10-05", "L:2026-11-09", "Z:2026-12-14:hidden", "N:2026-12-14"]);
+      // Any merge afterwards (here: the protein target changed there, N renamed here): N stays, with its edit.
+      const server = { ...doc, nutrition: { ...doc.nutrition, proteinGPerLb: 1.1 } };
+      const local = updatePlan(doc, "N", { name: "My new program, heavier" });
+      for (const [l, sv] of [
+        [local, server],
+        [server, local],
+      ] as const) {
+        const m = mergeSettingsDetailed(doc, l, sv);
+        expect(timeline(m.value)).toEqual(["first:2026-10-05", "L:2026-11-09", "N:2026-12-14"]);
+        expect([m.value.program.planId, m.value.program.name, m.value.nutrition.proteinGPerLb]).toEqual(["N", "My new program, heavier", 1.1]);
+        expect(m.conflicts).toEqual(["program cycles"]);
+      }
+    });
   });
 
   it("a 409 for a settings save resolves through the same merge", () => {

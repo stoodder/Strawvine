@@ -48,7 +48,8 @@ import {
   type LoginLimiterOptions,
   type SessionConfig,
 } from "./auth";
-import { exercisePatchRefusal } from "../shared/exerciseEdit";
+import { localToday } from "../shared/dates";
+import { exercisePatchRefusal, serverLockDate } from "../shared/exerciseEdit";
 import { MAX_BLOCKS, normalizeMainLift } from "../shared/sessionStructure";
 import { buildExport, toDay, toExercise, toMax } from "./backup";
 import type { Db } from "./db/client";
@@ -73,6 +74,8 @@ export interface AppOptions {
   epochs?: EpochStore;
   loginLimits?: LoginLimiterOptions;
   log?: (message: string, details: Record<string, unknown>) => void;
+  /** The server's date (default: its local date); the exercise locks that depend on the date read it. */
+  today?: () => string;
 }
 
 export const BODY_LIMIT_BYTES = 1024 * 1024;
@@ -687,7 +690,12 @@ export function createApp(opts: AppOptions) {
         const s = stored?.data as Partial<Settings> | undefined;
         const why =
           s?.program && s.strengthTargets
-            ? exercisePatchRefusal(toExercise(cur), parsed.data, { program: s.program, strengthTargets: s.strengthTargets })
+            ? exercisePatchRefusal(
+                toExercise(cur),
+                parsed.data,
+                { program: s.program, strengthTargets: s.strengthTargets },
+                serverLockDate(opts.today?.() ?? localToday()),
+              )
             : null;
         if (why) throw new PatchRefused(why);
         const [out] = await tx

@@ -4,9 +4,11 @@
  * and training days, the cycle's weeks, the rules, the rep-max table and the exercise library. It
  * edits the same settings document as Settings, through the same save path (`useSettingsEditor`).
  *
- * The weekly layout, targets and weeks are the plan's (SPEC §6.4). While a next cycle is set up, a
- * "This cycle / Next cycle" switch at the top of those sections picks the plan they edit (Next by
- * default): the next one changes nothing before it starts.
+ * The weekly layout, targets and weeks are the plan's (SPEC §6.4). While a next cycle is set up, one
+ * "This cycle / Next cycle" switch under Now picks the plan they edit, and their headings say which
+ * one they show. It is on This cycle unless Program was opened to review the next one (router state
+ * `plan: "next"`: from setting up a new plan, or a "Review" link): the next one changes nothing
+ * before it starts.
  */
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router";
@@ -48,7 +50,7 @@ export function programBackTarget(state: unknown): { to: string; label: string }
 
 export function ProgramScreen() {
   const { data, today } = useData();
-  const { settings, training, error, setProgram, setTraining, undoableProgram, setPlan, undoablePlan } = useSettingsEditor();
+  const { settings, training, error, setProgram, setTraining, undoableSettings, setPlan, undoablePlan } = useSettingsEditor();
   const program = settings.program;
   const location = useLocation();
   const choice = useCycleChoice();
@@ -59,18 +61,19 @@ export function ProgramScreen() {
   // This cycle's plan and, once one is set up, the next cycle's.
   const current = currentPlan(settings, today);
   const next = nextPlan(settings, today);
-  const [picked, setPicked] = useState<PlanChoice>("next");
-  // A next cycle set up (here or on another device) is what the plan sections show first.
-  const nextId = next?.id ?? null;
+  // This cycle, unless Program was opened to review the next one (each such link is a new visit).
+  const reviewNext = (location.state as { plan?: unknown } | null)?.plan === "next";
+  const [picked, setPicked] = useState<PlanChoice>(reviewNext ? "next" : "this");
   useEffect(() => {
-    if (nextId) setPicked("next");
-  }, [nextId]);
-  const plan = next && picked === "next" ? next : current;
+    if (reviewNext) setPicked("next");
+  }, [location.key, reviewNext]);
+  const onNext = !!next && picked === "next";
+  const plan = next && onNext ? next : current;
   const edit: Omit<PlanEdit, "id"> = {
     plan,
     setPlan: (p) => setPlan(plan.id, p),
     undoable: (p, u) => undoablePlan(plan.id, p, u),
-    switcher: next ? <PlanSwitch value={next && picked === "next" ? "next" : "this"} onChange={setPicked} nextStart={next.start} /> : null,
+    caption: next ? (onNext ? "Next cycle" : "This cycle") : null,
   };
 
   return (
@@ -99,16 +102,24 @@ export function ProgramScreen() {
         current={current}
         next={next}
         setPlan={setPlan}
-        undoable={undoableProgram}
+        undoableSettings={undoableSettings}
         today={today}
         sessions={data.sessions}
         settingsForStart={settings}
         actions={choice}
       />
+      {next && <PlanSwitch value={onNext ? "next" : "this"} onChange={setPicked} nextStart={next.start} />}
       <WeeklyLayout id="layout" {...edit} />
       <PlanTargetsSection id="targets" {...edit} />
       <CycleWeeks id="weeks" {...edit} />
-      <ProgramRules id="rules" program={program} setProgram={setProgram} training={training} setTraining={setTraining} />
+      <ProgramRules
+        id="rules"
+        program={program}
+        setProgram={setProgram}
+        training={training}
+        setTraining={setTraining}
+        acrossCycles={!!next}
+      />
       <RepMaxTable id="rep-max" program={program} setProgram={setProgram} />
       <LiftsEditor id="library" />
     </div>

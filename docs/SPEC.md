@@ -474,8 +474,22 @@ The rules — working weight %, rounding, the rep-max table, AMRAP last set, aut
 accessory increment, rest timers — are one global set, not part of a plan.
 
 - Cycles repeat within a plan; **cycle numbers continue across plans** (the first cycle of a plan that follows two
-  cycles of another is "Cycle 3"). A plan that ends mid-cycle (the next one started early) ends that cycle there: it
-  counts as a cycle, banking the weeks it ran.
+  cycles of another is "Cycle 3"). A plan that ends mid-cycle (the next one was moved earlier into it) ends that cycle
+  there: it counts as a cycle (for the numbers), but it never completed, so it is not celebrated (§7).
+- **A plan never runs past the Monday it was set up to end on.** Setting up a new plan writes that Monday on the plan
+  before it (its `end`, the new plan's start). When the new plan's start is later moved later still (Delay a week in
+  its first week, the date field), the days between are a **pause**: no plan is in force, there is no cycle position
+  and no lift is planned — exactly like the days before the first plan's week 1 — and the pause reads the next plan's
+  targets and training days (as the days before the program read the first plan's). The plan before never runs into
+  another cycle nobody trained, so no cycle number moves: the next plan's first cycle keeps its number, and so does
+  every later plan's. A session saved in the pause (say on the new plan's Monday, before the delay) is kept as it is
+  and reads like one saved before a program's week 1: it is in no cycle (no "Cycle N complete" for it), its day has
+  no lift item unless it was moved there, and Train's link says when the cycle starts ("Cycle 3 starts Mon Dec 21").
+  A move back (Skip ahead a week) closes the pause again. A document stored before plans had `end` gets it on its
+  first move. With one plan nothing of this applies: a single-plan document reads and moves exactly as before.
+- **Plans are read in order of their starts** (stable: of two with the same start, the one stored later is in force
+  and the other never is). A document whose plans were stored out of order — only an older build or merge could do
+  that — still reads every plan in force from its start, and is put in order the next time it is saved.
 - **A date is always read under the plan that was in force on that date** — its checklist (lift, steps, metcon, Zone 2),
   streak and heatmap, the weekly check-in's planned counts and step target, cycle numbers and completions, Train's
   label and week, the plan-changed check of a saved session. Starting a new plan never changes how an earlier date
@@ -487,16 +501,29 @@ accessory increment, rest timers — are one global set, not part of a plan.
   past.
 - **Stored** in the settings document: the latest plan is the document's top level (`program.name`,
   `cycleStartDate`, `weeks`, `days`, `planId`, and `targets`, `schedule`), the plans before it are
-  `program.earlierPlans` (oldest first, each with its `id`, `start`, name, weeks, days, targets and schedule). Absent =
+  `program.earlierPlans` (oldest first, each with its `id`, `start`, name, weeks, days, targets and schedule, and the
+  optional `end` above). Absent =
   one plan: every document stored before plans existed reads exactly as before, and no migration was needed. A build
   that doesn't know plans reads the latest plan (from its start on, as cycle 1) and saves the plans along untouched.
-- **Setting up a new cycle** (§6.6, §7) adds a copy of the plan in force — everything it holds — as the latest plan,
-  starting on the next cycle's Monday; or on the current cycle's Monday when nothing has been saved in the current cycle
-  yet (the choice made on the new cycle's first days) and that isn't the plan's own first day. Its Undo removes it
-  entirely. A scheduled plan can be **cancelled** (back to repeating, with Undo) until it starts; once in force the
-  plan before it is history (read-only: its labels and cycle numbers are all that show of it).
+- **Setting up a new plan** (§6.6, §7) adds a copy of the plan in force — everything it holds — as the latest plan,
+  starting on the Monday after the current cycle; or on the current cycle's own Monday when today is in that cycle's
+  first seven days, nothing has been saved in it yet (the choice made on the new cycle's first days: "Cycle N
+  complete") and that isn't the plan's own first day. The end-of-cycle note (§7) always starts it the Monday after the
+  cycle. When none can be set up (before the program, in a pause, a next plan already set up) the button says why in a
+  toast. Its Undo removes it — while it is still exactly the copy that was made: once it was edited or moved (here or
+  on another device) the Undo declines and the edits stay.
+- The new plan can be **cancelled** (with Undo) while it is scheduled, and once in force while nothing is saved under
+  it (no session for its start or a later day): the plan before it is back exactly as it was. Once something is saved
+  under it, the plan before is history (read-only: its labels and cycle numbers are all that show of it).
+- **Editing this cycle's weeks while a next plan is set up for the end of this cycle** keeps it there: it moves (with
+  every later plan) to the Monday after this cycle as it now runs, so this cycle is neither cut short nor stretched and
+  no cycle number moves (refused, saying why, if that Monday wouldn't be after today). A next plan that doesn't start
+  at the end of this cycle stays where it is.
 - The settings merge (two devices, §8) pairs plans by id: a plan set up on one device and an edit made on another both
-  survive, each in the plan it was made in; two plans set up from the same Monday keep this device's.
+  survive, each in the plan it was made in. Merged plans are put in order of their starts, so no plan is ever hidden.
+  Of two plans with the same start, the one kept is the latest plan of either device's copy, else one that copy has in
+  force, else the later one — never a hidden plan in place of the latest or its edits. Whenever a plan is dropped,
+  would have been out of order, or both devices set up new plans, the merge reports a **program cycles** conflict.
 
 ### 6.5 Accessories & supersets
 
@@ -622,9 +649,12 @@ accessory increment, rest timers — are one global set, not part of a plan.
   unsaved changes (Escape, the backdrop, a swipe down, Close) asks "Discard changes?" first. A lift a program day
   calculates as its main lift keeps its category, measure and max tracking and can't be archived (the sheet says which
   days use it and links to the weekly layout; change that first); only its name is free. "A program day" is one of the
-  latest plan or of the plan before it (§6.4) — so a lift picked for a scheduled next cycle is locked, and so is this
-  cycle's while the next is scheduled ("Wed's main lift this cycle and Mon's next cycle"); which plans count doesn't
-  depend on the date, so the server enforces exactly what the sheet shows. A lift with a strength target
+  latest plan, and — only while the latest plan hasn't started yet — of the plan before it (§6.4): a lift picked for a
+  scheduled next cycle is locked, and so is this cycle's while the next is scheduled ("Mon's main lift next cycle and
+  Wed's this cycle"; the link opens the layout on the cycle that uses it). Once the latest plan has started the plan
+  before is history and its lifts are free again. The sheet checks on today; the server, which doesn't know the time
+  zone, checks on its own date plus a day, so it never refuses what the sheet allows. Its refusal names the layout to
+  change ("Change this cycle's weekly layout on Program first."), always one that can be edited. A lift with a strength target
   keeps tracking its max. The server enforces both locks for every client (a stale device, an older build): a patch
   that would archive such a lift, turn its max tracking off, move it out of the barbell category or change its measure
   — or turn off max tracking on a lift with a strength target — is refused (409 with the reason, nothing written), and
@@ -701,18 +731,24 @@ Settings, through the same save path:
   of …" when that is more than a week away); a deload week whose name doesn't say so is "Easy (deload)", a week of
   another cycle "Week 1 (cycle 2)"; a one-week program only changes its cycle count. The program name is edited here
   too.
-  - **With more than one plan** (§6.4) the start date is the start of the plan in force today (before the program:
-    the first plan's), and a move — either button or the date field — moves **that plan and every later plan** by the
-    same amount, never an earlier plan's start. A move that would put the plan's start at or before the start of the
-    plan before it is refused, and says why ("This cycle can't start before the plan before it, which began Mon Oct
-    5."): the button is switched off with that as its line; the date field leaves a warning toast and saves nothing.
-    Delaying a plan in its first week puts this week back under the plan before, and the line says so ("This week goes
-    back to the plan before: Week 1 (cycle 3); …"). The previews are worked out on the moved plans, so they stay true.
-  - **The next cycle.** In a cycle's last week Now shows the end-of-cycle note (§7). **Start a new cycle** sets one up
-    at any time (same start rule as the note's, §6.4; its line says from when, and whether it starts over now because
-    nothing is logged in the cycle yet; not offered before the program starts, where the plan itself is edited). Once a
-    new cycle is set up, Now shows **"Next cycle · from Mon Nov 30"** with its name and **Cancel the new cycle** (back
-    to repeating, with Undo).
+  - **With more than one plan** (§6.4) the start date is the start of the plan today reads (in force; before the
+    program the first plan's; in a pause the next plan's), and a move — either button or the date field — moves **that
+    plan and every later plan** by the same amount, never an earlier plan's start. A move that would put the plan's
+    start at or before the start of the plan before it is refused, and says why ("This cycle can't start before the
+    plan before it, which began Mon Oct 5."): the button is switched off with that as its line; the date field leaves
+    a warning toast and saves nothing. Delaying a plan in its first week leaves this week a pause (§6.4), and the line
+    says so ("Starts Mon Dec 21 instead of Dec 14: this week is a pause before cycle 3; next Monday is Week 1 ·
+    Push."); in the pause Now reads "Cycle 3 starts next Monday". A move is worked out on the settings as they are
+    when it is tapped, so another device's change that arrived since stays. The previews are worked out on the moved
+    plans, so they stay true.
+  - **The next cycle.** In a cycle's last week Now shows the end-of-cycle note (§7) — and then no other button for it.
+    Otherwise **Set up a new plan** sets one up at any time (same start rule, §6.4; its line says from when: "…from
+    Mon Dec 14, when cycle 2 ends. Until then nothing changes." or "Applies from today, Mon Nov 30 — nothing's logged
+    in cycle 2 yet."; not offered before the program starts, where the plan itself is edited). Once a new plan is set
+    up, Now shows **"Next: a new plan from Mon Nov 30 · Review"** (Review opens the plan sections on it), its name
+    ("Next cycle's name"; the plan in force's is then "This cycle's name") and **Cancel the new plan** (with Undo; focus
+    then goes to Set up a new plan). A new plan already in force with nothing saved under it shows "This cycle follows
+    a new plan from Mon Nov 30." with the same Cancel.
   - A move of the start — by either button or the date field — leaves **one Undo toast** ("Program delayed a week",
     "Program moved ahead 2 weeks", "Program starts Mon Nov 9"). Moves made while it is on offer fold into it: its
     Undo goes back to the start before the first of them (a move back there leaves nothing to undo). A double-tap is
@@ -726,13 +762,18 @@ Settings, through the same save path:
 - **Cycle weeks** (§6.2; at least 1, at most 16; removing a week leaves an Undo), **Rules** (working weight %,
   rounding, AMRAP last set, auto progression and lb per extra rep, deload accessory load, accessory increment, rest
   timers), **Rep-max table** (§6.2) and the **Exercise library** (§6.5).
-- The Weekly layout, Targets & days and Cycle weeks edit **a plan**. While a next cycle is set up, each starts
-  with the same switch, **This cycle / Next cycle** (Next by default, and again whenever a next cycle is set up), with a
-  line saying from or until when ("From Mon Nov 30. This cycle stays as it is."). Editing the next cycle changes nothing
-  before it starts: no plan-changed flag on this week's sessions, no change to this week's checklist.
+- The Weekly layout, Targets & days and Cycle weeks edit **a plan**. While a next cycle is set up, **one switch**,
+  **This cycle / Next cycle**, sits under Now, above those sections, with a line saying from or until when ("From Mon
+  Nov 30. This cycle stays as it is."); nothing above it changes when it is tapped, so it stays under the finger. Each
+  of the three sections' headings says which cycle it shows ("Weekly layout · Next cycle"; words, not a control). The
+  switch is on **This cycle** — so a steps target or a metcon day changed mid-cycle applies now — unless Program was
+  opened to review the next plan (setting one up, the note's or Now's Review). Editing the next cycle changes nothing
+  before it starts: no plan-changed flag on this week's sessions, no change to this week's checklist. The Rules then
+  say "Same for every cycle." (they, the rep-max table and the library are not part of a plan).
 
-Settings keeps the preferences (nutrition, display, sync, data) and one **Training** row linking to Program (the
-targets and training days are part of the plan). Old links to the sections that moved (`/settings#program`,
+Settings keeps the preferences (nutrition, display, sync, data) and a **Training** section of two rows linking to
+Program (the targets and training days are part of the plan): **Steps, Zone 2 & metcon** (to `/program#targets`) and
+**Training program** (to `/program`). Old links to the sections that moved (`/settings#program`,
 `/settings#training`, `/settings#targets`, `/settings#schedule`) redirect to Program (`#training` → `#rules`, `#targets`
 and `#schedule` → `#targets`).
 
@@ -756,20 +797,29 @@ there is one), the title in the same size and at the same height as Today's and 
   ("Cycle 2 · Week 1", "Deload").
 - Streaks, PR moments, cycle completions, calibration milestones, strength-target hits, goal weight. A cycle
   completion is keyed by its number (`cycle-N`), and numbers continue across plans (§6.4), so adding, cancelling or
-  starting a plan never re-celebrates or loses a completed cycle.
+  starting a plan never re-celebrates or loses a completed cycle. Only a cycle that ran its full length completes ("5
+  weeks banked.", "1 week banked."): one a later plan cut short isn't celebrated, and a session in a pause between
+  plans is in no cycle.
 - **The choice at the end of a cycle.** During a cycle's last seven days, Train's header area (today only) and
-  Program › Now show a quiet note: "Cycle 2 ends Sun Nov 29. Next: **Repeat cycle 2** · **Set up a new cycle**".
-  Today doesn't show it.
-  - **Repeat** is what happens anyway if nothing is chosen: the plan continues. Tapping it only acknowledges: it files
-    `repeat-cycle-N` with the seen achievements — a set that only grows and syncs by union — so the note goes for that
-    cycle on every device and no merge can lose it or ask again.
-  - **Set up a new cycle** adds the next plan as a copy of the current one (§6.4: from the next cycle's Monday, or this
-    cycle's when nothing is saved in it yet) and goes to Program (Weekly layout, on Next cycle) to change it, with an
-    Undo toast ("New cycle set up from Mon Nov 30") that removes the new plan entirely.
-  - Once a new cycle is set up, the note says so instead: "Next: a new cycle from Mon Nov 30 · Review" (to Program).
-  - **"Cycle N complete"** offers the same two choices (instead of Continue) when N is the cycle that ended most
-    recently, nothing has been saved in the new cycle yet, Repeat wasn't chosen and no new plan starts with it; a new
-    cycle set up from there starts on the new cycle's Monday. Escape or a tap outside still just continues.
+  Program › Now show a quiet note: "Cycle 1 ends Sun Nov 29. For cycle 2: **Keep this plan** · **Set up a new plan**".
+  Today doesn't show it, and neither does the first week of a new plan that started with this cycle (a one-week
+  cycle's first week is its last: the question was just answered). The two actions have these names everywhere: the
+  note, "Cycle N complete" and Program › Now.
+  - **Keep this plan** is what happens anyway if nothing is chosen: the plan continues. Tapping it only acknowledges:
+    it files `repeat-cycle-N` with the seen achievements — a set that only grows and syncs by union — so the note goes
+    for that cycle on every device and no merge can lose it or ask again. A toast says so ("Cycle 2 keeps this plan",
+    with **Change** to Program › Now); focus goes to the screen's title under the note (Train's, or Now's heading),
+    without scrolling.
+  - **Set up a new plan** adds the next plan as a copy of the current one — from the note always on the Monday after
+    the cycle (§6.4) — and goes to Program (Weekly layout, on Next cycle) to change it, with an Undo toast ("New plan
+    set up from Mon Nov 30") that removes the new plan while it is still the copy that was made.
+  - Once a new plan is set up, the note says so instead: "Next: a new plan from Mon Nov 30 · Review" (to Program, on
+    the next cycle). Where the line has no room, "· Review" moves to the next line whole.
+  - **"Cycle N complete"** offers the same two choices (instead of Continue), under "For cycle N+1:", with Keep this
+    plan focused, when N is the cycle that ended most recently, today is in the new cycle's first week, nothing has
+    been saved in it yet, Keep wasn't chosen and no new plan starts with it; a new plan set up from there starts on the
+    new cycle's Monday (and can still be cancelled until something is saved under it). Escape or a tap outside still
+    just continues.
 - Each achievement is celebrated once. A max gain the screen already showed (applying an AMRAP bump) is filed as seen
   in the same step that saves it, so no full-screen celebration follows it — whether the save is confirmed at once or
   only after the device comes back online.

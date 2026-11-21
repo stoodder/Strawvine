@@ -2,7 +2,7 @@
  * Closing the day, streaks and achievements — all derived from raw data.
  */
 import { benchmarkPrs, type BenchmarkPr } from "./benchmarks";
-import { addDays, dateRange, daysBetween, formatShortDate, toDayNumber, weekdayOf, type ISODate } from "./dates";
+import { addDays, dateRange, formatShortDate, toDayNumber, weekdayOf, type ISODate } from "./dates";
 import { CALIBRATION_DAYS, firstTdeeDate, isLogged } from "./energy";
 import { cyclePosition, planTargets, scheduledProgramDay } from "./program";
 import type { DayLog, Exercise, MaxEntry, Session, Settings } from "./schemas";
@@ -466,19 +466,21 @@ export function achievements(data: AppData, today: ISODate): Achievement[] {
   // for the cycle of the day it was planned for. Cycle numbers continue across plans, so the
   // key of a cycle doesn't change when a later plan is added.
   const program = data.settings.program;
+  // A cycle a later plan cut short (it started before this cycle's last day) never completed: it
+  // isn't celebrated. A session in a pause between plans has no cycle.
   const cyclesWithWork = new Map<number, { end: ISODate; weeks: number }>();
   for (const s of data.sessions) {
     if (!s.completedAt) continue;
     const pos = cyclePosition(program, planDateOf(s));
-    // A cycle a later plan cut short banks the weeks it ran.
-    if (pos) cyclesWithWork.set(pos.cycle, { end: pos.cycleEnd, weeks: Math.ceil((daysBetween(pos.cycleStart, pos.cycleEnd) + 1) / 7) });
+    if (pos && pos.cycleEnd === addDays(pos.cycleStart, pos.weeksCount * 7 - 1))
+      cyclesWithWork.set(pos.cycle, { end: pos.cycleEnd, weeks: pos.weeksCount });
   }
   for (const [cycle, { end, weeks }] of cyclesWithWork)
     if (end <= today)
       out.push({
         key: `cycle-${cycle}`,
         title: `Cycle ${cycle} complete`,
-        detail: `${weeks} weeks banked.`,
+        detail: `${weeks} ${weeks === 1 ? "week" : "weeks"} banked.`,
         date: end,
         tier: "milestone",
       });

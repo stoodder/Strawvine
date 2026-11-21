@@ -8,24 +8,25 @@ import { offersCycleChoice, repeatCycleKey } from "../../shared/plans";
 import { useCycleActions } from "./program/useCycleChoice";
 
 /**
- * "Cycle N complete" with the end-of-cycle choice (SPEC §7): Repeat cycle N (what Continue would
- * do, said and remembered) or Set up a new cycle (from this cycle's Monday, then Program).
+ * "Cycle N complete" with the end-of-cycle choice (SPEC §7), for the cycle after it: Keep this plan
+ * (what Continue would do, said and remembered) or Set up a new plan (from this cycle's Monday, then
+ * Program).
  */
 function CycleChoiceButtons({ cycle, choose }: { cycle: number; choose: (kind: "repeat" | "new") => boolean }) {
   const actions = useCycleActions();
   return (
     <div className="mt-8 flex flex-col items-center gap-2" data-cycle-choice="">
-      <p className="text-xs text-mute">Next:</p>
+      <p className="text-xs text-mute">For cycle {cycle + 1}:</p>
       <button
         type="button"
         autoFocus
         onClick={(e) => {
           e.stopPropagation();
-          choose("repeat");
+          if (choose("repeat")) actions.keptFeedback(cycle);
         }}
         className="btn-ghost"
       >
-        Repeat cycle {cycle}
+        Keep this plan
       </button>
       <button
         type="button"
@@ -35,7 +36,7 @@ function CycleChoiceButtons({ cycle, choose }: { cycle: number; choose: (kind: "
         }}
         className="btn-ghost"
       >
-        Set up a new cycle
+        Set up a new plan
       </button>
     </div>
   );
@@ -160,7 +161,9 @@ export function Celebrations() {
   // also offers the end-of-cycle choice (SPEC §7). Repeat is what Continue would do, said.
   const endedCycle = shown && /^cycle-(\d+)$/.exec(shown.key);
   const choiceFor =
-    endedCycle && offersCycleChoice(data.settings, data.sessions, data.seenAchievements, today, Number(endedCycle[1])) ? Number(endedCycle[1]) : null;
+    endedCycle && offersCycleChoice(data.settings, data.sessions, data.seenAchievements, today, Number(endedCycle[1]))
+      ? Number(endedCycle[1])
+      : null;
   /** Files the celebration (and a Repeat with it); false while it can't be dismissed yet. */
   const choose = (kind: "repeat" | "new"): boolean => {
     if (!shown || !armed || choiceFor === null) return false;

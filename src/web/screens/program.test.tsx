@@ -1469,7 +1469,7 @@ describe("A number typed into a setting and not yet committed", () => {
     await user.clear(kcal);
     await user.type(kcal, "3600");
     // A tap that takes no focus from the field, on the link to Program.
-    act(() => document.querySelector<HTMLElement>("[data-program-link]")!.click());
+    act(() => document.querySelector<HTMLElement>("[data-program-link=program]")!.click());
     expect(where()).toBe("/program");
     expect(store.saved).toHaveLength(1);
     expect(lastSaved().nutrition.kcalPerLb).toBe(3600);
@@ -1504,41 +1504,72 @@ describe("A number typed into a setting and not yet committed", () => {
 });
 
 describe("Program: the next cycle (SPEC §6.4, §6.6)", () => {
-  /** The default program with a session saved in cycle 1, so a new cycle starts after it (Mon Dec 7). */
+  /** The default program with a session saved in cycle 1, so a new plan starts after it (Mon Dec 7). */
   const withSession = () => {
     store.data = { ...store.data, sessions: [{ date: "2026-11-03", plannedFor: null }] };
   };
-  const startButton = () => screen.getByRole("button", { name: "Start a new cycle" });
-  const pressed = (section: string) =>
-    within(within(document.getElementById(section)!).getByRole("group", { name: "Plan to edit" }))
+  const setUpButton = () => screen.getByRole("button", { name: "Set up a new plan" });
+  const switches = () => screen.queryAllByRole("group", { name: "Plan to edit" });
+  const pressed = () =>
+    within(screen.getByRole("group", { name: "Plan to edit" }))
       .getAllByRole("button", { pressed: true })
       .map((b) => b.textContent);
+  const planHeadings = () =>
+    ["layout", "targets", "weeks"].map((id) => within(document.getElementById(id)!).getByRole("heading", { level: 2 }).textContent);
+  /** A next plan from Mon Dec 7, set up before the screen opens (as on another visit, or another device). */
+  const scheduled = () => {
+    const made = startNewCycle(base(), [{ date: "2026-11-03", plannedFor: null } as never], TODAY, "p2")!.settings;
+    reset(made);
+    withSession();
+    return made;
+  };
 
-  it("Start a new cycle: a copy of the plan from the next cycle's Monday, Program's plan sections on it, and an Undo that removes it", async () => {
+  it("Set up a new plan: a copy of the plan from the next cycle's Monday, Program on it, and an Undo that removes it", async () => {
     const user = userEvent.setup();
     withSession();
     show();
-    expect(described(startButton())).toMatch(/from Mon Dec 7, when cycle 1 ends\. Until then nothing changes\.$/);
-    await user.click(startButton());
+    expect(switches()).toHaveLength(0);
+    expect(described(setUpButton())).toMatch(/from Mon Dec 7, when cycle 1 ends\. Until then nothing changes\.$/);
+    await user.click(setUpButton());
     const saved = lastSaved();
     expect(saved.program.cycleStartDate).toBe("2026-12-07");
     expect(saved.program.earlierPlans).toHaveLength(1);
-    expect(saved.program.earlierPlans![0]).toMatchObject({ id: "first", start: "2026-11-02", days: base().program.days });
-    expect(lastToast().message).toBe("New cycle set up from Mon Dec 7");
+    expect(saved.program.earlierPlans![0]).toMatchObject({ id: "first", start: "2026-11-02", end: "2026-12-07", days: base().program.days });
+    expect(lastToast().message).toBe("New plan set up from Mon Dec 7");
     expect(where()).toBe("/program#layout");
-    // Now and the plan sections show it, on Next by default.
-    expect(document.querySelector("[data-next-cycle]")!.textContent).toContain("Next cycle · from Mon Dec 7");
-    for (const id of ["layout", "targets", "weeks"]) expect(pressed(id)).toEqual(["Next cycle"]);
-    expect(screen.queryByRole("button", { name: "Start a new cycle" })).toBeNull();
+    // Now says what comes next; one switch, on the next cycle (it was opened to review it), and each plan section says so.
+    expect(document.querySelector("[data-next-cycle]")!.textContent).toContain("Next: a new plan from Mon Dec 7 · Review");
+    expect(switches()).toHaveLength(1);
+    expect(pressed()).toEqual(["Next cycle"]);
+    expect(planHeadings()).toEqual(["Weekly layout · Next cycle", "Targets & days · Next cycle", "Cycle weeks · Next cycle"]);
+    expect(screen.queryByRole("button", { name: "Set up a new plan" })).toBeNull();
     undo();
     expect(lastSaved()).toEqual(base());
   });
 
-  it("edits the plan picked with the switch: the next cycle's leaves this one alone, and the other way round", async () => {
+  it("opened mid-cycle with a next plan set up, the plan sections are this cycle's; Review (or arriving to review it) shows the next", async () => {
+    const user = userEvent.setup();
+    scheduled();
+    const view = show();
+    expect(pressed()).toEqual(["This cycle"]);
+    expect(planHeadings()).toEqual(["Weekly layout · This cycle", "Targets & days · This cycle", "Cycle weeks · This cycle"]);
+    // A steps target typed now is this cycle's: nothing lands weeks ahead by surprise.
+    await type(user, screen.getByRole("textbox", { name: "Steps" }), "12000");
+    expect(lastSaved().program.earlierPlans![0]!.targets.steps).toBe(12000);
+    expect(lastSaved().targets.steps).toBe(15000);
+    await user.click(within(document.querySelector<HTMLElement>("[data-next-cycle]")!).getByRole("link", { name: "Review" }));
+    expect(where()).toBe("/program#layout");
+    expect(pressed()).toEqual(["Next cycle"]);
+    view.unmount();
+    show({ pathname: "/program", state: { from: "/train", plan: "next" } });
+    expect(pressed()).toEqual(["Next cycle"]);
+  });
+
+  it("one switch: it picks the plan every plan section edits — the next cycle's leaves this one alone, and the other way round", async () => {
     const user = userEvent.setup();
     withSession();
     show();
-    await user.click(startButton());
+    await user.click(setUpButton());
     // Next cycle: Monday off, steps target down.
     await user.click(screen.getByRole("switch", { name: "Mon lifting day" }));
     expect(lastSaved().program.days["1"]).toBeUndefined();
@@ -1547,8 +1578,11 @@ describe("Program: the next cycle (SPEC §6.4, §6.6)", () => {
     expect(lastSaved().targets.steps).toBe(9000);
     expect(lastSaved().program.earlierPlans![0]!.targets.steps).toBe(15000);
     // This cycle: its own fields only.
-    await user.click(within(document.getElementById("targets")!).getByRole("button", { name: "This cycle" }));
-    for (const id of ["layout", "targets", "weeks"]) expect(pressed(id)).toEqual(["This cycle"]);
+    const nowBefore = document.getElementById("now")!.innerHTML;
+    await user.click(within(screen.getByRole("group", { name: "Plan to edit" })).getByRole("button", { name: "This cycle" }));
+    expect(pressed()).toEqual(["This cycle"]);
+    // Nothing above the switch changed.
+    expect(document.getElementById("now")!.innerHTML).toBe(nowBefore);
     expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Steps" }).value).toBe("15,000");
     expect(screen.getByRole("switch", { name: "Mon lifting day" }).getAttribute("aria-checked")).toBe("true");
     await user.click(within(screen.getByRole("group", { name: "Metcon days" })).getByRole("button", { name: "Sun" }));
@@ -1556,34 +1590,80 @@ describe("Program: the next cycle (SPEC §6.4, §6.6)", () => {
     expect(lastSaved().schedule).toEqual(base().schedule);
   });
 
-  it("Cancel the new cycle: back to repeating, with an Undo that puts it back", async () => {
+  it("names: this cycle's and the next cycle's, each labelled; the rules say they are the same for every cycle", async () => {
+    const user = userEvent.setup();
+    show();
+    expect(screen.getByRole("textbox", { name: "Program name" })).toBeTruthy();
+    expect(within(document.getElementById("rules")!).queryByText("Same for every cycle.")).toBeNull();
+    scheduled();
+    act(() => store.remote(store.data.settings));
+    expect(screen.queryByRole("textbox", { name: "Program name" })).toBeNull();
+    await type(user, screen.getByRole("textbox", { name: "Next cycle's name" }), "Heavier");
+    expect(lastSaved().program.name).toBe("Heavier");
+    await type(user, screen.getByRole("textbox", { name: "This cycle's name" }), "Base");
+    expect(lastSaved().program.earlierPlans![0]!.name).toBe("Base");
+    expect(within(document.getElementById("rules")!).getByText("Same for every cycle.")).toBeTruthy();
+  });
+
+  it("Cancel the new plan: back to the plan as it was, with an Undo that puts it back; focus goes to Set up a new plan", async () => {
     const user = userEvent.setup();
     withSession();
     show();
-    await user.click(startButton());
-    await type(user, screen.getByRole("textbox", { name: "Next cycle's program name" }), "Heavier");
-    const scheduled = lastSaved();
-    await user.click(screen.getByRole("button", { name: "Cancel the new cycle" }));
+    await user.click(setUpButton());
+    await type(user, screen.getByRole("textbox", { name: "Next cycle's name" }), "Heavier");
+    const withNext = lastSaved();
+    await user.click(screen.getByRole("button", { name: "Cancel the new plan" }));
     expect(lastSaved()).toEqual(base());
-    expect(lastToast().message).toBe("New cycle cancelled — this cycle repeats");
-    expect(screen.queryByRole("group", { name: "Plan to edit" })).toBeNull();
+    expect(lastToast().message).toBe("New plan cancelled — cycle 2 keeps this plan");
+    expect(switches()).toHaveLength(0);
+    await waitFor(() => expect(document.activeElement).toBe(setUpButton()));
     undo();
-    expect(lastSaved()).toEqual(scheduled);
+    expect(lastSaved()).toEqual(withNext);
   });
 
-  it("with nothing saved in the cycle yet, the new cycle starts on its Monday", () => {
+  it("a new plan that started today can be cancelled while nothing is saved under it", async () => {
+    const user = userEvent.setup();
+    // Set up on Mon Dec 7 from that Monday ("Cycle 1 complete"): in force today, nothing saved since.
+    const made = startNewCycle(base(), [{ date: "2026-11-03", plannedFor: null } as never], "2026-12-07", "p2")!.settings;
+    expect(made.program.cycleStartDate).toBe("2026-12-07");
+    reset(made, "2026-12-07");
+    withSession();
+    show();
+    expect(switches()).toHaveLength(0);
+    expect(document.querySelector("[data-next-cycle]")!.textContent).toContain("This cycle follows a new plan from Mon Dec 7.");
+    await user.click(screen.getByRole("button", { name: "Cancel the new plan" }));
+    expect(lastSaved()).toEqual(base());
+    // Once a session is saved under it, it is history: nothing to cancel.
+    reset(made, "2026-12-08");
+    store.data = { ...store.data, sessions: [{ date: "2026-12-07", plannedFor: null }] };
+    act(() => store.remote(made));
+    expect(screen.queryByRole("button", { name: "Cancel the new plan" })).toBeNull();
+  });
+
+  it("with nothing saved in the cycle yet, in its first week, the new plan starts on its Monday — and the line says from when", () => {
     // Cycle 2 (from Mon Dec 7), seen on its Wednesday, nothing saved in it.
     reset(base(), "2026-12-09");
     withSession();
+    const view = show();
+    expect(described(setUpButton())).toMatch(/Applies from this cycle’s start, Mon Dec 7 — nothing’s logged in cycle 2 yet\.$/);
+    view.unmount();
+    reset(base(), "2026-12-07");
+    withSession();
     show();
-    expect(described(startButton())).toMatch(/from Mon Dec 7: nothing is logged in this cycle yet, so it starts over now\.$/);
+    expect(described(setUpButton())).toMatch(/Applies from today, Mon Dec 7 — nothing’s logged in cycle 2 yet\.$/);
+  });
+
+  it("from the cycle's second week on, the new plan starts the Monday after it, even with nothing saved", () => {
+    reset(base(), "2026-12-16");
+    show();
+    expect(described(setUpButton())).toMatch(/from Mon Jan 11, when cycle 2 ends\. Until then nothing changes\.$/);
   });
 
   it("a move of the start moves the plan in force and the next one, and its Undo takes both back", async () => {
     const user = userEvent.setup();
     withSession();
     show();
-    await user.click(startButton());
+    await user.click(setUpButton());
     clock += 10_000;
     await user.click(delay());
     expect(lastSaved().program.cycleStartDate).toBe("2026-12-14");
@@ -1593,29 +1673,68 @@ describe("Program: the next cycle (SPEC §6.4, §6.6)", () => {
     expect(lastSaved().program.earlierPlans![0]!.start).toBe("2026-11-02");
   });
 
-  it("the move lines say when a move crosses into another plan", () => {
+  it("a move is made on the settings as they are when it is tapped: another device's edit of this cycle's plan stays", async () => {
+    const user = userEvent.setup();
+    const made = scheduled();
+    show();
+    // Arrived from another device, not rendered yet: this cycle's steps target.
+    const theirs = { ...made, program: { ...made.program, earlierPlans: [{ ...made.program.earlierPlans![0]!, targets: { steps: 11_111, zone2Minutes: 30 } }] } };
+    store.arrive(theirs);
+    await user.click(delay());
+    expect(lastSaved().program.earlierPlans![0]).toMatchObject({ start: "2026-11-09", targets: { steps: 11_111 } });
+    expect(lastSaved().program.cycleStartDate).toBe("2026-12-14");
+  });
+
+  it("the move lines say when a move crosses into another plan, or leaves a pause before it", () => {
     // Cycle 1 runs Nov 2 – Dec 6; the next plan starts Dec 7.
     const s = startNewCycle(base(), [{ date: "2026-11-03", plannedFor: null } as never], "2026-11-04", "p2")!.settings;
     // In the last week, skipping ahead brings the next plan into this week.
     expect(shiftEffect(s.program, -1, "2026-12-02")).toBe("This week becomes Week 1 (cycle 2), on the next cycle's plan; next Monday is Week 2 · Push.");
-    // In the next plan's first week, a delay puts this week back under the plan before.
-    // (The plan before runs one more week, cycle 2 of its own; the next plan starts as cycle 3.)
-    expect(shiftEffect(s.program, 1, "2026-12-09")).toBe("This week goes back to the plan before: Week 1; next Monday is Week 1 (cycle 3) · Push.");
+    // In the next plan's first week, a delay leaves this week a pause: the plan before doesn't run on.
+    expect(shiftEffect(s.program, 1, "2026-12-09")).toBe(
+      "Starts Mon Dec 14 instead of Dec 7: this week is a pause before cycle 2; next Monday is Week 1 · Push.",
+    );
     // Skipping ahead within the next plan stays in it.
     expect(shiftEffect(s.program, -1, "2026-12-09")).toBe("This week becomes Week 2; next Monday is Week 3 · Push.");
   });
 
-  it("in a cycle's last week, Now has the note: Repeat files the choice, and the note goes", async () => {
+  it("in the pause, Now says which cycle starts when", () => {
+    const made = scheduled();
+    const delayed = { ...made, program: { ...made.program, cycleStartDate: "2026-12-14", earlierPlans: made.program.earlierPlans } };
+    reset(delayed, "2026-12-09");
+    show();
+    expect(document.querySelector("[data-cycle-now]")!.textContent).toBe(
+      "Cycle 2 starts next MondayA pause: no lifting is planned until Week 1 of 5 begins Mon Dec 14, in 5 days",
+    );
+  });
+
+  it("in a cycle's last week, Now has the note instead of the button: Keep this plan files the choice, says so, and the note goes", async () => {
     const user = userEvent.setup();
     reset(base(), "2026-12-02");
     show();
     const note = () => document.querySelector("[data-cycle-end]");
-    expect(note()!.textContent).toContain("Cycle 1 ends Sun Dec 6.");
-    await user.click(screen.getByRole("button", { name: "Repeat cycle 1" }));
+    expect(note()!.textContent).toBe("Cycle 1 ends Sun Dec 6.For cycle 2: Keep this plan · Set up a new plan");
+    // One "Set up a new plan" on the page: the note's.
+    expect(screen.getAllByRole("button", { name: "Set up a new plan" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Keep this plan" }));
     expect(store.seen).toEqual(["repeat-cycle-1"]);
-    act(() => store.remote({ ...store.data.settings }));
+    expect(lastToast()).toMatchObject({ message: "Cycle 2 keeps this plan", action: { label: "Change" } });
     store.data = { ...store.data, seenAchievements: ["repeat-cycle-1"] };
     act(() => store.remote({ ...store.data.settings }));
     expect(note()).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(within(document.getElementById("now")!).getByRole("heading", { level: 2 })));
+    // The button is back, for changing the choice.
+    expect(screen.getAllByRole("button", { name: "Set up a new plan" })).toHaveLength(1);
+  });
+});
+
+describe("Settings' Training section", () => {
+  it("two rows: the targets and training days straight to Program's Targets, the rest to Program", async () => {
+    const user = userEvent.setup();
+    show("/settings");
+    await user.click(screen.getByRole("link", { name: /Steps, Zone 2 & metcon/ }));
+    expect(where()).toBe("/program#targets");
+    await user.click(screen.getByRole("link", { name: "Back to Settings" }));
+    expect(where()).toBe("/settings#plan");
   });
 });

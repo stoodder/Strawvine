@@ -44,8 +44,15 @@ export function programLinkLabel(program: Program, date: ISODate, today: ISODate
   // No cycle to place the day in (a program always has a week; this is for a document that doesn't).
   if (plan.weeks.length === 0) return { text: "Program", short: "Program", name: "Program", deload: false };
   const start = plan.start;
-  const verb = start > today ? "Starts" : "Started";
   const day = weekdayName(start, true);
+  // A pause before a later plan (its start moved later than the plan before was set up to end):
+  // the cycle it starts, by number.
+  if (plan.cyclesBefore > 0) {
+    const verb = `Cycle ${plan.cyclesBefore + 1} ${start > today ? "starts" : "started"}`;
+    const text = `${verb} ${day} ${shortDate(start, today)}`;
+    return { text, short: `${verb} ${day}`, name: `Program: ${text}`, deload: false };
+  }
+  const verb = start > today ? "Starts" : "Started";
   const text = `${verb} ${day} ${shortDate(start, today)}`;
   return { text, short: `${verb} ${day}`, name: `Program: ${verb.toLowerCase()} ${day} ${shortDate(start, today)}`, deload: false };
 }
@@ -58,7 +65,14 @@ export function programLinkLabel(program: Program, date: ISODate, today: ISODate
  * null when there is nothing to say: the session holds its main lift (or the plan would build one
  * — a recalculation is offered instead), or the day has no main lift.
  */
-export type MainLiftNotice = { kind: "not-started"; start: ISODate } | { kind: "needs-max"; exerciseId: number } | null;
+export type MainLiftNotice =
+  | {
+      kind: "not-started";
+      start: ISODate;
+      /** The cycle that starts then, after a pause between plans (absent: the first). */ cycle?: number;
+    }
+  | { kind: "needs-max"; exerciseId: number }
+  | null;
 
 export function mainLiftNotice({
   program,
@@ -77,13 +91,20 @@ export function mainLiftNotice({
   const exerciseId = programDayFor(program, date)?.primaryExerciseId;
   const plan = planAt(program, date);
   if (exerciseId == null || plan.weeks.length === 0) return null;
-  if (!cyclePosition(program, date)) return { kind: "not-started", start: plan.start };
+  if (!cyclePosition(program, date))
+    return plan.cyclesBefore > 0
+      ? { kind: "not-started", start: plan.start, cycle: plan.cyclesBefore + 1 }
+      : { kind: "not-started", start: plan.start };
   // The max is the program day's lift's — there is no main-lift block to read it from.
   return currentMax(maxEntries, exerciseId) ? null : { kind: "needs-max", exerciseId };
 }
 
-/** "Your program starts Monday, Nov 2." — the not-started notice in words. */
-export function programStartSentence(start: ISODate, today: ISODate): string {
+/**
+ * "Your program starts Monday, Nov 2." — the not-started notice in words; after a pause between
+ * plans, "Cycle 3 starts Monday, Dec 21."
+ */
+export function programStartSentence(start: ISODate, today: ISODate, cycle?: number): string {
   const when = `${weekdayName(start)}, ${shortDate(start, today)}`;
-  return start > today ? `Your program starts ${when}.` : `Your program started ${when} — after this day.`;
+  const who = cycle ? `Cycle ${cycle}` : "Your program";
+  return start > today ? `${who} starts ${when}.` : `${who} started ${when} — after this day.`;
 }

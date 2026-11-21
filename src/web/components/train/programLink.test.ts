@@ -5,6 +5,8 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "../../../shared/defaults";
 import type { MaxEntry, Program } from "../../../shared/schemas";
+import { startNewCycle } from "../../../shared/plans";
+import { shiftCycleStart } from "../../../shared/program";
 import { mainLiftNotice, programLinkLabel, programStartSentence } from "./programLink";
 
 const BENCH = 1;
@@ -152,5 +154,35 @@ describe("programStartSentence", () => {
 
   it("a program that has started since is in the past tense", () => {
     expect(programStartSentence("2026-11-02", "2026-11-10")).toBe("Your program started Monday, Nov 2 — after this day.");
+  });
+});
+
+describe("a pause between plans (a new plan's start moved later, SPEC §6.4)", () => {
+  // Cycle 1 runs Nov 2 – Dec 6; a new plan was set up from Dec 7, then delayed to Dec 14.
+  const made = startNewCycle(
+    { ...defaultSettings({ bench: BENCH, deadlift: DEADLIFT, backSquat: 3, frontSquat: 4, strictPress: 5 }, "2026-11-02"), onboarded: true },
+    [],
+    "2026-11-10",
+    "p2",
+  )!.settings;
+  const paused = shiftCycleStart(made.program, 1, "2026-12-08");
+
+  it("Train's link says which cycle starts when", () => {
+    expect(programLinkLabel(paused, "2026-12-09", "2026-12-09")).toEqual({
+      text: "Cycle 2 starts Mon Dec 14",
+      short: "Cycle 2 starts Mon",
+      name: "Program: Cycle 2 starts Mon Dec 14",
+      deload: false,
+    });
+    expect(programLinkLabel(paused, "2026-12-14", "2026-12-14").text).toBe("Cycle 2 · Week 1 of 5");
+  });
+
+  it("a day in it has no main lift to calculate yet, and says when its cycle starts", () => {
+    expect(mainLiftNotice({ program: paused, date: "2026-12-07", maxEntries: [max(BENCH)], hasMainLift: false })).toEqual({
+      kind: "not-started",
+      start: "2026-12-14",
+      cycle: 2,
+    });
+    expect(programStartSentence("2026-12-14", "2026-12-09", 2)).toBe("Cycle 2 starts Monday, Dec 14.");
   });
 });

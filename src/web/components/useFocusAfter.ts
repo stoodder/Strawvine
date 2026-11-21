@@ -26,7 +26,7 @@ function focusable(el: HTMLElement | null | undefined): el is HTMLElement {
  *
  * Only one request is pending at a time (the latest wins); a pending one is dropped on unmount.
  */
-export function useFocusAfter(): (target: Target, frames?: number) => void {
+export function useFocusAfter(): (target: Target, frames?: number, options?: FocusOptions) => void {
   const frame = useRef<number | null>(null);
   useEffect(
     () => () => {
@@ -35,14 +35,14 @@ export function useFocusAfter(): (target: Target, frames?: number) => void {
     },
     [],
   );
-  return useCallback((target: Target, frames = FOCUS_RETRY_FRAMES) => {
+  return useCallback((target: Target, frames = FOCUS_RETRY_FRAMES, options?: FocusOptions) => {
     if (frame.current !== null) cancelAnimationFrame(frame.current);
     let left = Math.max(1, frames);
     const attempt = () => {
       frame.current = null;
       const el = typeof target === "function" ? target() : target;
       if (focusable(el)) {
-        el.focus();
+        el.focus(options);
         return;
       }
       if (--left > 0) frame.current = requestAnimationFrame(attempt);

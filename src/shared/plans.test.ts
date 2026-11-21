@@ -8,7 +8,11 @@ import { addDays, dateRange, weekdayOf } from "./dates";
 import { defaultSettings } from "./defaults";
 import { achievements, checklist, type AppData } from "./gamify";
 import {
+  cancellablePlan,
   cancelPlan,
+  editPlan,
+  endBefore,
+  newCycleRefusal,
   currentPlan,
   cycleEndCard,
   newCycleStart,
@@ -122,17 +126,32 @@ describe("a new cycle", () => {
     // The latest plan is the top level (so a build that doesn't know plans reads it); the one before is kept.
     expect(s.program.cycleStartDate).toBe("2026-12-14");
     expect(s.program.planId).toBe("p2");
+    // The plan before is set up to end where the new one starts (`end`).
     expect(s.program.earlierPlans).toEqual([
-      { id: "first", start: "2026-10-05", name: base.program.name, weeks: base.program.weeks, days: base.program.days, targets: base.targets, schedule: base.schedule },
+      {
+        id: "first",
+        start: "2026-10-05",
+        name: base.program.name,
+        weeks: base.program.weeks,
+        days: base.program.days,
+        targets: base.targets,
+        schedule: base.schedule,
+        end: "2026-12-14",
+      },
     ]);
     expect(nextPlan(s, "2026-12-08")?.id).toBe("p2");
     expect(nextPlan(s, "2026-12-14")).toBeNull();
     expect(currentPlan(s, "2026-12-08").id).toBe("first");
   });
 
-  it("starts on this cycle's Monday when nothing is saved in it yet (the choice made on its first day)", () => {
+  it("starts on this cycle's Monday when nothing is saved in it yet and it is the cycle's first week (the choice made on its first days)", () => {
     expect(newCycleStart(base, [done(base, "2026-11-02", 10)], "2026-11-09")).toBe("2026-11-09");
     expect(newCycleStart(base, [], "2026-11-12")).toBe("2026-11-09");
+    expect(newCycleStart(base, [], "2026-11-15")).toBe("2026-11-09");
+    // From the second week on, the next cycle's Monday — even with nothing saved.
+    expect(newCycleStart(base, [], "2026-11-16")).toBe("2026-12-14");
+    // The end-of-cycle note always asks about the next cycle.
+    expect(newCycleStart(base, [], "2026-11-09", { atCycleEnd: true })).toBe("2026-12-14");
     // A moved session counts for the day it was planned for.
     expect(newCycleStart(base, [{ ...done(base, "2026-11-08", 10), plannedFor: "2026-11-09" }], "2026-11-09")).toBe("2026-12-14");
     // The plan's own first cycle is never replaced: the plan itself is edited instead.
@@ -185,15 +204,42 @@ describe("a new cycle", () => {
   it("cancelling it puts the document back exactly as it was; Undo of that puts the plan back", () => {
     const s = withNext("2026-12-08", sessionInCycle2, { name: "Next" });
     const plan = nextPlan(s, "2026-12-08")!;
-    const cancelled = cancelPlan(s, "p2", "2026-12-08")!;
+    const end = endBefore(s, "p2");
+    expect(end).toBe("2026-12-14");
+    const cancelled = cancelPlan(s, "p2", sessionInCycle2, "2026-12-08")!;
     expect(cancelled).toEqual(base);
-    expect(restorePlan(cancelled, plan)).toEqual(s);
-    // Only a scheduled next cycle can be cancelled; once it is in force it is history.
-    expect(cancelPlan(s, "p2", "2026-12-14")).toBeNull();
-    expect(cancelPlan(s, "first", "2026-12-08")).toBeNull();
-    // Undo of setting it up removes it entirely, while it is still the latest.
-    expect(removeNewPlan(s, "p2")).toEqual(base);
-    expect(removeNewPlan(base, "p2")).toBeNull();
+    expect(restorePlan(cancelled, plan, end)).toEqual(s);
+    expect(cancelPlan(s, "first", sessionInCycle2, "2026-12-08")).toBeNull();
+  });
+
+  it("a new plan in force can be cancelled while nothing is saved under it — back to the plan before, exactly", () => {
+    const s = withNext("2026-12-08", sessionInCycle2, { name: "Next" });
+    // Started today (Mon Dec 14), nothing saved since: cancellable.
+    expect(cancellablePlan(s, sessionInCycle2, "2026-12-14")?.id).toBe("p2");
+    expect(cancelPlan(s, "p2", sessionInCycle2, "2026-12-16")).toEqual(base);
+    // A session saved under it (on its start or later, or planned for it) makes it history.
+    const saved = [...sessionInCycle2, done(s, "2026-12-14", 10)];
+    expect(cancellablePlan(s, saved, "2026-12-14")).toBeNull();
+    expect(cancelPlan(s, "p2", saved, "2026-12-14")).toBeNull();
+    const moved = [...sessionInCycle2, { ...done(s, "2026-12-11", 10), plannedFor: "2026-12-14" }];
+    expect(cancellablePlan(s, moved, "2026-12-14")).toBeNull();
+    // While it is scheduled, it can always be cancelled.
+    expect(cancellablePlan(s, saved, "2026-12-13")?.id).toBe("p2");
+  });
+
+  it("Undo of setting it up removes it — only while it is still exactly the copy that was made", () => {
+    const made = startNewCycle(base, sessionInCycle2, "2026-12-08", "p2")!;
+    expect(removeNewPlan(made.settings, "p2", made.plan)).toEqual(base);
+    expect(removeNewPlan(base, "p2", made.plan)).toBeNull();
+    // Edited since (here or on another device): the person's plan now; Undo declines.
+    const edited = updatePlan(made.settings, "p2", { targets: { steps: 9000, zone2Minutes: 30 } });
+    expect(removeNewPlan(edited, "p2", made.plan)).toBeNull();
+    // Moved since: declines too.
+    const delayed = { ...made.settings, program: shiftCycleStart(made.settings.program, 1, "2026-12-08") };
+    expect(removeNewPlan(delayed, "p2", made.plan)).toBeNull();
+    // An edit of something else (a rule, nutrition) doesn't count.
+    const other = { ...made.settings, program: { ...made.settings.program, roundToLb: 2.5 } };
+    expect(removeNewPlan(other, "p2", made.plan)).toEqual({ ...base, program: { ...base.program, roundToLb: 2.5 } });
   });
 });
 
@@ -208,15 +254,12 @@ describe("moving the start with more than one plan", () => {
     // In the second plan: only it moves.
     const later = shiftCycleStart(s.program, 1, "2026-12-20");
     expect(planTimeline(later).map((p) => p.start)).toEqual(["2026-10-05", "2026-12-21"]);
-    // Delayed in its first week, this week goes back to the plan before (its cycle 3, week 1).
+    // Delayed in its first week, this week is a pause before it (the plan before doesn't run on).
     const preview = previewCycleShift(s.program, 1, "2026-12-15");
-    expect([preview.before?.plan.id, preview.position?.plan.id, preview.position?.cycle, preview.position?.weekIndex]).toEqual([
-      "p2",
-      "first",
-      3,
-      0,
-    ]);
+    expect([preview.before?.plan.id, preview.position]).toEqual(["p2", null]);
     expect([preview.from, preview.to]).toEqual(["2026-12-14", "2026-12-21"]);
+    expect(preview.next?.date).toBe("2026-12-21");
+    expect(preview.next?.position.cycle).toBe(3);
   });
 
   it("refuses a move that would put a plan's start at or before the start of the plan before it", () => {
@@ -279,7 +322,207 @@ describe("the choice at the end of a cycle", () => {
     // The new plan's first cycle is cycle 3.
     const withCycle3 = [...history, done(s, "2026-12-15", 10)];
     expect(keys(data(s, withCycle3), "2027-01-05")[0]).toEqual(["cycle-3", "2027-01-03", "3 weeks banked."]);
-    expect(keys(data(cancelPlan(s, "p2", "2026-12-08")!, history), "2026-12-20")).toEqual(before);
+    expect(keys(data(cancelPlan(s, "p2", history, "2026-12-08")!, history), "2026-12-20")).toEqual(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regressions from review: where a new plan starts, delays, cancels, documents out of order
+// ---------------------------------------------------------------------------
+
+describe("the end-of-cycle note never starts a plan in the past (D1)", () => {
+  it("in a cycle's last week with nothing saved, the new plan starts the Monday after the cycle and past days keep reading as they did", () => {
+    const today = "2026-12-08"; // last week of cycle 2 (Dec 7–13), nothing saved in cycle 2
+    expect(cycleEndCard(base, [], today)?.cycle).toBe(2);
+    // Not this cycle's Monday (Nov 9), a month back: past the cycle's first week, from the note or from Program.
+    expect(newCycleStart(base, [], today, { atCycleEnd: true })).toBe("2026-12-14");
+    expect(newCycleStart(base, [], today)).toBe("2026-12-14");
+    const made = startNewCycle(base, [], today, "p2", { atCycleEnd: true })!;
+    expect(made.plan.start).toBe("2026-12-14");
+    // A past day of cycle 2: 16,000 steps, metcon and Zone 2 done; the next plan raising the steps target changes nothing about it.
+    const day = { ...emptyDayLog("2026-11-10"), steps: 16000, weightLb: 200, calories: 2000, metconDone: true, zone2Done: true };
+    const steps = (s: Settings) => checklist("2026-11-10", day, undefined, s).find((i) => i.key === "steps")!.done;
+    const edited = updatePlan(made.settings, "p2", { targets: { steps: 20000, zone2Minutes: 30 } });
+    expect([steps(base), steps(edited)]).toEqual([true, true]);
+    // The note now says what comes next; it never asks the same question again.
+    expect(cycleEndCard(edited, [], today)).toEqual({ cycle: 2, end: "2026-12-13", next: nextPlan(edited, today) });
+  });
+
+  it("a plan set up on a cycle's first days from that Monday answers the question for it: a one-week cycle's note doesn't ask again", () => {
+    const oneWeek: Settings = { ...base, program: { ...base.program, weeks: base.program.weeks.slice(0, 1) } };
+    // One-week cycles: every week is a cycle's first and last. Mon Nov 9 is cycle 6.
+    expect(cycleEndCard(oneWeek, [], "2026-11-10")?.cycle).toBe(6);
+    // Opened on Monday ("Cycle 5 complete"): the new plan starts with this cycle…
+    const made = startNewCycle(oneWeek, [], "2026-11-09", "p2")!;
+    expect(made.plan.start).toBe("2026-11-09");
+    // …and the note stays away for this cycle, on every day of it.
+    for (const d of dateRange("2026-11-09", "2026-11-15")) expect(cycleEndCard(made.settings, [], d)).toBeNull();
+    expect(cycleEndCard(made.settings, [], "2026-11-16")?.cycle).toBe(7);
+    // From the note, never this cycle's Monday.
+    expect(newCycleStart(oneWeek, [], "2026-11-09", { atCycleEnd: true })).toBe("2026-11-16");
+  });
+
+  it("says why when no new plan can be set up", () => {
+    const made = startNewCycle(base, [], "2026-12-08", "p2", { atCycleEnd: true })!.settings;
+    expect(newCycleRefusal(made, [], "2026-12-08")).toBe("A new plan is already set up from Mon Dec 14. Review it on Program.");
+    expect(newCycleRefusal(base, [], "2026-10-01")).toBe("The program hasn't started yet: change the plan itself on Program.");
+    expect(newCycleRefusal(base, [], "2026-12-08")).toBeNull();
+  });
+});
+
+describe("moving a new plan's start later leaves a pause, never more of the plan before (D2)", () => {
+  // Plan A ran two cycles (Oct 5 – Dec 13); B starts Dec 14 (cycle 3); a session is saved Dec 14.
+  const history = [done(base, "2026-11-10", 10)];
+  const made = startNewCycle(base, history, "2026-12-08", "p2", { atCycleEnd: true })!;
+  const s = updatePlan(made.settings, "p2", { name: "B" });
+  const delayed = { ...s, program: shiftCycleStart(s.program, 1, "2026-12-15") };
+  const at = (settings: Settings, date: string) => {
+    const pos = cyclePosition(settings.program, date);
+    return pos && [pos.cycle, pos.plan.id, pos.weekIndex, pos.cycleStart, pos.cycleEnd];
+  };
+
+  it("Delay a week in B's first week: B starts Dec 21, this week is a pause with no cycle position", () => {
+    expect(delayed.program.cycleStartDate).toBe("2026-12-21");
+    expect(delayed.program.earlierPlans![0]!.start).toBe("2026-10-05");
+    for (const d of dateRange("2026-12-14", "2026-12-20")) {
+      expect(cyclePosition(delayed.program, d)).toBeNull();
+      expect(scheduledProgramDay(delayed.program, d)).toBeNull();
+      // The pause reads B's targets and days, as the days before a program's week 1 read its first plan's.
+      expect(planAt(delayed.program, d).id).toBe("p2");
+    }
+    // A still ends where it did; its cycles are as they were.
+    expect(at(delayed, "2026-12-13")).toEqual([2, "first", 4, "2026-11-09", "2026-12-13"]);
+    // B's cycles keep their numbers.
+    expect(at(delayed, "2026-12-21")).toEqual([3, "p2", 0, "2026-12-21", "2027-01-24"]);
+    expect(at(delayed, "2027-01-25")?.[0]).toBe(4);
+    expect(planTimeline(delayed.program).map((p) => [p.id, p.start, p.end, p.nextStart, p.cyclesBefore])).toEqual([
+      ["first", "2026-10-05", "2026-12-14", "2026-12-21", 0],
+      ["p2", "2026-12-21", null, null, 2],
+    ]);
+    expect(newCycleStart(delayed, history, "2026-12-15")).toBeNull();
+    expect(newCycleRefusal(delayed, history, "2026-12-15")).toBe("Cycle 3 hasn't started yet (it starts Mon Dec 21): change its plan on Program.");
+  });
+
+  it("a session saved in the pause reads like one saved before a program's week 1: no lift planned, no cycle, no celebration", () => {
+    const session = done(s, "2026-12-14", 10);
+    expect(session.cycle).toBe(3);
+    const data: AppData = { settings: delayed, sessions: [...history, session], days: [], exercises, maxEntries };
+    const cycles = achievements(data, "2026-12-27").filter((a) => a.key.startsWith("cycle-"));
+    // Only the cycles A ran: no "Cycle 3 complete" for a week nobody trained as cycle 3.
+    expect(cycles.map((a) => [a.key, a.detail, a.date])).toEqual([["cycle-2", "5 weeks banked.", "2026-12-13"]]);
+    const items = checklist("2026-12-14", emptyDayLog("2026-12-14"), session, delayed).map((i) => i.key);
+    expect(items).not.toContain("lift");
+  });
+
+  it("is undone by moving back: Skip ahead a week puts everything where it was", () => {
+    const back = { ...delayed, program: shiftCycleStart(delayed.program, -1, "2026-12-15") };
+    expect(back.program.cycleStartDate).toBe("2026-12-14");
+    for (const d of ["2026-12-13", "2026-12-14", "2026-12-20", "2027-01-18"]) expect(at(back, d)).toEqual(at(s, d));
+  });
+
+  it("however far it moves, A never runs another cycle", () => {
+    const far = { ...s, program: shiftCycleStart(s.program, 6, "2026-12-15") };
+    expect(far.program.cycleStartDate).toBe("2027-01-25");
+    expect(cyclePosition(far.program, "2027-01-10")).toBeNull();
+    expect(at(far, "2027-01-25")?.[0]).toBe(3);
+  });
+
+  it("plans after the moved one keep their cycle numbers", () => {
+    // C from Jan 18 (after B's first cycle): cycle 4.
+    const withC = startNewCycle(s, history, "2027-01-12", "p3", { atCycleEnd: true })!.settings;
+    expect(at(withC, "2027-01-18")?.slice(0, 2)).toEqual([4, "p3"]);
+    const moved = { ...withC, program: shiftCycleStart(withC.program, 1, "2026-12-15") };
+    expect(planTimeline(moved.program).map((p) => [p.id, p.start, p.cyclesBefore])).toEqual([
+      ["first", "2026-10-05", 0],
+      ["p2", "2026-12-21", 2],
+      ["p3", "2027-01-25", 3],
+    ]);
+  });
+
+  it("skipping ahead into the plan before cuts its cycle short — that cycle isn't celebrated as complete", () => {
+    const skipped = { ...s, program: shiftCycleStart(s.program, -1, "2026-12-15") };
+    expect(skipped.program.cycleStartDate).toBe("2026-12-07");
+    expect(at(skipped, "2026-12-06")).toEqual([2, "first", 3, "2026-11-09", "2026-12-06"]);
+    expect(at(skipped, "2026-12-07")?.slice(0, 2)).toEqual([3, "p2"]);
+    const data: AppData = { settings: skipped, sessions: history, days: [], exercises, maxEntries };
+    expect(achievements(data, "2026-12-20").filter((a) => a.key === "cycle-2")).toEqual([]);
+    // Moved back, A's cycle 2 runs its five weeks again.
+    const back = { ...skipped, program: shiftCycleStart(skipped.program, 1, "2026-12-08") };
+    expect(at(back, "2026-12-13")).toEqual(at(s, "2026-12-13"));
+  });
+
+  it("a one-week cycle banks one week (singular)", () => {
+    const oneWeek: Settings = { ...base, program: { ...base.program, weeks: base.program.weeks.slice(0, 1) } };
+    const data: AppData = { settings: oneWeek, sessions: [done(oneWeek, "2026-10-06", 10)], days: [], exercises, maxEntries };
+    expect(achievements(data, "2026-10-20").find((a) => a.key === "cycle-1")?.detail).toBe("1 week banked.");
+  });
+
+  it("a document set up before plans had an end gets one on the first move", () => {
+    const { end: _end, ...first } = s.program.earlierPlans![0]!;
+    const legacy = { ...s, program: { ...s.program, earlierPlans: [first] } };
+    const moved = shiftCycleStart(legacy.program, 1, "2026-12-15");
+    expect(moved.earlierPlans![0]!.end).toBe("2026-12-14");
+    expect(cyclePosition(moved, "2026-12-15")).toBeNull();
+  });
+});
+
+describe("a document whose plans are out of order reads them in order (D4)", () => {
+  it("no plan is ever hidden: a plan stored before one that starts earlier is still in force from its start", () => {
+    const plans = planList(base);
+    const Z = { ...plans[0]!, id: "Z", start: "2026-12-14" };
+    const L = { ...plans[0]!, id: "L", start: "2026-11-09" };
+    const doc: Settings = { ...base, program: { ...base.program, cycleStartDate: L.start, planId: "L", earlierPlans: [plans[0]!, Z] } };
+    expect(planTimeline(doc.program).map((p) => [p.id, p.start, p.end, p.empty])).toEqual([
+      ["first", "2026-10-05", "2026-11-09", false],
+      ["L", "2026-11-09", "2026-12-14", false],
+      ["Z", "2026-12-14", null, false],
+    ]);
+    expect(planList(doc).map((p) => p.id)).toEqual(["first", "L", "Z"]);
+    expect(cyclePosition(doc.program, "2026-12-20")?.plan.id).toBe("Z");
+    expect(currentPlan(doc, "2026-11-20").id).toBe("L");
+    expect(nextPlan(doc, "2026-11-20")?.id).toBe("Z");
+    // The targets follow the same order.
+    const withSteps = { ...doc, targets: { steps: 1234, zone2Minutes: 30 } };
+    expect(planTargets(withSteps, "2026-11-20").steps).toBe(1234);
+    expect(planTargets(withSteps, "2026-12-20").steps).toBe(base.targets.steps);
+    // Saving puts it in order: the latest in time becomes the top level.
+    const saved = withPlans(doc, planList(doc));
+    expect([saved.program.planId, saved.program.earlierPlans!.map((p) => p.id)]).toEqual(["Z", ["first", "L"]]);
+    // A new plan isn't refused because of a hidden one.
+    expect(newCycleRefusal(doc, [], "2026-12-08")).toBe("A new plan is already set up from Mon Dec 14. Review it on Program.");
+  });
+});
+
+describe("editing this cycle's weeks keeps the next plan at the end of this cycle (D6a)", () => {
+  const history = [done(base, "2026-11-10", 10)];
+  const s = startNewCycle(base, history, "2026-11-20", "p2")!.settings;
+
+  it("fewer weeks: the next plan moves up to the Monday after this cycle as it now runs", () => {
+    expect(s.program.cycleStartDate).toBe("2026-12-14");
+    const r = editPlan(s, "first", { weeks: base.program.weeks.slice(0, 4) }, "2026-11-20");
+    expect(r.refused).toBeNull();
+    // 4-week cycles from Oct 5: cycle 2 is Nov 2 – Nov 29.
+    expect(r.settings.program.cycleStartDate).toBe("2026-11-30");
+    expect(r.settings.program.earlierPlans![0]!.end).toBe("2026-11-30");
+    const pos = cyclePosition(r.settings.program, "2026-11-29")!;
+    expect([pos.cycle, pos.plan.id, pos.weekIndex, pos.cycleEnd]).toEqual([2, "first", 3, "2026-11-29"]);
+    expect(cyclePosition(r.settings.program, "2026-11-30")?.cycle).toBe(3);
+  });
+
+  it("more weeks: it moves later; edits of the next plan or of other fields move nothing", () => {
+    const six = [...base.program.weeks, { ...base.program.weeks[0]!, label: "Week 6" }];
+    const r = editPlan(s, "first", { weeks: six }, "2026-11-20");
+    // 6-week cycles from Oct 5: cycle 2 is Nov 16 – Dec 27.
+    expect(r.settings.program.cycleStartDate).toBe("2026-12-28");
+    expect(cyclePosition(r.settings.program, "2026-12-27")?.cycleEnd).toBe("2026-12-27");
+    expect(editPlan(s, "p2", { weeks: six }, "2026-11-20").settings.program.cycleStartDate).toBe("2026-12-14");
+    expect(editPlan(s, "first", { name: "A" }, "2026-11-20").settings.program.cycleStartDate).toBe("2026-12-14");
+  });
+
+  it("a next plan not at the end of this cycle stays where it is", () => {
+    const off = { ...s, program: { ...s.program, cycleStartDate: "2026-12-21" } };
+    const r = editPlan(off, "first", { weeks: base.program.weeks.slice(0, 4) }, "2026-11-20");
+    expect(r.settings.program.cycleStartDate).toBe("2026-12-21");
   });
 });
 

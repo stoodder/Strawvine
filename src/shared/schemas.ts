@@ -218,6 +218,13 @@ export const planSchema = z.object({
   days: programDaysSchema,
   targets: dailyTargetsSchema,
   schedule: weekScheduleSchema,
+  /**
+   * The Monday this plan was set up to end on: the next plan's start as it was set up. The plan is
+   * never in force past it — moving the next plan's start later leaves a pause, not more of this
+   * plan (program.ts, `planTimeline`). Absent: it ends where the next plan starts. Only an earlier
+   * plan has one (the latest runs on).
+   */
+  end: isoDate.optional(),
 });
 export type Plan = z.infer<typeof planSchema>;
 
