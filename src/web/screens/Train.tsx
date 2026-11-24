@@ -2,6 +2,7 @@ import clsx from "clsx";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router";
 import {
+  ArrowLeftRight,
   ArrowUpDown,
   Check,
   ChevronLeft,
@@ -18,7 +19,7 @@ import {
   Unlink2,
   X,
 } from "lucide-react";
-import { addDays, isISODate, weekdayName } from "../../shared/dates";
+import { addDays, isISODate, WEEKDAY_SHORT, weekdayName } from "../../shared/dates";
 import { trainingPrefs } from "../../shared/defaults";
 import { amrapPrs } from "../../shared/gamify";
 import { currentMax, planAt, programDayFor, progressionGain } from "../../shared/program";
@@ -34,6 +35,8 @@ import {
   isSessionStarted,
   isWeighted,
   logAtTargets,
+  mainLiftBlock,
+  mainLiftSwap,
   newId,
   nextSetAfter,
   planChanged,
@@ -59,6 +62,7 @@ import {
   supersetLetters,
   type ExPlace,
 } from "../../shared/sessionStructure";
+import { swapBlocked, swapChoices, swapMainLift, swapSuggestion, undoSwap, type SwapRefusal } from "../../shared/swap";
 import { useDockHeight, useDockTop } from "../components/Dock";
 import { Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
@@ -72,6 +76,7 @@ import { Foldable, FoldedBlock, FoldToggle, type FoldedItem } from "../component
 import { useFolds } from "../components/train/folds";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
 import { SupersetSheet, WorkoutOrderSheet } from "../components/train/SupersetSheets";
+import { SwapLiftSheet } from "../components/train/SwapLiftSheet";
 import { useDismissedHints } from "../components/train/hintDismiss";
 import { afterLayout, useRevealAboveDock, whenReady } from "../components/train/reveal";
 import { AccessorySetRow, MainSetRow } from "../components/train/SetControls";
@@ -278,6 +283,8 @@ export function TrainScreen() {
   const [maxFor, setMaxFor] = useState<Exercise | null>(null);
   /** The exercise in the Edit exercise sheet, and the row whose options opened it (for focus after). */
   const [editingExercise, setEditingExercise] = useState<{ id: number; ref: ExRef } | null>(null);
+  /** The "Swap the main lift" sheet is open. */
+  const [swapOpen, setSwapOpen] = useState(false);
   /** The set whose logging started the current rest: the rest pill shows the plates for the one after it. */
   const [lastLogged, setLastLogged] = useState<SetRef | null>(null);
   const { isDismissed: hintDismissed, dismiss: dismissHint } = useDismissedHints(date);
@@ -299,7 +306,7 @@ export function TrainScreen() {
 
   // A sheet makes the app (and its toasts) inert and the toast would sit over the sheet's
   // buttons: retire the last undo offer when one opens.
-  const sheetOpen = !!(editing || amrap || adding || actions || maxFor || editingExercise || managed || ordering);
+  const sheetOpen = !!(editing || amrap || adding || actions || maxFor || editingExercise || managed || ordering || swapOpen);
   useEffect(() => {
     if (sheetOpen && lastToast.current !== null) {
       toast.dismiss(lastToast.current);
@@ -496,6 +503,17 @@ export function TrainScreen() {
     [plannedFor, fresh],
   );
   const freshPrimary = planFresh.blocks.find((b) => b.kind === "primary");
+  /**
+   * The main lift swapped for this session (SPEC §6.5, "Swap the main lift"): read from the session
+   * (its main block holds another lift than the plan had for it), never stored apart.
+   */
+  const swap = mainLiftSwap(session);
+  /**
+   * The main lift as the plan calculates it for this session: the plan's — or, swapped, the
+   * swapped lift's, this week's scheme on its max (unless the plan now has that lift itself).
+   */
+  const swapPlan = swap && freshPrimary?.exercises[0]?.exerciseId !== swap.to ? mainLiftBlock(plannedFor ?? date, data, swap.to) : null;
+  const planPrimary = swapPlan?.block ?? freshPrimary;
   /** In place of a main lift the day has no sets for: the program hasn't started, or the lift has no max. */
   const mainNotice = mainLiftNotice({
     program,
@@ -514,8 +532,8 @@ export function TrainScreen() {
   const offerRecalc = !isPreview && !earlyDone && (programMoved || maxChanged || missingPrimary);
 
   const recalcPrimary = () => {
-    // A skipped main lift stays skipped through a recalculation.
-    const nextPrimary = freshPrimary && (primarySkipped ? { ...freshPrimary, skipped: true } : freshPrimary);
+    // A skipped main lift stays skipped through a recalculation; a swapped one stays swapped.
+    const nextPrimary = planPrimary && (primarySkipped ? { ...planPrimary, skipped: true } : planPrimary);
     commit(
       {
         ...session,
@@ -523,7 +541,7 @@ export function TrainScreen() {
         cycle: planFresh.cycle,
         week: planFresh.week,
         deload: planFresh.deload,
-        primaryMaxLb: planFresh.primaryMaxLb ?? session.primaryMaxLb,
+        primaryMaxLb: swapPlan?.primaryMaxLb ?? planFresh.primaryMaxLb ?? session.primaryMaxLb,
         planSig: planFresh.planSig,
         blocks: [...(nextPrimary ? [nextPrimary] : []), ...session.blocks.filter((b) => b.kind !== "primary")],
       },
@@ -543,8 +561,8 @@ export function TrainScreen() {
     tick();
   };
 
-  /** The main lift's Skip / Unskip / Skip rest / Restore control (whichever the row shows now). */
-  const mainControl = (which: "skip" | "unskip" | "skip-rest" | "restore") => () =>
+  /** The main lift's Skip / Unskip / Skip rest / Restore / Swap control (whichever the row shows now). */
+  const mainControl = (which: "skip" | "unskip" | "skip-rest" | "restore" | "swap") => () =>
     document.querySelector<HTMLElement>(`[data-main-control="${which}"]`);
 
   /**
@@ -607,8 +625,8 @@ export function TrainScreen() {
   };
   /** Prescribed sets the session no longer holds (the rest of the main lift was skipped). */
   const missingMain =
-    primaryEx && freshPrimary && !session.completedAt && primaryEx.sets.length < plannedCount
-      ? (freshPrimary.exercises[0]?.sets.slice(primaryEx.sets.length, plannedCount) ?? [])
+    primaryEx && planPrimary && !session.completedAt && primaryEx.sets.length < plannedCount
+      ? (planPrimary.exercises[0]?.sets.slice(primaryEx.sets.length, plannedCount) ?? [])
       : [];
   const restoreMain = () => {
     if (!primaryBlock || !missingMain.length) return;
@@ -621,6 +639,65 @@ export function TrainScreen() {
     );
     focusWhenReady(mainControl("skip-rest"));
   };
+
+  // --- Swap the main lift for this session (src/shared/swap) --------------------------------
+  /** Why the main lift can't be swapped now, in words (null: it can). */
+  const swapRefusal = (why: SwapRefusal | null): string | null => {
+    switch (why) {
+      case null:
+        return null;
+      case "logged":
+        return `A set of ${primaryName} is logged. Logged sets are never thrown away to swap: unlog them first, or add the other lift as an exercise.`;
+      case "skipped":
+        return `${primaryName} is skipped today. Unskip it to swap it.`;
+      case "finished":
+        return "This session is finished. Reopen it to swap its main lift.";
+      case "no-max":
+        return "That lift has no max yet: set one and its working sets calculate themselves.";
+      case "not-planned":
+        return "Nothing is calculated for this day: the program isn't running on it.";
+      default:
+        return "There's no main lift to swap.";
+    }
+  };
+  const swapNow = primaryBlock ? swapBlocked(session) : "no-main";
+  const swapOffer = primaryBlock && !isPreview && swapOpen ? swapChoices(session, data) : null;
+  /**
+   * Swap the main lift for this session (or put the planned one back), with an Undo that puts back
+   * only what the swap changed — on the session as it is when Undo is tapped.
+   */
+  const swapTo = (exerciseId: number, focus: () => HTMLElement | null = mainControl("swap")) => {
+    const r = swapMainLift(session, exerciseId, data);
+    if ("refused" in r) {
+      toast.show({ message: swapRefusal(r.refused) ?? "Can't swap the main lift.", tone: "warn" });
+      return;
+    }
+    const was = exName(primaryExId ?? -1);
+    const now = exName(exerciseId);
+    const backToPlan = !mainLiftSwap(r.session);
+    tick();
+    setSwapOpen(false);
+    commit(r.session, {
+      message: backToPlan ? `Back to ${now}` : `${now} in place of ${was} today`,
+      revert: (cur, saved) => {
+        const undone = undoSwap(cur, saved, session);
+        if (undone === "logged") return `Can't undo: a set of ${now} is logged`;
+        if (undone === "changed") return "Can't undo: the main lift changed since";
+        return undone;
+      },
+      onUndone: () => focusWhenReady(mainControl("swap")),
+    });
+    focusWhenReady(focus);
+  };
+  /**
+   * Swapping between days (derived, never stored): this day's planned lift was already done this
+   * week in place of another day's — offer that day's lift here. Only while the day has no session.
+   */
+  const suggestion = useMemo(
+    () => (saved || earlyDone ? null : swapSuggestion(date, data)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [saved, earlyDone, date, data.settings, data.sessions, data.maxEntries, data.exercises],
+  );
 
   // --- Do this session today ----------------------------------------------------------------
   const todaySaved = data.sessions.find((s) => s.date === today) ?? null;
@@ -1115,6 +1192,24 @@ export function TrainScreen() {
             "Rest day."
           )}
         </p>
+        {suggestion && !shownEarly && (
+          // Swapping between days: this day's lift was done earlier this week in another day's place.
+          <p data-swap-suggestion className="mt-1 text-sm text-mute">
+            {exName(suggestion.done)} was done {weekdayName(suggestion.doneOn, true)}.
+            {!isPreview && (
+              <>
+                {" "}
+                <button
+                  type="button"
+                  className="-mx-1 -my-3 inline px-1 py-3 text-left text-accent"
+                  onClick={() => swapTo(suggestion.suggest, () => document.querySelector<HTMLElement>("[data-train-title]"))}
+                >
+                  Do {exName(suggestion.suggest)} {isToday ? "today" : "instead"}?
+                </button>
+              </>
+            )}
+          </p>
+        )}
         {plannedFor && (
           <div className="mt-1 flex flex-wrap items-center gap-x-3">
             <span className="text-sm text-mute">
@@ -1328,31 +1423,55 @@ export function TrainScreen() {
                         </span>
                       )}
                     </div>
-                    {/* Injury or fatigue: skip the main lift for today (nothing logged in it yet), or
-                        the rest of it once some sets are in (those still count). */}
-                    {!isPreview && !session.completedAt && !primaryStarted && (
-                      <button
-                        type="button"
-                        onClick={() => setPrimarySkipped(true)}
-                        aria-label={`Skip ${primaryName} today`}
-                        data-main-control="skip"
-                        className="tap label -my-2 -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                      >
-                        <SkipForward size={12} /> skip
-                      </button>
-                    )}
-                    {!isPreview && !session.completedAt && primaryStarted && openMain > 0 && (
-                      <button
-                        type="button"
-                        onClick={skipRestOfMain}
-                        aria-label={`Skip rest of ${primaryName} today`}
-                        data-main-control="skip-rest"
-                        className="tap label -my-2 -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                      >
-                        <SkipForward size={12} /> skip rest
-                      </button>
+                    {!isPreview && !session.completedAt && (
+                      <span className="-my-2 -mr-2 ml-auto flex items-center">
+                        {/* Another lift for this session only (equipment, timing): the day keeps its accessories.
+                            Always reachable while the session is open; once a set is logged the sheet says why not. */}
+                        <button
+                          type="button"
+                          onClick={() => setSwapOpen(true)}
+                          aria-haspopup="dialog"
+                          aria-label={`Swap ${primaryName} for another lift`}
+                          data-main-control="swap"
+                          // Under 360 px just its icon (a 44 px target): "Back squat", swap and "skip rest" stay on one line.
+                          className="tap label inline-flex min-h-11 items-center justify-center gap-1.5 px-2 whitespace-nowrap text-mute max-[359px]:min-w-11"
+                        >
+                          <ArrowLeftRight size={12} />
+                          <span className="max-[359px]:hidden">swap</span>
+                        </button>
+                        {/* Injury or fatigue: skip the main lift for today (nothing logged in it yet), or
+                            the rest of it once some sets are in (those still count). */}
+                        {!primaryStarted && (
+                          <button
+                            type="button"
+                            onClick={() => setPrimarySkipped(true)}
+                            aria-label={`Skip ${primaryName} today`}
+                            data-main-control="skip"
+                            className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                          >
+                            <SkipForward size={12} /> skip
+                          </button>
+                        )}
+                        {primaryStarted && openMain > 0 && (
+                          <button
+                            type="button"
+                            onClick={skipRestOfMain}
+                            aria-label={`Skip rest of ${primaryName} today`}
+                            data-main-control="skip-rest"
+                            className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                          >
+                            <SkipForward size={12} /> skip rest
+                          </button>
+                        )}
+                      </span>
                     )}
                   </div>
+                  {/* Swapped for this session: which lift the plan had (the plan itself doesn't change). */}
+                  {swap && (
+                    <p data-swapped className="-mt-3 mb-4 text-xs text-mute">
+                      In place of <span className="text-fg-2">{exName(swap.from)}</span> · this session only
+                    </p>
+                  )}
                   <ul aria-label={`${primaryName} sets`}>
                     {primaryEx.sets.map((s, i) => {
                       const ref = { blockId: primaryBlock.id, exIdx: 0, setId: s.id };
@@ -2220,6 +2339,25 @@ export function TrainScreen() {
       </Sheet>
 
       <MaxSheet key={maxFor?.id ?? "none"} exercise={maxFor} open={!!maxFor} onClose={() => setMaxFor(null)} />
+
+      <SwapLiftSheet
+        open={swapOpen && !!primaryBlock && !isPreview}
+        onClose={() => {
+          setSwapOpen(false);
+          focusWhenReady(mainControl("swap"));
+        }}
+        current={primaryName}
+        dayLabel={session.label}
+        back={swapOffer?.back != null ? { id: swapOffer.back, name: exName(swapOffer.back) } : null}
+        options={(swapOffer?.choices ?? []).map((c) => ({
+          id: c.exerciseId,
+          name: exName(c.exerciseId),
+          days: c.days.map((d) => WEEKDAY_SHORT[d]).join(", "),
+          noMax: !c.hasMax,
+        }))}
+        blocked={swapRefusal(swapNow)}
+        onPick={(id) => swapTo(id)}
+      />
 
       <EditExerciseSheet
         exercise={editingExercise ? (exById(editingExercise.id) ?? null) : null}

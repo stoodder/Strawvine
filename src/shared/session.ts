@@ -291,15 +291,16 @@ export function setsForAddedExercise(
  * from, and the program context — the part of `buildSession` that depends only on settings,
  * exercises and maxes.
  */
-function plannedPrimary(date: ISODate, ctx: Omit<BuildContext, "sessions">) {
+function plannedPrimary(date: ISODate, ctx: Omit<BuildContext, "sessions">, liftId?: number) {
   const { program } = ctx.settings;
   const day = programDayFor(program, date);
   const pos = cyclePosition(program, date);
   let block: Block | null = null;
   let primaryMaxLb: number | null = null;
-  if (day?.primaryExerciseId != null && pos) {
-    const ex = ctx.exercises.find((e) => e.id === day.primaryExerciseId);
-    const max = currentMax(ctx.maxEntries, day.primaryExerciseId);
+  const lift = day ? (liftId ?? day.primaryExerciseId) : null;
+  if (day && lift != null && pos) {
+    const ex = ctx.exercises.find((e) => e.id === lift);
+    const max = currentMax(ctx.maxEntries, lift);
     if (ex && max) {
       primaryMaxLb = max.valueLb;
       const planned = mainLiftSets(program, max.valueLb, pos.week, { progressionDay: day.progression });
@@ -317,6 +318,56 @@ function plannedPrimary(date: ISODate, ctx: Omit<BuildContext, "sessions">) {
     }
   }
   return { day, pos, block, primaryMaxLb };
+}
+
+/**
+ * The main-lift block (fresh ids) `date`'s program day prescribes with `liftId` as its main lift —
+ * by default the day's own — and the max it was computed from: that lift's current max, this cycle
+ * week's scheme and deload, and the day's AMRAP setting (§6.2, §6.3). Null when nothing can be
+ * calculated (no program day or cycle position, an unknown lift, no max).
+ */
+export function mainLiftBlock(
+  date: ISODate,
+  ctx: Omit<BuildContext, "sessions">,
+  liftId?: number,
+): { block: Block; primaryMaxLb: number } | null {
+  const { block, primaryMaxLb } = plannedPrimary(date, ctx, liftId);
+  return block && primaryMaxLb !== null ? { block, primaryMaxLb } : null;
+}
+
+/**
+ * The lift the program prescribed as a session's main lift when the session was built from the
+ * plan — read from its plan signature (`planSig`). Null when it has none (nothing was prescribed,
+ * or it was saved before signatures existed).
+ */
+export function plannedLiftOf(session: Pick<Session, "planSig">): number | null {
+  if (!session.planSig) return null;
+  try {
+    const id = (JSON.parse(session.planSig) as { exerciseId?: unknown } | null)?.exerciseId;
+    return typeof id === "number" ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A session's main lift swapped for that session only: the lift the plan prescribed, and the one done instead. */
+export interface MainLiftSwap {
+  from: number;
+  to: number;
+}
+
+/**
+ * Whether a session's main lift was swapped for that session (SPEC §6.5, "Swap the main lift"):
+ * its main-lift block holds another lift than the one the plan prescribed when the session was
+ * built (`plannedLiftOf`). Nothing else marks a swap — no field is stored — so every build reads
+ * the session as it is: the lift in its main block. A session saved before signatures existed is
+ * never swapped.
+ */
+export function mainLiftSwap(session: Pick<Session, "planSig" | "blocks">): MainLiftSwap | null {
+  const main = session.blocks.find((b) => b.kind === "primary")?.exercises[0];
+  const from = plannedLiftOf(session);
+  if (!main || from === null || main.exerciseId === from) return null;
+  return { from, to: main.exerciseId };
 }
 
 export function buildSession(date: ISODate, ctx: BuildContext): Session {
@@ -466,8 +517,23 @@ export function planSignature(date: ISODate, ctx: Omit<BuildContext, "sessions">
  * saved sets with a fresh plan (`planMatches`).
  */
 export function planChanged(session: Session, ctx: Omit<BuildContext, "sessions">): boolean {
-  if (session.planSig !== undefined) return planSignature(planDateOf(session), ctx) !== session.planSig;
-  return !planMatches(session, ctx);
+  if (session.planSig === undefined) return !planMatches(session, ctx);
+  const now = planSignature(planDateOf(session), ctx);
+  // A swapped main lift isn't the planned lift's loads: only what the plan says about the day
+  // (its lift, week, deload, reps, AMRAP flags) counts. The swapped lift's own max is `maxChanged`'s.
+  if (mainLiftSwap(session)) return withoutLoads(now) !== withoutLoads(session.planSig);
+  return now !== session.planSig;
+}
+
+/** A plan signature without its target weights (null stays null). */
+function withoutLoads(sig: string | null): string | null {
+  if (sig === null) return null;
+  try {
+    const v = JSON.parse(sig) as { sets?: unknown[] };
+    return JSON.stringify({ ...v, sets: (v.sets ?? []).map((x) => (Array.isArray(x) ? [x[0], x[2]] : x)) });
+  } catch {
+    return sig;
+  }
 }
 
 export interface SetCounts {

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MIN_CALORIES, defaultSettings, minCalories } from "../../shared/defaults";
 import { settingsSchema, type Bootstrap, type Session, type SetEntry, type Settings } from "../../shared/schemas";
-import { blankSet } from "../../shared/session";
+import { blankSet, buildSession, mainLiftSwap } from "../../shared/session";
+import { swapMainLift } from "../../shared/swap";
 import {
   ackEntry,
   addOp,
@@ -696,6 +697,86 @@ describe("mergeSession: one main lift", () => {
       ["R", "primary"],
       ["P", "accessory"],
     ]);
+  });
+});
+
+describe("mergeSession: a main lift swapped for one session", () => {
+  const ctx = {
+    settings,
+    exercises: [1, 2, 3].map((id) => ({
+      id,
+      name: `Lift ${id}`,
+      category: "primary" as const,
+      tracksMax: true,
+      measure: "reps" as const,
+      weighted: true,
+      archived: false,
+    })),
+    maxEntries: [2, 3].map((id) => ({
+      id,
+      exerciseId: id,
+      date: "2026-11-01",
+      valueLb: 300 + id,
+      source: "initial" as const,
+      note: null,
+      createdAt: "2026-11-01T00:00:00Z",
+    })),
+    sessions: [],
+  };
+  // Tuesday: Pull, deadlift (2), with a row accessory.
+  const built = buildSession("2026-11-03", ctx);
+  const anc: Session = { ...built, blocks: [...built.blocks, accessory("row", 10, [set("r1"), set("r2")])] };
+  const r = swapMainLift(anc, 3, ctx);
+  const swapped = "session" in r ? r.session : anc;
+  const mainOf = (s: Session) => s.blocks.find((b) => b.kind === "primary")!;
+
+  it("swapped here, the other device logged an accessory and wrote a note: both survive", () => {
+    const server: Session = {
+      ...anc,
+      notes: "short on time",
+      blocks: anc.blocks.map((b) => (b.id === "row" ? accessory("row", 10, [logged("r1"), set("r2")]) : b)),
+    };
+    const m = mergeSession(anc, swapped, server);
+    expect(mainLiftSwap(m)).toEqual({ from: 2, to: 3 });
+    expect(mainOf(m)).toEqual(mainOf(swapped));
+    expect(m.primaryMaxLb).toBe(303);
+    expect(m.notes).toBe("short on time");
+    expect(setsOf(m, "row")[0]!.done).toBe(true);
+    expect(m.blocks.filter((b) => b.kind === "primary")).toHaveLength(1);
+  });
+
+  it("swapped on the other device: kept when this device edits elsewhere", () => {
+    const local: Session = {
+      ...anc,
+      blocks: anc.blocks.map((b) => (b.id === "row" ? accessory("row", 10, [logged("r1"), set("r2")]) : b)),
+    };
+    const m = mergeSession(anc, local, swapped);
+    expect(mainLiftSwap(m)).toEqual({ from: 2, to: 3 });
+    expect(setsOf(m, "row")[0]!.done).toBe(true);
+  });
+
+  it("swapped here while the other device logged the planned lift: the logged work stays the main lift", () => {
+    const p = mainOf(anc);
+    const server: Session = {
+      ...anc,
+      blocks: anc.blocks.map((b) =>
+        b === p
+          ? {
+              ...p,
+              exercises: [
+                {
+                  ...p.exercises[0]!,
+                  sets: p.exercises[0]!.sets.map((x, i) => (i ? x : { ...x, done: true, reps: x.targetReps, weight: x.targetWeight })),
+                },
+              ],
+            }
+          : b,
+      ),
+    };
+    const m = mergeSession(anc, swapped, server);
+    expect(m.blocks.filter((b) => b.kind === "primary")).toHaveLength(1);
+    expect(mainOf(m).exercises[0]!.exerciseId).toBe(2);
+    expect(mainOf(m).exercises[0]!.sets[0]!.done).toBe(true);
   });
 });
 

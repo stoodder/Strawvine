@@ -454,6 +454,11 @@ optional note.
   (e.g. the carry day).
 - Each rep beyond target adds **+1 lb** to the max (6 prescribed, 9 achieved → +3 lb).
 - Applies **immediately**, as a one-tap suggestion the user confirms.
+- It is the lift's, whatever day it was done on: the AMRAP of a lift **swapped in for one session** (§6.5, "Swap the
+  main lift") raises that lift's max and counts in its rep PRs exactly like a session of its own day. Progression is
+  per AMRAP set, never per week: a lift done twice in a week (swapped in on Tuesday, then on its own Wednesday)
+  progresses from each set it beat — the second session is built on the max the first one raised (a session saved
+  before the raise offers "Recalculate from new max", §6.5) — and neither is counted twice.
 
 ### 6.4 Weekly layout (current)
 
@@ -691,6 +696,57 @@ accessory increment, rest timers — are one global set, not part of a plan.
 - **Skip the main lift** (e.g. an injury): the main-lift block is marked skipped for that session. Its sets count toward
   nothing (set counts, volume, AMRAP PRs — not even as a baseline), so the session can be finished without being asked
   about unlogged sets. Skipping isn't a plan change.
+- **Swap the main lift** (equipment, timing, a holiday week): one session's main lift can be another lift while the
+  day stays the day. From the main lift's header (**swap**, beside skip; its icon alone under 360 px, so the name, swap
+  and "skip rest" keep one line) a sheet, "Swap the main lift", offers — after "For this session only: Pull keeps its
+  accessories, and the plan doesn't change." — the **planned lift back** once swapped ("Back to the planned lift ·
+  Deadlift in place of Back squat"), then **this program's main lifts** (of the plan the session's program day reads,
+  Monday first, each with its days: "Back squat · Wed", "Bench press · Mon, Thu"), then the **other lifts** a day could
+  have as its main lift (max-tracked, not archived — the weekly layout's choice), by name. The lift the session holds
+  isn't listed; one without a max is listed but can't be picked ("Strict press · Thu · no max yet").
+  Picking one swaps at once (`swapMainLift`, `src/shared/swap.ts`):
+  - the main lift's sets are calculated exactly as the plan's would be (§6.2), from **the chosen lift's max** with this
+    cycle week's scheme and deload and **this day's AMRAP setting** (`mainLiftBlock`, the function the plan's own
+    main lift comes from). It is a new main-lift block (fresh ids; the old one goes, as on a recalculation), and
+    `primaryMaxLb` is the chosen lift's max;
+  - the day's **label, accessories, notes, week and deload stay** as they are. Under the lift's name a quiet line says
+    "In place of Deadlift · this session only";
+  - only while **no main-lift set is logged** (and the session isn't finished, the main lift isn't skipped): the
+    control stays there, and the sheet says why in place of the list ("A set of Deadlift is logged. Logged sets are
+    never thrown away to swap: unlog them first, or add the other lift as an exercise."). Nothing logged is ever
+    discarded by a swap;
+  - a toast offers **Undo** ("Back squat in place of Deadlift today"). It works on the session as it is when tapped
+    (another device may have saved since) and puts back only what the swap changed — the main block, `primaryMaxLb`,
+    `planSig` — while the main block is still the swapped one with nothing logged ("Can't undo: a set of Back squat is
+    logged" otherwise). A swap that was the only change to an unsaved day leaves the plan's live draft again;
+  - **"Back to the planned lift"** calculates the day's planned lift as the plan has it now, and the session follows
+    the plan again (its plan signature too). "Reset to plan" still drops the whole session.
+  - **Stored as nothing new.** A swap is read from the session itself: its main block holds another lift than the one
+    its plan signature (`planSig`, written when the session was built from the plan) names — `mainLiftSwap` in
+    `src/shared/session.ts`. No field marks it, because the data that tells is data every build already keeps and
+    merges: a build that doesn't know swaps (an older cached app) reads and saves the session as an ordinary one — it
+    shows the swapped lift with its sets, logs into it, applies its AMRAP to that lift's max (the max of the lift in
+    the block), merges it per set, and its plan-changed check, which compares the unchanged signature, sees no plan
+    change. (Only a change of the planned lift's max or of the day's plan flags it there, and that build's Recalculate
+    — offered only while nothing is logged — goes back to the planned lift: nothing logged is ever lost.) A separate
+    flag could come to disagree with the block (such a build rebuilds the block and would carry a stale flag along);
+    the block itself can't.
+    Sessions saved before signatures existed (or with none: seeded, imported, built before the lift had a max) are
+    never read as swapped; old sessions parse, read and save exactly as before.
+  - How it reads elsewhere: the **plan-changed check** (below) never takes a swap for a plan change and never rebuilds
+    over it; **Recalculate** of a swapped session (a new max of the swapped lift, a change of the day's plan) keeps the
+    swapped lift, and so does Restore of skipped main sets; the checklist's **lift** item is planned and done as usual
+    (by the day, not by which lift); **PRs, maxes and insights** go by exercise, so the swapped lift's AMRAP is that
+    lift's (§6.3); **pre-fill** of the next same program day takes the day's accessories from the swapped session as
+    from any, and its main lift from the plan — the swap is one session's only; the weekly check-in, Progress,
+    achievements and cycle completions count the session as the day's.
+  - **Swapping between days** is offered, never stored: when a day's planned main lift was already done earlier in
+    the same cycle week in place of another day's (a swapped session with a set of it logged, not skipped), and the
+    day has no session of its own, Train shows one quiet line under the day's title: "Back squat was done Tue. **Do
+    Deadlift today?**" (on a past day "…instead?") — the other day's planned lift, unless it was done this week too or
+    has no max (`swapSuggestion`). Tapping it saves the day with that lift swapped in (with the same Undo). It is
+    derived from the saved sessions on every read and goes once the day has a session. A preview of the day shows
+    only "Back squat was done Tue." (a preview never saves); the preview itself shows the plan.
 - **Do this session today:** any upcoming day's plan (e.g. tomorrow's, for travel or a rest-day Sunday) can be done
   today: its main lift for that program day and week plus the accessories carried into it, under its own label, saved
   under today's date with `plannedFor` = the source day. Pre-fill, the plan-changed check and recalculation follow the
@@ -702,9 +758,11 @@ accessory increment, rest timers — are one global set, not part of a plan.
 - **Next session:** the next program day after today (looking 14 days ahead), with its label, main lift and week.
 - **Plan changed:** a saved session nothing has been logged in yet is flagged when the program now prescribes something
   different for its main lift than when the session was built (lift, week, deload, reps, AMRAP flags, target weights —
-  stored with the session as its plan signature), with a one-tap recalculation. The athlete's own edits to targets never
-  read as a plan change. (Sessions saved before signatures existed compare their sets with a fresh plan instead; added
-  back-off sets are ignored.)
+  stored with the session as its plan signature), with a one-tap recalculation. For a session whose main lift was
+  swapped, the planned lift's target weights don't count (its max says nothing about the swapped lift's, whose own
+  max change is "Recalculate from new max"): only the day's lift, week, deload, reps and AMRAP flags do. The athlete's
+  own edits to targets never read as a plan change. (Sessions saved before signatures existed compare their sets with a
+  fresh plan instead; added back-off sets are ignored.)
 - **Progression hint:** when every logged set of a weighted accessory's last (non-skipped, non-deload) performance with a
   load met that session's target — reps, seconds or meters — with a load, the next session suggests that load + **5 lb**
   (editable; 0 turns hints off): "All reps / Full duration / Full distance at 50 lb on Nov 2 → +5 lb". When a set fell
@@ -787,7 +845,8 @@ there is one), the title in the same size and at the same height as Today's and 
 ## 7. Gamification & feedback
 
 - **Close the day**: today's checklist (morning check-in — done by the weigh-in alone — nutrition, steps target,
-  zone 2, metcon, lift as scheduled or moved — see "Do this session today") — closing every item extends the streak.
+  zone 2, metcon, lift as scheduled or moved — see "Do this session today"; a session whose main lift was swapped
+  closes its day's lift like any other) — closing every item extends the streak.
   Every day's checklist is the one of the plan in force on that day (§6.4): its steps target, metcon and Zone 2 days,
   lifting days. A new cycle with other targets or days never changes whether an earlier day closed.
 - Today's header places the day in the program in words (`cycleLabel`, `src/shared/program.ts`): "Week 2 of 5",
@@ -903,6 +962,9 @@ there is one), the title in the same size and at the same height as Today's and 
   - order (a superset's members, the workout's blocks) follows the device that reordered: this device's order when it
     changed it, else the server's — so a reorder on one device and logging on the other both survive. Something only one
     device added goes after what precedes it there — or, when it was last there, stays last;
+  - a main lift swapped for the session (§6.5) is a new main block under the same plan signature: merged with the other
+    device's edits elsewhere it stays swapped; against the planned lift logged on the other device meanwhile (two main
+    lifts, both of the same plan) the one with logged sets is kept — the logged work, never the swap, wins;
   - if the merge leaves two main lifts (a session rebuilt on one device), the one matching the session's plan is kept and
     the other's logged sets are folded onto it (same lift) or kept as an accessory block (different lift) — logged work
     is never dropped;
