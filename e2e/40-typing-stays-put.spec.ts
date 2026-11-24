@@ -261,6 +261,26 @@ async function keyboard(page: Page, kb: { height: number; offsetTop: number } | 
   await settled(page);
 }
 
+/**
+ * Fixed elements (the nav, the dock) measured as WebKit may measure them while the keyboard is up
+ * and the visual viewport is panned: shifted up by the pan, while `innerHeight` stays the whole
+ * window — two numbers that no longer describe the same screen. Nothing the app keeps (the
+ * scroll padding above all) may follow them.
+ */
+async function webkitFixedRects(page: Page) {
+  await page.evaluate(() => {
+    const rect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      const r = rect.call(this);
+      if (!this.matches('nav[aria-label="Primary"], [data-dock]')) return r;
+      return new DOMRect(r.x, r.y - (window.visualViewport?.offsetTop ?? 0), r.width, r.height);
+    };
+  });
+}
+
+/** html's scroll padding at the bottom, in px: how far above the bottom edge the browser brings a caret or a focused control. */
+const scrollPaddingBottom = (page: Page) => page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).scrollPaddingBottom));
+
 interface InSheet {
   /** The field against what is visible above the keyboard. */
   top: number;
@@ -1126,6 +1146,105 @@ for (const viewport of [
       await journal.blur();
       await expect(nutrition.locator(".truncate")).toHaveText(["Daily totals", "Had caffeine"]);
       await page.unroute("**/api/bootstrap");
+    });
+
+    // The iPhone report: focus a field, start typing, and the page scrolls the field off the
+    // screen. The browser brings the caret clear of html's scroll-padding-bottom at a keystroke;
+    // that padding was `innerHeight - the dock's top`, which with WebKit's keyboard geometry came
+    // out as tall as everything visible. What this proves: with the keyboard up the padding is a
+    // few px whatever the fixed elements measure, and neither the first keystroke, nor the next
+    // field, nor a slow save's sync pill arriving in the dock scrolls the page or takes the field
+    // out of what is visible. What it doesn't: Safari's own caret reveal (only an iPhone has it).
+    test("Today: with the keyboard up, the first keystroke in a macro field scrolls nothing — nor does the next field's save or the sync pill", async ({
+      page,
+    }) => {
+      await onboardedOn(page, MONDAY);
+      const res = await page.request.put(`/api/days/${MONDAY_ISO}`, {
+        data: { weightLb: 199, calories: 2140, proteinG: 200, carbsG: 200, fatG: 60 },
+      });
+      expect(res.ok()).toBe(true);
+      await page.reload();
+      await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+      await withoutScrollAnchoring(page);
+      await webkitFixedRects(page);
+      const roomy = await scrollPaddingBottom(page);
+      const nav = await page.getByRole("navigation", { name: "Primary" }).evaluate((el) => el.getBoundingClientRect().height);
+      // No keyboard: the padding clears the nav and the (empty) dock — for Tab and a hardware keyboard.
+      expect(roomy).toBeGreaterThanOrEqual(nav);
+
+      await page.getByRole("button", { name: /^Nutrition/ }).tap();
+      const editor = page.getByRole("group", { name: "Nutrition details" });
+      const field = (name: string) => editor.getByRole("textbox", { name, exact: true });
+      await expect(field("Carbs")).toBeVisible();
+      await expect.poll(async () => (await place(field("Carbs"))).top, { intervals: [150] }).toBe((await place(field("Carbs"))).top);
+      await page.waitForTimeout(400);
+      await field("Carbs").tap();
+      await expect(field("Carbs")).toBeFocused();
+      await field("Carbs").press("ControlOrMeta+a");
+
+      // The keyboard: the visible area above it, panned down to the field, which sits a little
+      // above the keyboard (where Safari leaves a focused field).
+      const up = viewport.height - (viewport.height > 700 ? 336 : 260);
+      const pan = viewport.height > 700 ? 200 : 150;
+      const fieldTop = pan + up - 110;
+      await page.evaluate((by) => window.scrollBy(0, by), Math.round((await place(field("Carbs"))).top - fieldTop));
+      await settled(page);
+      await keyboard(page, { height: up, offsetTop: pan });
+      const padding = await scrollPaddingBottom(page);
+      expect(padding, "the scroll padding with the keyboard up").toBeLessThanOrEqual(16);
+      await watchInput(page);
+
+      /** The field inside the visible area (between the pan and the keyboard's top), and the page where it was. */
+      const typeInto = async (name: string, value: string, perKey: () => Promise<void> = async () => {}) => {
+        let before = await place(field(name));
+        for (const ch of value) {
+          await press(page, ch);
+          const [at] = await takeInputs(page);
+          expect(at!.scrollY, `${name}: scroll position in the input event of "${ch}"`).toBe(before.scrollY);
+          await settled(page);
+          const after = await place(field(name));
+          expect(after.scrollY, `${name}: scroll position after "${ch}"`).toBe(before.scrollY);
+          expect(Math.abs(after.top - before.top), `${name}: the field's top after "${ch}"`).toBeLessThanOrEqual(0.5);
+          expect(after.top, `${name}: below the top of what is visible after "${ch}"`).toBeGreaterThanOrEqual(pan);
+          expect(after.bottom, `${name}: above the keyboard after "${ch}"`).toBeLessThanOrEqual(pan + up);
+          expect(after.focused, `${name}: focus after "${ch}"`).toBe(true);
+          expect(await scrollPaddingBottom(page), `${name}: the scroll padding after "${ch}"`).toBe(padding);
+          await perKey();
+          before = after;
+        }
+      };
+      await typeInto("Carbs", "150");
+
+      // From here the server is slow: the save made as Carbs is left shows "Syncing…" in the dock
+      // while Fat is typed into, the keyboard still up.
+      await page.route("**/api/**", async (route) => {
+        if (route.request().method() !== "GET") await new Promise((r) => setTimeout(r, 2600));
+        await route.continue();
+      });
+      await field("Fat").tap();
+      await expect(field("Fat")).toBeFocused();
+      await field("Fat").press("ControlOrMeta+a");
+      await settled(page);
+      await takeInputs(page);
+      const pill = page.getByRole("region", { name: "Notifications" }).getByText("Syncing…", { exact: true }).last();
+      let sawPill = false;
+      await typeInto("Fat", "7070707070707", async () => {
+        await page.waitForTimeout(150);
+        sawPill ||= await pill.isVisible();
+      });
+      expect(sawPill, "the sync pill showed while typing").toBe(true);
+
+      await keyboard(page, null);
+      await page.unroute("**/api/**");
+      await field("Fat").press("ControlOrMeta+a");
+      await press(page, "7");
+      await press(page, "0");
+      await field("Fat").blur();
+      // The keyboard gone, nothing focused: the padding clears the nav and the dock again.
+      await expect.poll(() => scrollPaddingBottom(page)).toBe(roomy);
+      await expectSynced(page);
+      const saved = (await serverData(page)).days.find((d) => d.date === MONDAY_ISO)!;
+      expect([saved.carbsG, saved.fatG]).toEqual([150, 70]);
     });
   });
 }

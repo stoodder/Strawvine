@@ -126,7 +126,8 @@
 
 @layer base {
   html {
-    /* Keep keyboard focus clear of the fixed nav + dock (Dock.tsx sets --dock-clearance). */
+    /* Keep keyboard focus clear of the fixed nav + dock (Dock.tsx `dockClearance` sets --dock-clearance:
+       their heights, capped; a few px while an on-screen keyboard is up and covers them). */
     scroll-padding-bottom: var(--dock-clearance, calc(env(safe-area-inset-bottom) + 7rem));
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
