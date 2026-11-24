@@ -656,6 +656,8 @@ export function TrainScreen() {
         return "That lift has no max yet: set one and its working sets calculate themselves.";
       case "not-planned":
         return "Nothing is calculated for this day: the program isn't running on it.";
+      case "unknown":
+        return "That lift isn't in the exercise library any more.";
       default:
         return "There's no main lift to swap.";
     }

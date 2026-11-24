@@ -233,6 +233,10 @@ describe("how a swapped session reads", () => {
   it("stores nothing new: it parses and round-trips as any session", () => {
     expect(sessionSchema.parse(s)).toEqual(s);
     expect(Object.keys(s).sort()).toEqual(Object.keys(tue).sort());
+    // What a build that doesn't know swaps checks: the signature is still the plan's (no plan change),
+    // and the max the session was built from is the swapped lift's own (no "new max" either).
+    expect(planSignature(TUE, ctx)).toBe(s.planSig);
+    expect(s.primaryMaxLb).toBe(currentMax(maxEntries, ids.backSquat)!.valueLb);
   });
 
   it("an old session (no signature) or one built before a lift had a max is never read as swapped", () => {
