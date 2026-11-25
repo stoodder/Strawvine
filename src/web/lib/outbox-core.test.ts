@@ -118,6 +118,27 @@ describe("outbox", () => {
     expect(s.entries.at(-1)!.op).toMatchObject({ id: 42 });
   });
 
+  it("remaps the lift a session's plan signature names, so a session built from an offline-created lift never reads as swapped", () => {
+    const sig = JSON.stringify({ exerciseId: -1, week: 0, deload: false, sets: [[5, 100, false]] });
+    const other = JSON.stringify({ exerciseId: 7, week: 0, deload: false, sets: [] });
+    let s = addOp(
+      emptyOutbox(),
+      { kind: "createExercise", tempId: -1, name: "SSB squat", category: "primary", measure: "reps", tracksMax: true },
+      null,
+    );
+    s = addOp(s, { kind: "session", date: "2026-01-01", doc: { ...session("2026-01-01", -1), planSig: sig } }, null);
+    s = addOp(s, { kind: "session", date: "2026-01-02", doc: { ...session("2026-01-02", 7), planSig: other } }, null);
+    s = addOp(s, { kind: "session", date: "2026-01-03", doc: { ...session("2026-01-03", 7), planSig: null } }, null);
+    const before = s.entries.slice(2);
+    s = ackEntry(s, s.entries[0]!.seq, { id: 42, name: "SSB squat", category: "primary", measure: "reps", tracksMax: true, archived: false });
+    const docs = s.entries.slice(1).map((e) => (e.op as { doc: Session }).doc);
+    expect(JSON.parse(docs[0]!.planSig!)).toEqual({ exerciseId: 42, week: 0, deload: false, sets: [[5, 100, false]] });
+    expect(docs[0]!.blocks[0]!.exercises[0]!.exerciseId).toBe(42);
+    // Untouched when it names no temp id (or there is none).
+    expect(s.entries.slice(2).map((e) => e.op)).toEqual(before.map((e) => e.op));
+    expect(docs[1]!.planSig).toBe(other);
+  });
+
   it("discarding a failed create drops what depends on it", () => {
     let s = addOp(
       emptyOutbox(),

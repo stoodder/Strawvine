@@ -778,6 +778,92 @@ describe("mergeSession: a main lift swapped for one session", () => {
     expect(mainOf(m).exercises[0]!.exerciseId).toBe(2);
     expect(mainOf(m).exercises[0]!.sets[0]!.done).toBe(true);
   });
+
+  // Built on both devices (no common ancestor): the two main lifts never become one block.
+  const TUE = "2026-11-03";
+  const logFirstMain = (s: Session): Session => ({
+    ...s,
+    blocks: s.blocks.map((b) =>
+      b.kind !== "primary"
+        ? b
+        : {
+            ...b,
+            exercises: b.exercises.map((e) => ({
+              ...e,
+              sets: e.sets.map((x, i) => (i ? x : { ...x, done: true, reps: x.targetReps, weight: x.targetWeight })),
+            })),
+          },
+    ),
+  });
+  const swapOf = (s: Session, to: number) => {
+    const res = swapMainLift(s, to, ctx);
+    if (!("session" in res)) throw new Error(res.refused);
+    return res.session;
+  };
+  const mains = (s: Session) => s.blocks.filter((b) => b.kind === "primary");
+  const doneIn = (s: Session) => s.blocks.flatMap((b) => b.exercises.flatMap((e) => e.sets.filter((x) => x.done)));
+
+  it("swapped here (nothing logged), the other device saved its own draft of the day: one main lift, the swapped one, alone", () => {
+    const local = swapOf(buildSession(TUE, ctx), 3);
+    const server = buildSession(TUE, ctx); // its own ids, the planned lift
+    const m = fitSession(mergeSession(null, local, server)).doc;
+    expect(mains(m)).toHaveLength(1);
+    expect(mains(m)[0]!.exercises).toHaveLength(1);
+    expect(mainLiftSwap(m)).toEqual({ from: 2, to: 3 });
+    expect(m.primaryMaxLb).toBe(303);
+    expect(m.blocks.filter((b) => b.kind === "accessory").every((b) => b.exercises.every((e) => e.exerciseId !== 2))).toBe(true);
+  });
+
+  it("…the other way round (swapped there): a tie keeps this device's main lift", () => {
+    const local = buildSession(TUE, ctx);
+    const server = swapOf(buildSession(TUE, ctx), 3);
+    const m = fitSession(mergeSession(null, local, server)).doc;
+    expect(mains(m)).toHaveLength(1);
+    expect(mains(m)[0]!.exercises.map((e) => e.exerciseId)).toEqual([2]);
+    expect(mainLiftSwap(m)).toBeNull();
+    expect(m.primaryMaxLb).toBe(302);
+  });
+
+  it("swapped here, the other device logged the planned lift on its own draft: the logged lift is the main lift, nothing lost", () => {
+    const local = swapOf(buildSession(TUE, ctx), 3);
+    const server = logFirstMain(buildSession(TUE, ctx));
+    const m = fitSession(mergeSession(null, local, server)).doc;
+    expect(mains(m)).toHaveLength(1);
+    expect(mains(m)[0]!.exercises.map((e) => e.exerciseId)).toEqual([2]);
+    expect(doneIn(m)).toHaveLength(1);
+    expect(m.primaryMaxLb).toBe(302);
+  });
+
+  it("swapped and logged here, the other device saved its own unlogged draft: the swapped lift and its set stay the main lift", () => {
+    const local = logFirstMain(swapOf(buildSession(TUE, ctx), 3));
+    const server = buildSession(TUE, ctx);
+    const m = fitSession(mergeSession(null, local, server)).doc;
+    expect(mains(m)).toHaveLength(1);
+    expect(mains(m)[0]!.exercises.map((e) => [e.exerciseId, e.sets[0]!.done])).toEqual([[3, true]]);
+    expect(mainLiftSwap(m)).toEqual({ from: 2, to: 3 });
+  });
+
+  it("swapped and logged here, a stale device recalculated the planned lift from a new max: the logged swap stays the main lift", () => {
+    const base = buildSession(TUE, ctx);
+    const local = logFirstMain(swapOf(base, 3));
+    const ctx2 = { ...ctx, maxEntries: [...ctx.maxEntries, { ...ctx.maxEntries[0]!, id: 99, valueLb: 420, date: "2026-11-02" }] };
+    const re = buildSession(TUE, ctx2);
+    const server: Session = {
+      ...base,
+      planSig: re.planSig,
+      primaryMaxLb: re.primaryMaxLb,
+      blocks: [mains(re)[0]!, ...base.blocks.filter((b) => b.kind !== "primary")],
+    };
+    const m = fitSession(mergeSession(base, local, server)).doc;
+    expect(mains(m)).toHaveLength(1);
+    expect(mains(m)[0]!.exercises.map((e) => [e.exerciseId, e.sets[0]!.done])).toEqual([[3, true]]);
+    // The plan as it is now (the new deadlift max), with squat done in its place.
+    expect(m.planSig).toBe(re.planSig);
+    expect(mainLiftSwap(m)).toEqual({ from: 2, to: 3 });
+    expect(m.primaryMaxLb).toBe(303);
+    expect(doneIn(m)).toHaveLength(1);
+    expect(m.blocks.some((b) => b.exercises.some((e) => e.exerciseId === 2))).toBe(false);
+  });
 });
 
 describe("mergeSettings: lists", () => {

@@ -295,7 +295,24 @@ export function ensureIdempotencyKeys(s: OutboxState): OutboxState {
 const isExerciseRef = (key: string) => key === "exerciseId" || key.endsWith("ExerciseId");
 const SEEN_MAX = /^max-(-\d+)$/;
 
-/** Deep-maps every exercise reference (`exerciseId`, `primaryExerciseId`, …), keeping identity when nothing changes. */
+/**
+ * A session's plan signature (a JSON string naming the planned lift, `planSignature`) with its lift
+ * mapped: a session built from a lift created offline must not read as swapped (SPEC §6.5,
+ * `mainLiftSwap`) once that lift has its real id. The same string when nothing changes.
+ */
+function mapPlanSig(sig: string, f: (id: number) => number): string {
+  let v: unknown;
+  try {
+    v = JSON.parse(sig);
+  } catch {
+    return sig;
+  }
+  const id = v && typeof v === "object" ? (v as { exerciseId?: unknown }).exerciseId : undefined;
+  if (typeof id !== "number" || f(id) === id) return sig;
+  return JSON.stringify({ ...(v as object), exerciseId: f(id) });
+}
+
+/** Deep-maps every exercise reference (`exerciseId`, `primaryExerciseId`, a plan signature's …), keeping identity when nothing changes. */
 function mapRefs(v: unknown, f: (id: number) => number): unknown {
   if (Array.isArray(v)) {
     let out: unknown[] | null = null;
@@ -308,7 +325,12 @@ function mapRefs(v: unknown, f: (id: number) => number): unknown {
   if (v && typeof v === "object") {
     let out: Record<string, unknown> | null = null;
     for (const [k, x] of Object.entries(v)) {
-      const y = isExerciseRef(k) && typeof x === "number" ? f(x) : mapRefs(x, f);
+      const y =
+        isExerciseRef(k) && typeof x === "number"
+          ? f(x)
+          : k === "planSig" && typeof x === "string"
+            ? mapPlanSig(x, f)
+            : mapRefs(x, f);
       if (y !== x) (out ??= { ...(v as Record<string, unknown>) })[k] = y;
     }
     return out ?? v;

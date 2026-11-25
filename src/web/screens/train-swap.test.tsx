@@ -2,7 +2,9 @@
  * Swapping the main lift for one session on Train, against a (mocked, reactive) store: the sheet
  * from the main lift's "swap", the swapped lift's sets with the day's accessories kept, the Undo
  * (on the session as it is then), "Back to the planned lift", the refusal once a set is logged, and
- * the next day's derived "…was done Tue. Do Deadlift today?" line.
+ * the next day's derived "…was done Tue. Do Deadlift today?" line (held while a field is typed in).
+ * A day whose plan has no main lift (Friday) takes one ("Add a main lift") and loses it again; a
+ * lift without a max gets one on the way; "Another exercise" skips the main lift and adds one.
  */
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -56,7 +58,12 @@ vi.mock("../lib/store", async () => {
     useSaveSession: () => save,
     useDeleteSession: () => remove,
     useSaveSettings: () => vi.fn(),
-    useAddMax: () => vi.fn(),
+    // A max saved shows at once (as the real store's local entry does).
+    useAddMax: () => async (input: Omit<MaxEntry, "id" | "createdAt" | "note"> & { note?: string | null }) => {
+      const entry: MaxEntry = { id: -1 - store.data.maxEntries.length, createdAt: "2026-11-17T10:00:00Z", ...input, note: input.note ?? null };
+      store.set({ ...store.data, maxEntries: [...store.data.maxEntries, entry] });
+      return entry;
+    },
     useDeleteMax: () => vi.fn(),
     useCreateExercise: () => vi.fn(),
     useEditExercise: () => vi.fn(),
@@ -173,7 +180,7 @@ describe("swapping the main lift on Train", () => {
         .getAllByRole("button")
         .filter((b) => b.hasAttribute("data-swap-to"))
         .map((b) => b.getAttribute("aria-label")),
-    ).toEqual(["Bench press · Mon", "Back squat · Wed", "Strict press · Thu", "Front squat · no max yet"]);
+    ).toEqual(["Bench press · Mon", "Back squat · Wed", "Strict press · Thu", "Front squat · no max yet: set it first"]);
     await userEvent.click(sheet().getByRole("button", { name: "Back squat · Wed" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Swap the main lift" })).toBeNull());
@@ -267,6 +274,31 @@ describe("swapping the main lift on Train", () => {
     expect(document.querySelector("[data-swap-suggestion]")).toBeNull();
   });
 
+  it("Wednesday's line holds while the notes are typed in (the day saves under it), inert, and goes after", async () => {
+    renderTrain();
+    await userEvent.click(screen.getByRole("button", { name: "Swap Deadlift for another lift" }));
+    await userEvent.click(sheet().getByRole("button", { name: "Back squat · Wed" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Back squat set 1: / }));
+    act(() => {
+      store.today = WED;
+      store.set({ ...store.data });
+    });
+    reload();
+    renderTrain(`/train/${WED}`);
+    const line = () => document.querySelector("[data-swap-suggestion]");
+    expect(line()!.textContent).toBe("Back squat was done Tue. Do Deadlift today?");
+    const notes = screen.getByRole("textbox", { name: "Session notes" });
+    await userEvent.click(notes);
+    await userEvent.type(notes, "hotel gym");
+    await waitFor(() => expect(saved(WED)?.notes).toBe("hotel gym"));
+    // The day has a session now: the same line, nothing to tap.
+    expect(line()!.textContent).toBe("Back squat was done Tue. Do Deadlift today?");
+    expect(within(line() as HTMLElement).queryByRole("button")).toBeNull();
+    expect(document.activeElement).toBe(notes);
+    act(() => notes.blur());
+    await waitFor(() => expect(line()).toBeNull());
+  });
+
   it("a preview of Wednesday only says what was done", async () => {
     const tue = { ...buildSession(TUE, store.data), date: TUE };
     act(() => store.set({ ...store.data, sessions: [lastPull, tue] }));
@@ -279,5 +311,93 @@ describe("swapping the main lift on Train", () => {
     expect(document.querySelector("[data-swap-suggestion]")!.textContent).toBe("Back squat was done Tue.");
     expect(screen.queryByRole("button", { name: /Do Deadlift/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /^Swap / })).toBeNull();
+  });
+});
+
+describe("adding a main lift to a day whose plan has none", () => {
+  const FRI = "2026-11-20"; // week 3; Thursday's strict press not done
+  const addSheet = () => within(screen.getByRole("dialog", { name: "Add a main lift" }));
+
+  it("Friday: adds Strict press (still to do this week) from its max; remove, and Undo of both", async () => {
+    store.today = FRI;
+    renderTrain();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Carries & pull");
+    expect(screen.queryByRole("button", { name: /^Swap / })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Add one for this session" }));
+    expect(addSheet().getAllByRole("heading", { level: 4 })[0]!.textContent).toBe("Still to do this week");
+    const first = addSheet()
+      .getAllByRole("button")
+      .find((b) => b.hasAttribute("data-swap-to"))!;
+    expect(first.getAttribute("aria-label")).toBe("Strict press · Thu");
+    await userEvent.click(first);
+
+    const s = saved(FRI)!;
+    expect(s.label).toBe("Carries & pull");
+    expect(mainOf(s).exerciseId).toBe(PRESS);
+    const week = cyclePosition(settings.program, FRI)!.week;
+    expect(mainOf(s).sets.map((x) => [x.targetWeight, x.amrap])).toEqual(
+      mainLiftSets(settings.program, 135, week, { progressionDay: false }).map((p) => [p.weightLb, false]),
+    );
+    expect(s.planSig).toBeNull();
+    expect(screen.getByRole("list", { name: "Strict press sets" })).toBeTruthy();
+    expect(document.querySelector("[data-added]")!.textContent).toBe("Added for this session");
+    expect(screen.queryByRole("button", { name: "Add one for this session" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Skip Strict press/ })).toBeNull();
+    expect(lastToast().message).toBe("Strict press added for this session");
+    // Undo: the day as planned again (unsaved).
+    act(() => lastToast().action!.onAction());
+    expect(saved(FRI)).toBeUndefined();
+    expect(screen.queryByRole("list", { name: "Strict press sets" })).toBeNull();
+
+    // Added again, then removed from its header; Undo of the removal puts it back.
+    await userEvent.click(screen.getByRole("button", { name: "Add one for this session" }));
+    await userEvent.click(addSheet().getByRole("button", { name: "Strict press · Thu" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove Strict press from this session" }));
+    expect(lastToast().message).toBe("Strict press removed");
+    expect(saved(FRI) && saved(FRI)!.blocks.some((b) => b.kind === "primary")).toBeFalsy();
+    expect(screen.getByRole("button", { name: "Add one for this session" })).toBeTruthy();
+    act(() => lastToast().action!.onAction());
+    expect(mainOf(saved(FRI)!).exerciseId).toBe(PRESS);
+
+    // A logged set: no remove (the swap's rule).
+    await userEvent.click(screen.getByRole("button", { name: /^Strict press set 1: / }));
+    expect(screen.queryByRole("button", { name: "Remove Strict press from this session" })).toBeNull();
+  });
+
+  it("a lift without a max: its max sheet opens from the row, and saving a max makes the swap", async () => {
+    renderTrain();
+    await userEvent.click(screen.getByRole("button", { name: "Swap Deadlift for another lift" }));
+    await userEvent.click(sheet().getByRole("button", { name: "Front squat · no max yet: set it first" }));
+    const maxSheet = within(screen.getByRole("dialog", { name: "Front squat" }));
+    await userEvent.type(maxSheet.getByRole("textbox", { name: "New max" }), "275");
+    await userEvent.click(maxSheet.getByRole("button", { name: "Set max and swap" }));
+    await waitFor(() => expect(mainOf(saved(TUE)!).exerciseId).toBe(FRONT));
+    const week = cyclePosition(settings.program, TUE)!.week;
+    expect(mainOf(saved(TUE)!).sets.map((x) => x.targetWeight)).toEqual(
+      mainLiftSets(settings.program, 275, week, { progressionDay: true }).map((p) => p.weightLb),
+    );
+    expect(saved(TUE)!.primaryMaxLb).toBe(275);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(lastToast().message).toBe("Front squat in place of Deadlift today");
+    act(() => lastToast().action!.onAction());
+    expect(saved(TUE)).toBeUndefined();
+  });
+
+  it("…closing the max sheet without a max goes back to the swap sheet; nothing swapped", async () => {
+    renderTrain();
+    await userEvent.click(screen.getByRole("button", { name: "Swap Deadlift for another lift" }));
+    await userEvent.click(sheet().getByRole("button", { name: "Front squat · no max yet: set it first" }));
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Swap the main lift" })).toBeTruthy());
+    expect(saved(TUE)).toBeUndefined();
+  });
+
+  it("'Another exercise' skips the main lift and opens Add exercise", async () => {
+    renderTrain();
+    await userEvent.click(screen.getByRole("button", { name: "Swap Deadlift for another lift" }));
+    await userEvent.click(sheet().getByRole("button", { name: /^Another exercise/ }));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Add exercise" })).toBeTruthy());
+    expect(saved(TUE)!.blocks.find((b) => b.kind === "primary")!.skipped).toBe(true);
+    expect(mainOf(saved(TUE)!).exerciseId).toBe(DEADLIFT);
   });
 });

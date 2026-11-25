@@ -18,8 +18,26 @@ function parseMax(text: string): number | null {
   return n !== null && n > 0 && n <= 2000 ? Math.round(n * 10) / 10 : null;
 }
 
-/** View a lift's max history and set a new max by hand. */
-export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | null; open: boolean; onClose: () => void }) {
+/**
+ * View a lift's max history and set a new max by hand. Opened for a next step that needs the max
+ * (a main-lift swap to a lift without one), `submitLabel` names that step and `onSaved` takes it
+ * once the max is saved.
+ */
+export function MaxSheet({
+  exercise,
+  open,
+  onClose,
+  submitLabel,
+  onSaved,
+}: {
+  exercise: Exercise | null;
+  open: boolean;
+  onClose: () => void;
+  /** The submit button's words in place of "Set new max". */
+  submitLabel?: string;
+  /** After a new max (not a correction) is saved. */
+  onSaved?: (entry: MaxEntry) => void;
+}) {
   const { data, today } = useData();
   const addMax = useAddMax();
   const deleteMax = useDeleteMax();
@@ -67,6 +85,7 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
     // Belt and braces: a correction is never a PR moment, whatever the celebration rules say.
     if (isCorrection) markSeen([`max-${saved.id}`]);
     resetForm();
+    if (!isCorrection) onSaved?.(saved);
   };
 
   const restore = (e: MaxEntry) => {
@@ -153,7 +172,7 @@ export function MaxSheet({ exercise, open, onClose }: { exercise: Exercise | nul
             </label>
           )}
           <button type="submit" disabled={!value} className="btn-primary min-w-0 flex-1 whitespace-nowrap">
-            {isCorrection ? "Save correction" : "Set new max"}
+            {isCorrection ? "Save correction" : (submitLabel ?? "Set new max")}
           </button>
         </div>
       </form>

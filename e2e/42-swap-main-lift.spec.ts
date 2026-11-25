@@ -4,8 +4,12 @@
  * (the AMRAP bump goes to the squat) and finished; Wednesday (Legs, back squat) then offers the
  * deadlift ("Back squat was done Tue. Do Deadlift today?"), derived and never stored; next
  * Tuesday is the deadlift again with Tuesday's accessories. Plus the swap's Undo and its refusal
- * once a main-lift set is logged. Onboarded Sunday 2026-10-25 (bench 225); squat 315 and deadlift
- * 405 are added here, with a Pull and a Legs session the week before to carry accessories from.
+ * once a main-lift set is logged. Wednesday's line holds while a note is typed (the field doesn't
+ * move). A lift without a max gets one on the way ("Set max and swap"); "Another exercise" skips the
+ * main lift and adds one. Friday of the deload week (Carries & pull, no main lift) takes Thursday's
+ * Strict press, from its max. At 320 px a long name gives way to "swap" and "skip rest". Onboarded
+ * Sunday 2026-10-25 (bench 225); squat 315 and deadlift 405 are added here, with a Pull and a Legs
+ * session the week before to carry accessories from.
  */
 import type { Page } from "@playwright/test";
 import type { Bootstrap, Session } from "../src/shared/schemas";
@@ -14,15 +18,20 @@ import { expect, expectSynced, notifications, onboardedOn, serverData, test, toa
 const TUE = "2026-10-27";
 const WED = "2026-10-28";
 const NEXT_TUE = "2026-11-03";
+/** Friday of week 5, the deload (Thanksgiving week): Carries & pull, no main lift planned. */
+const DELOAD_FRI = "2026-11-27";
 const at = (iso: string) => new Date(`${iso}T10:00:00`);
+
+/** A call to the app's API as the signed-in page. */
+async function callApi(page: Page, method: string, path: string, body?: unknown) {
+  const res = await page.request.fetch(path, { method, ...(body !== undefined ? { data: body } : {}) });
+  expect(res.ok(), `${method} ${path} → ${res.status()} ${await res.text()}`).toBe(true);
+  return res.status() === 204 ? null : res.json();
+}
 
 /** Squat and deadlift maxes; a barbell row on last week's Pull, a walking lunge on its Legs. */
 async function seed(page: Page) {
-  const call = async (method: string, path: string, body?: unknown) => {
-    const res = await page.request.fetch(path, { method, ...(body !== undefined ? { data: body } : {}) });
-    expect(res.ok(), `${method} ${path} → ${res.status()} ${await res.text()}`).toBe(true);
-    return res.status() === 204 ? null : res.json();
-  };
+  const call = (method: string, path: string, body?: unknown) => callApi(page, method, path, body);
   const boot = (await call("GET", "/api/bootstrap")) as Bootstrap;
   const id = (name: string) => boot.exercises.find((e) => e.name === name)!.id;
   await call("POST", `/api/exercises/${id("Back squat")}/maxes`, { date: "2026-10-25", valueLb: 315, source: "manual", note: null });
@@ -112,8 +121,8 @@ test("Tuesday's deadlift swapped for the squat: Undo, then refused once a squat 
   await expect(sheet.locator("[data-swap-to]")).toHaveText([
     /^Bench press\s*Mon$/,
     /^Back squat\s*Wed$/,
-    /^Strict press\s*Thu · no max yet$/,
-    /^Front squat\s*no max yet$/,
+    /^Strict press\s*Thu · set max$/,
+    /^Front squat\s*set max$/,
   ]);
   await sheet.getByRole("button", { name: "Back squat · Wed" }).click();
   await expect(sheet).toHaveCount(0);
@@ -206,4 +215,139 @@ test("a week of swaps: squat on Tuesday (logged, finished), the deadlift offered
   await expect(page.getByRole("button", { name: /^Back squat set/ })).toHaveCount(0);
   data = await serverData(page);
   expect(data.sessions.find((s) => s.date === NEXT_TUE)).toBeUndefined();
+});
+
+test("Wednesday's line holds while a note is typed (the day saves under it): the field doesn't move", async ({ page }) => {
+  await page.getByRole("button", { name: "Swap Deadlift for another lift" }).click();
+  await swapSheet(page).getByRole("button", { name: "Back squat · Wed" }).click();
+  await page.getByRole("button", { name: /^Back squat set 1:/ }).click();
+  await expectSynced(page);
+  await page.clock.setSystemTime(at(WED));
+  await page.goto("/train");
+  const line = page.locator("[data-swap-suggestion]");
+  await expect(line).toHaveText("Back squat was done Tue. Do Deadlift today?");
+  const notes = page.getByRole("textbox", { name: "Session notes" });
+  await notes.scrollIntoViewIfNeeded();
+  await notes.tap();
+  const docTop = () => notes.evaluate((el) => el.getBoundingClientRect().top + window.scrollY);
+  const before = await docTop();
+  await page.keyboard.type("hotel gym", { delay: 30 });
+  // The note saved the day: the suggestion no longer applies, but the line stays (nothing to tap) while typing.
+  await expect.poll(async () => (await saved(page, WED))?.notes).toBe("hotel gym");
+  await expect(line).toHaveText("Back squat was done Tue. Do Deadlift today?");
+  await expect(line.getByRole("button")).toHaveCount(0);
+  await expect(notes).toBeFocused();
+  expect(Math.abs((await docTop()) - before), "the notes field moved while typing").toBeLessThanOrEqual(0.5);
+  // Done typing: it goes.
+  await notes.blur();
+  await expect(line).toHaveCount(0);
+});
+
+test("a lift without a max: its row opens the max sheet, and the swap follows the saved max (Undo still there)", async ({ page }) => {
+  await page.getByRole("button", { name: "Swap Deadlift for another lift" }).click();
+  await swapSheet(page).getByRole("button", { name: "Strict press · Thu · no max yet: set it first" }).click();
+  const maxSheet = page.getByRole("dialog", { name: "Strict press" });
+  await expect(swapSheet(page)).toHaveCount(0);
+  await maxSheet.getByRole("textbox", { name: "New max" }).fill("135");
+  await maxSheet.getByRole("button", { name: "Set max and swap" }).click();
+  await expect(maxSheet).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Strict press set \d+:/ })).toHaveCount(4);
+  await expect(mainLift(page).locator("[data-swapped]")).toHaveText("In place of Deadlift · this session only");
+  await expect(toastMessage(page, "Strict press in place of Deadlift today")).toBeVisible();
+  await expectSynced(page);
+  const s = (await saved(page, TUE))!;
+  expect(mainOf(s).exerciseId).toBe(await idOf(page, "Strict press"));
+  expect(mainOf(s).sets.map((x) => [x.targetWeight, x.amrap])).toEqual([
+    [105, false],
+    [95, false],
+    [90, false],
+    [85, true],
+  ]);
+  expect(s.primaryMaxLb).toBe(135);
+  // Undo puts the deadlift back; the max stays.
+  await notifications(page).getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByRole("button", { name: /^Deadlift set \d+:/ })).toHaveCount(4);
+  await expectSynced(page);
+  const data = await serverData(page);
+  expect(data.maxEntries.some((m) => m.exerciseId === mainOf(s).exerciseId && m.valueLb === 135)).toBe(true);
+});
+
+test("'Another exercise': the main lift is skipped and a dumbbell press added with hand-entered loads", async ({ page }) => {
+  await page.getByRole("button", { name: "Swap Deadlift for another lift" }).click();
+  await swapSheet(page).getByRole("button", { name: /^Another exercise/ }).click();
+  const add = page.getByRole("dialog", { name: "Add exercise" });
+  await expect(swapSheet(page)).toHaveCount(0);
+  await add.getByRole("textbox", { name: "Search or create exercise" }).fill("DB shoulder press");
+  await add.getByRole("button", { name: /Create & add/ }).click();
+  await expect(add).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Unskip Deadlift" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^DB shoulder press set 1:/ })).toBeVisible();
+  await expectSynced(page);
+  const s = (await saved(page, TUE))!;
+  const main = s.blocks.find((b) => b.kind === "primary")!;
+  expect([main.skipped, main.exercises[0]!.exerciseId]).toEqual([true, await idOf(page, "Deadlift")]);
+  const press = await idOf(page, "DB shoulder press");
+  expect(s.blocks.some((b) => b.kind === "accessory" && b.exercises.some((e) => e.exerciseId === press))).toBe(true);
+});
+
+test("Friday of the deload week: Thursday's Strict press added for the session, 4 × 10 from its max; removed again", async ({ page }) => {
+  await callApi(page, "POST", `/api/exercises/${await idOf(page, "Strict press")}/maxes`, {
+    date: "2026-10-25",
+    valueLb: 135,
+    source: "manual",
+    note: null,
+  });
+  await page.clock.setSystemTime(at(DELOAD_FRI));
+  await page.goto("/train");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Carries & pull");
+  await page.getByRole("button", { name: "Add one for this session" }).click();
+  const sheet = page.getByRole("dialog", { name: "Add a main lift" });
+  await expect(sheet.getByRole("heading", { level: 4 }).first()).toHaveText("Still to do this week");
+  // Nothing done this week: every lift is still to do, the latest day first.
+  await expect(sheet.locator("[data-swap-to]").first()).toHaveAccessibleName("Strict press · Thu");
+  await sheet.getByRole("button", { name: "Strict press · Thu" }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Strict press set \d+:/ })).toHaveCount(4);
+  await expect(mainLift(page).locator("[data-added]")).toHaveText("Added for this session");
+  await expect(toastMessage(page, "Strict press added for this session")).toBeVisible();
+  await expectSynced(page);
+  const s = (await saved(page, DELOAD_FRI))!;
+  expect([s.label, s.deload, s.planSig]).toEqual(["Carries & pull", true, null]);
+  expect(mainOf(s).sets.map((x) => [x.targetReps, x.targetWeight, x.amrap])).toEqual(Array.from({ length: 4 }, () => [10, 85, false]));
+  expect(s.primaryMaxLb).toBe(135);
+
+  // Removed from its header (nothing logged), and it comes back with Undo.
+  await page.getByRole("button", { name: "Remove Strict press from this session" }).click();
+  await expect(page.getByRole("button", { name: /^Strict press set/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add one for this session" })).toBeVisible();
+  await expect(toastMessage(page, "Strict press removed")).toBeVisible();
+  // The add's toast gave way to it.
+  await expect(toastMessage(page, "Strict press added for this session")).toHaveCount(0);
+  await notifications(page).getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByRole("button", { name: /^Strict press set \d+:/ })).toHaveCount(4);
+  await expectSynced(page);
+  expect(mainOf((await saved(page, DELOAD_FRI))!).exerciseId).toBe(await idOf(page, "Strict press"));
+});
+
+test.describe("at 320 px", () => {
+  test.use({ viewport: { width: 320, height: 640 } });
+
+  test("a long name gives way: swap and skip rest stay on one line beside it", async ({ page }) => {
+    await callApi(page, "PATCH", `/api/exercises/${await idOf(page, "Back squat")}`, { name: "Safety bar squat" });
+    await page.goto("/train");
+    await page.getByRole("button", { name: "Swap Deadlift for another lift" }).click();
+    await swapSheet(page).getByRole("button", { name: "Safety bar squat · Wed" }).click();
+    await page.getByRole("button", { name: /^Safety bar squat set 1:/ }).click();
+    const name = mainLift(page).locator("[data-main-name]");
+    await expect(name).toHaveText("Safety bar squat");
+    const swap = page.locator('[data-main-control="swap"]');
+    const skipRest = page.locator('[data-main-control="skip-rest"]');
+    await expect(swap).toHaveText("swap");
+    const [n, a, b] = await Promise.all([name.boundingBox(), swap.boundingBox(), skipRest.boundingBox()]);
+    // One line: the controls' centres level with the name's, the name ending before swap begins.
+    expect(Math.abs(a!.y + a!.height / 2 - (n!.y + n!.height / 2))).toBeLessThan(4);
+    expect(Math.abs(b!.y + b!.height / 2 - (a!.y + a!.height / 2))).toBeLessThan(1);
+    expect(n!.x + n!.width).toBeLessThanOrEqual(a!.x + 1);
+    expect(b!.x + b!.width).toBeLessThanOrEqual(320);
+  });
 });

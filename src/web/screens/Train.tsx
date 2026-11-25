@@ -35,6 +35,7 @@ import {
   isSessionStarted,
   isWeighted,
   logAtTargets,
+  mainLiftAdded,
   mainLiftBlock,
   mainLiftSwap,
   newId,
@@ -62,7 +63,7 @@ import {
   supersetLetters,
   type ExPlace,
 } from "../../shared/sessionStructure";
-import { swapBlocked, swapChoices, swapMainLift, swapSuggestion, undoSwap, type SwapRefusal } from "../../shared/swap";
+import { addBlocked, removeMainLift, swapBlocked, swapChoices, swapMainLift, swapSuggestion, undoSwap, type SwapRefusal } from "../../shared/swap";
 import { useDockHeight, useDockTop } from "../components/Dock";
 import { Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
@@ -103,6 +104,7 @@ import {
   type SetRef,
 } from "../components/train/sessionEdit";
 import { MaxSheet } from "../components/MaxSheet";
+import { useHeldWhile, useTyping } from "../components/useHeldWhileTyping";
 import { JournalText } from "../components/TextArea";
 import { fmt } from "../lib/format";
 import { success, tick } from "../lib/haptics";
@@ -509,10 +511,18 @@ export function TrainScreen() {
    */
   const swap = mainLiftSwap(session);
   /**
-   * The main lift as the plan calculates it for this session: the plan's — or, swapped, the
-   * swapped lift's, this week's scheme on its max (unless the plan now has that lift itself).
+   * The main lift added for this session to a day whose plan has none (Friday's "Carries & pull"),
+   * read the same way: from the session and the plan, never stored.
    */
-  const swapPlan = swap && freshPrimary?.exercises[0]?.exerciseId !== swap.to ? mainLiftBlock(plannedFor ?? date, data, swap.to) : null;
+  const added = mainLiftAdded(session, data);
+  /** The main lift the session holds that isn't the plan's own: swapped or added. */
+  const unplanned = swap?.to ?? added;
+  /**
+   * The main lift as the plan calculates it for this session: the plan's — or, swapped or added,
+   * that lift's, this week's scheme on its max (unless the plan now has that lift itself).
+   */
+  const swapPlan =
+    unplanned !== null && freshPrimary?.exercises[0]?.exerciseId !== unplanned ? mainLiftBlock(plannedFor ?? date, data, unplanned) : null;
   const planPrimary = swapPlan?.block ?? freshPrimary;
   /** In place of a main lift the day has no sets for: the program hasn't started, or the lift has no max. */
   const mainNotice = mainLiftNotice({
@@ -562,14 +572,14 @@ export function TrainScreen() {
   };
 
   /** The main lift's Skip / Unskip / Skip rest / Restore / Swap control (whichever the row shows now). */
-  const mainControl = (which: "skip" | "unskip" | "skip-rest" | "restore" | "swap") => () =>
+  const mainControl = (which: "skip" | "unskip" | "skip-rest" | "restore" | "swap" | "remove" | "add") => () =>
     document.querySelector<HTMLElement>(`[data-main-control="${which}"]`);
 
   /**
    * Skip the main lift for today (injury, fatigue): its sets leave the counts, no AMRAP or
    * progression is offered, and the session can still be finished. Undo / Unskip bring it back.
    */
-  const setPrimarySkipped = (skip: boolean) => {
+  const setPrimarySkipped = (skip: boolean, focus = true) => {
     if (!primaryBlock) return;
     const id = primaryBlock.id;
     const withFlag = (s: Session, on: boolean) =>
@@ -590,7 +600,7 @@ export function TrainScreen() {
         : undefined,
     );
     if (primaryBlock.id === amrap?.blockId) setAmrap(null);
-    focusWhenReady(mainControl(skip ? "unskip" : "skip"));
+    if (focus) focusWhenReady(mainControl(skip ? "unskip" : "skip"));
   };
 
   /**
@@ -662,11 +672,27 @@ export function TrainScreen() {
         return "There's no main lift to swap.";
     }
   };
-  const swapNow = primaryBlock ? swapBlocked(session) : "no-main";
-  const swapOffer = primaryBlock && !isPreview && swapOpen ? swapChoices(session, data) : null;
   /**
-   * Swap the main lift for this session (or put the planned one back), with an Undo that puts back
-   * only what the swap changed — on the session as it is when Undo is tapped.
+   * A main lift can be added for this session: a lifting day whose plan has none (Friday's
+   * "Carries & pull"), in a cycle, open — and not a day showing a plan done elsewhere.
+   */
+  const canAddMain = !primaryBlock && !isPreview && !shownEarly && isPlannedDay && addBlocked(session, data) === null;
+  const swapNow = primaryBlock ? swapBlocked(session) : addBlocked(session, data);
+  const swapOffer = (primaryBlock || canAddMain) && !isPreview && swapOpen ? swapChoices(session, data) : null;
+  /** Undo of a swap, an addition or a removal: only the main lift goes back, on the session as it is then. */
+  const undoMain = (before: Session, lift: string, focus: () => HTMLElement | null) => ({
+    revert: (cur: Session, saved: Session) => {
+      const undone = undoSwap(cur, saved, before);
+      if (undone === "logged") return `Can't undo: a set of ${lift} is logged`;
+      if (undone === "changed") return "Can't undo: the main lift changed since";
+      return undone;
+    },
+    onUndone: () => focusWhenReady(focus),
+  });
+  /**
+   * Swap the main lift for this session (or put the planned one back) — or, on a day whose plan
+   * has none, add one — with an Undo that puts back only what it changed, on the session as it is
+   * when Undo is tapped.
    */
   const swapTo = (exerciseId: number, focus: () => HTMLElement | null = mainControl("swap")) => {
     const r = swapMainLift(session, exerciseId, data);
@@ -674,32 +700,75 @@ export function TrainScreen() {
       toast.show({ message: swapRefusal(r.refused) ?? "Can't swap the main lift.", tone: "warn" });
       return;
     }
-    const was = exName(primaryExId ?? -1);
+    const was = primaryExId != null ? exName(primaryExId) : null;
     const now = exName(exerciseId);
     const backToPlan = !mainLiftSwap(r.session);
     tick();
     setSwapOpen(false);
     commit(r.session, {
-      message: backToPlan ? `Back to ${now}` : `${now} in place of ${was} today`,
-      revert: (cur, saved) => {
-        const undone = undoSwap(cur, saved, session);
-        if (undone === "logged") return `Can't undo: a set of ${now} is logged`;
-        if (undone === "changed") return "Can't undo: the main lift changed since";
-        return undone;
-      },
-      onUndone: () => focusWhenReady(mainControl("swap")),
+      message: was === null ? `${now} added for this session` : backToPlan ? `Back to ${now}` : `${now} in place of ${was} today`,
+      ...undoMain(session, now, was === null ? mainControl("add") : mainControl("swap")),
     });
     focusWhenReady(focus);
+  };
+  /** Take out the main lift added for this session (nothing of it logged): the day as planned, with an Undo. */
+  const removeAddedMain = () => {
+    const r = removeMainLift(session, data);
+    if ("refused" in r) {
+      toast.show({ message: swapRefusal(r.refused) ?? "Can't remove the main lift.", tone: "warn" });
+      return;
+    }
+    const was = primaryName;
+    tick();
+    commit(r.session, { message: `${was} removed`, ...undoMain(session, was, mainControl("remove")) });
+    focusWhenReady(mainControl("add"));
+  };
+  /**
+   * A lift picked in the swap sheet that has no max yet: its max sheet opens, and once a max is
+   * saved there the swap (or addition) is made with it — one flow, the same Undo. Closing the max
+   * sheet without one goes back to the swap sheet.
+   */
+  const [swapAfterMax, setSwapAfterMax] = useState<number | null>(null);
+  const pickNoMax = (exerciseId: number) => {
+    const ex = exById(exerciseId);
+    if (!ex) return;
+    setSwapOpen(false);
+    setSwapAfterMax(exerciseId);
+    setMaxFor(ex);
+  };
+  useEffect(() => {
+    if (swapAfterMax === null || maxFor || !currentMax(data.maxEntries, swapAfterMax)) return;
+    setSwapAfterMax(null);
+    swapTo(swapAfterMax);
+  });
+  /**
+   * "Another exercise": a lift with no max to calculate from (a dumbbell or machine press) — the
+   * main lift is skipped for today (the usual skip: it counts toward nothing) and the add-exercise
+   * sheet opens, for an accessory with hand-entered loads. On a day without a main lift, just the add.
+   */
+  const anotherExercise = () => {
+    setSwapOpen(false);
+    if (primaryBlock && !primarySkipped && !primaryStarted) setPrimarySkipped(true, false);
+    setAdding({ mode: "new" });
   };
   /**
    * Swapping between days (derived, never stored): this day's planned lift was already done this
    * week in place of another day's — offer that day's lift here. Only while the day has no session.
    */
-  const suggestion = useMemo(
+  const liveSuggestion = useMemo(
     () => (saved || earlyDone ? null : swapSuggestion(date, data)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [saved, earlyDone, date, data.settings, data.sessions, data.maxEntries, data.exercises],
   );
+  /**
+   * The line holds while a field has focus (CLAUDE.md, "the field being typed in stays put"): a note
+   * typed on the unsaved day saves it, and the line going then would move every field under it.
+   * Held, it is the same line with nothing to tap (the day has a session now: the swap sheet offers
+   * the same lift); it goes once no field has focus.
+   */
+  const typing = useTyping();
+  const suggestion = useHeldWhile(liveSuggestion, typing, date);
+  const suggestionLive = !!liveSuggestion && liveSuggestion.suggest === suggestion?.suggest;
 
   // --- Do this session today ----------------------------------------------------------------
   const todaySaved = data.sessions.find((s) => s.date === today) ?? null;
@@ -1201,13 +1270,20 @@ export function TrainScreen() {
             {!isPreview && (
               <>
                 {" "}
-                <button
-                  type="button"
-                  className="-mx-1 -my-3 inline px-1 py-3 text-left text-accent"
-                  onClick={() => swapTo(suggestion.suggest, () => document.querySelector<HTMLElement>("[data-train-title]"))}
-                >
-                  Do {exName(suggestion.suggest)} {isToday ? "today" : "instead"}?
-                </button>
+                {suggestionLive ? (
+                  <button
+                    type="button"
+                    className="-mx-1 -my-3 inline px-1 py-3 text-left text-accent"
+                    onClick={() => swapTo(suggestion.suggest, () => document.querySelector<HTMLElement>("[data-train-title]"))}
+                  >
+                    Do {exName(suggestion.suggest)} {isToday ? "today" : "instead"}?
+                  </button>
+                ) : (
+                  // Held while a field has focus (the day saved meanwhile): the same words, nothing to tap.
+                  <span data-swap-suggestion-held className="-mx-1 px-1">
+                    Do {exName(suggestion.suggest)} {isToday ? "today" : "instead"}?
+                  </span>
+                )}
               </>
             )}
           </p>
@@ -1403,21 +1479,25 @@ export function TrainScreen() {
                     />
                   }
                 >
-                  <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3">
-                    <div className="flex flex-wrap items-baseline gap-x-3">
+                  {/* The name gives way (truncated; its full name stays in the accessible name and the set rows) so
+                      "swap" and "skip" / "skip rest" keep one line beside it at 320 px with a long name. */}
+                  <div className="mb-4 flex items-center justify-between gap-x-3">
+                    <div className="flex min-w-0 flex-wrap items-baseline gap-x-3">
                       {primaryDone ? (
                         // The name folds it again (the toggle's 44 px reach past the line is cancelled, so the header keeps its height).
                         <FoldToggle
                           blockId={primaryBlock.id}
                           size="main"
-                          className="-my-1.5"
+                          className="-my-1.5 max-w-full min-w-0"
                           status={skippedMain ? `${plural(skippedMain, "set")} skipped` : undefined}
                           onFold={() => setFolded(primaryBlock.id, true)}
                         >
-                          <span className="text-2xl font-light">{primaryName}</span>
+                          <span className="block min-w-0 truncate text-2xl font-light">{primaryName}</span>
                         </FoldToggle>
                       ) : (
-                        <div className="text-2xl font-light">{primaryName}</div>
+                        <div data-main-name className="max-w-full min-w-0 truncate text-2xl font-light">
+                          {primaryName}
+                        </div>
                       )}
                       {session.deload && (
                         <span className="label whitespace-nowrap text-fg-2">
@@ -1426,7 +1506,7 @@ export function TrainScreen() {
                       )}
                     </div>
                     {!isPreview && !session.completedAt && (
-                      <span className="-my-2 -mr-2 ml-auto flex items-center">
+                      <span className="-my-2 -mr-2 ml-auto flex shrink-0 items-center">
                         {/* Another lift for this session only (equipment, timing): the day keeps its accessories.
                             Always reachable while the session is open; once a set is logged the sheet says why not. */}
                         <button
@@ -1435,15 +1515,26 @@ export function TrainScreen() {
                           aria-haspopup="dialog"
                           aria-label={`Swap ${primaryName} for another lift`}
                           data-main-control="swap"
-                          // Under 360 px just its icon (a 44 px target): "Back squat", swap and "skip rest" stay on one line.
-                          className="tap label inline-flex min-h-11 items-center justify-center gap-1.5 px-2 whitespace-nowrap text-mute max-[359px]:min-w-11"
+                          className="tap label inline-flex min-h-11 items-center justify-center gap-1.5 px-2 whitespace-nowrap text-mute"
                         >
-                          <ArrowLeftRight size={12} />
-                          <span className="max-[359px]:hidden">swap</span>
+                          <ArrowLeftRight size={12} aria-hidden className="max-[399px]:hidden" />
+                          swap
                         </button>
+                        {/* A main lift added for this session (the day's plan has none) comes out again, nothing logged in it. */}
+                        {added !== null && !primaryStarted && (
+                          <button
+                            type="button"
+                            onClick={removeAddedMain}
+                            aria-label={`Remove ${primaryName} from this session`}
+                            data-main-control="remove"
+                            className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
+                          >
+                            <X size={12} aria-hidden className="max-[399px]:hidden" /> remove
+                          </button>
+                        )}
                         {/* Injury or fatigue: skip the main lift for today (nothing logged in it yet), or
                             the rest of it once some sets are in (those still count). */}
-                        {!primaryStarted && (
+                        {added === null && !primaryStarted && (
                           <button
                             type="button"
                             onClick={() => setPrimarySkipped(true)}
@@ -1451,7 +1542,7 @@ export function TrainScreen() {
                             data-main-control="skip"
                             className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
                           >
-                            <SkipForward size={12} /> skip
+                            <SkipForward size={12} aria-hidden className="max-[399px]:hidden" /> skip
                           </button>
                         )}
                         {primaryStarted && openMain > 0 && (
@@ -1462,7 +1553,7 @@ export function TrainScreen() {
                             data-main-control="skip-rest"
                             className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
                           >
-                            <SkipForward size={12} /> skip rest
+                            <SkipForward size={12} aria-hidden className="max-[399px]:hidden" /> skip rest
                           </button>
                         )}
                       </span>
@@ -1472,6 +1563,12 @@ export function TrainScreen() {
                   {swap && (
                     <p data-swapped className="-mt-3 mb-4 text-xs text-mute">
                       In place of <span className="text-fg-2">{exName(swap.from)}</span> · this session only
+                    </p>
+                  )}
+                  {/* Added for this session: the day's plan has no main lift (the plan itself doesn't change). */}
+                  {added !== null && (
+                    <p data-added className="-mt-3 mb-4 text-xs text-mute">
+                      Added for this session
                     </p>
                   )}
                   <ul aria-label={`${primaryName} sets`}>
@@ -1537,6 +1634,24 @@ export function TrainScreen() {
                   </div>
                 </Foldable>
               )}
+            </Section>
+          )}
+
+          {canAddMain && (
+            // A lifting day whose plan has no main lift (Friday's carries): one can be added for this session.
+            <Section label="Main lift">
+              <p className="-mt-1 text-sm text-mute">
+                None planned for {session.label}.{" "}
+                <button
+                  type="button"
+                  aria-haspopup="dialog"
+                  data-main-control="add"
+                  className="-mx-1 -my-3 inline px-1 py-3 text-left text-accent"
+                  onClick={() => setSwapOpen(true)}
+                >
+                  Add one for this session
+                </button>
+              </p>
             </Section>
           )}
 
@@ -2340,14 +2455,32 @@ export function TrainScreen() {
         )}
       </Sheet>
 
-      <MaxSheet key={maxFor?.id ?? "none"} exercise={maxFor} open={!!maxFor} onClose={() => setMaxFor(null)} />
+      <MaxSheet
+        key={maxFor?.id ?? "none"}
+        exercise={maxFor}
+        open={!!maxFor}
+        // Opened from the swap sheet for a lift with no max: saving one makes the swap (see swapAfterMax).
+        submitLabel={swapAfterMax !== null && maxFor?.id === swapAfterMax ? (primaryBlock ? "Set max and swap" : "Set max and add") : undefined}
+        onSaved={() => {
+          if (swapAfterMax !== null && maxFor?.id === swapAfterMax) setMaxFor(null);
+        }}
+        onClose={() => {
+          setMaxFor(null);
+          if (swapAfterMax !== null) {
+            // No max saved: back to the swap sheet.
+            setSwapAfterMax(null);
+            setSwapOpen(true);
+          }
+        }}
+      />
 
       <SwapLiftSheet
-        open={swapOpen && !!primaryBlock && !isPreview}
+        open={swapOpen && (!!primaryBlock || canAddMain) && !isPreview}
         onClose={() => {
           setSwapOpen(false);
-          focusWhenReady(mainControl("swap"));
+          focusWhenReady(mainControl(primaryBlock ? "swap" : "add"));
         }}
+        mode={primaryBlock ? "swap" : "add"}
         current={primaryName}
         dayLabel={session.label}
         back={swapOffer?.back != null ? { id: swapOffer.back, name: exName(swapOffer.back) } : null}
@@ -2356,9 +2489,12 @@ export function TrainScreen() {
           name: exName(c.exerciseId),
           days: c.days.map((d) => WEEKDAY_SHORT[d]).join(", "),
           noMax: !c.hasMax,
+          missed: c.missed,
         }))}
         blocked={swapRefusal(swapNow)}
         onPick={(id) => swapTo(id)}
+        onSetMax={pickNoMax}
+        onAnother={anotherExercise}
       />
 
       <EditExerciseSheet

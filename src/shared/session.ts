@@ -370,6 +370,29 @@ export function mainLiftSwap(session: Pick<Session, "planSig" | "blocks">): Main
   return { from, to: main.exerciseId };
 }
 
+/**
+ * Whether the plan has no main lift for a session's program day (`plannedFor ?? date`) though the
+ * day is one of its lifting days — say Friday's "Carries & pull": a main lift can be added there
+ * for one session (SPEC §6.5, "Add a main lift").
+ */
+export function planHasNoMainLift(session: Pick<Session, "date" | "plannedFor">, ctx: Pick<BuildContext, "settings">): boolean {
+  const day = programDayFor(ctx.settings.program, planDateOf(session));
+  return !!day && day.primaryExerciseId == null;
+}
+
+/**
+ * The main lift added for one session to a day whose plan has none (SPEC §6.5, "Add a main
+ * lift"), or null. Read like a swap, from the session and the plan, never stored: the session
+ * holds a main lift, the plan of its program day has none, and its plan signature names no lift
+ * (one that names a lift was built when the day had one: a plan change, not an addition). A plan
+ * signature without a lift alone says nothing — seeded and imported sessions have none.
+ */
+export function mainLiftAdded(session: Pick<Session, "date" | "plannedFor" | "planSig" | "blocks">, ctx: Pick<BuildContext, "settings">): number | null {
+  const main = session.blocks.find((b) => b.kind === "primary")?.exercises[0];
+  if (!main || plannedLiftOf(session) !== null || !planHasNoMainLift(session, ctx)) return null;
+  return main.exerciseId;
+}
+
 export function buildSession(date: ISODate, ctx: BuildContext): Session {
   const { program } = ctx.settings;
   const { day, pos, block: primary, primaryMaxLb } = plannedPrimary(date, ctx);

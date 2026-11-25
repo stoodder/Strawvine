@@ -3,8 +3,8 @@ import { defaultSettings } from "./defaults";
 import { amrapPrs, checklist } from "./gamify";
 import { currentMax, mainLiftSets, cyclePosition } from "./program";
 import { sessionSchema, type Exercise, type MaxEntry, type Session } from "./schemas";
-import { buildSession, buildSessionFrom, mainLiftSwap, planChanged, plannedLiftOf, planSignature, templateSource } from "./session";
-import { swapBlocked, swapChoices, swapMainLift, swapSuggestion, undoSwap } from "./swap";
+import { buildSession, buildSessionFrom, mainLiftAdded, mainLiftSwap, planChanged, plannedLiftOf, planSignature, templateSource } from "./session";
+import { addBlocked, removeMainLift, swapBlocked, swapChoices, swapMainLift, swapSuggestion, undoSwap } from "./swap";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 // The program starts Monday 2026-11-02 (week 1: 6/8/10/12, AMRAP last).
@@ -33,6 +33,8 @@ const ctx = { settings, exercises, maxEntries, sessions: [] as Session[] };
 
 const TUE = "2026-11-03";
 const WED = "2026-11-04";
+const THU = "2026-11-05";
+const FRI = "2026-11-06";
 const NEXT_TUE = "2026-11-10";
 
 const set = (id: string, reps: number, weight: number) => ({
@@ -142,7 +144,12 @@ describe("swapping the main lift for one session", () => {
     expect(swapMainLift({ ...tue, completedAt: "x" }, ids.backSquat, ctx)).toEqual({ refused: "finished" });
     expect(swapMainLift(tue, ids.frontSquat, ctx)).toEqual({ refused: "no-max" });
     expect(swapMainLift(tue, 999, ctx)).toEqual({ refused: "unknown" });
-    expect(swapMainLift(buildSession("2026-11-06", ctx), ids.backSquat, ctx)).toEqual({ refused: "no-main" });
+    // Tuesday's plan has a main lift: a session without one (its main lift missing) is the plan's to rebuild, not to add to.
+    expect(swapMainLift({ ...tue, blocks: tue.blocks.filter((b) => b.kind !== "primary") }, ids.backSquat, ctx)).toEqual({
+      refused: "no-main",
+    });
+    // Saturday isn't a lifting day.
+    expect(swapMainLift(buildSession("2026-11-07", ctx), ids.backSquat, ctx)).toEqual({ refused: "not-planned" });
   });
 
   it("goes back to the planned lift: the plan's own block and signature", () => {
@@ -265,11 +272,40 @@ describe("swapChoices", () => {
     const { back, choices } = swapChoices(tue, ctx);
     expect(back).toBeNull();
     expect(choices).toEqual([
-      { exerciseId: ids.bench, days: [1], hasMax: true },
-      { exerciseId: ids.backSquat, days: [3], hasMax: true },
-      { exerciseId: ids.strictPress, days: [4], hasMax: true },
-      { exerciseId: ids.frontSquat, days: [], hasMax: false },
+      // Nothing saved this week: Monday's bench is still to do.
+      { exerciseId: ids.bench, days: [1], hasMax: true, missed: true },
+      { exerciseId: ids.backSquat, days: [3], hasMax: true, missed: false },
+      { exerciseId: ids.strictPress, days: [4], hasMax: true, missed: false },
+      { exerciseId: ids.frontSquat, days: [], hasMax: false, missed: false },
     ]);
+  });
+  it("lists first the lifts still to do this week whose day has passed (latest first), given the saved sessions", () => {
+    const fri = buildSession(FRI, ctx);
+    // Mon bench done, Tue deadlift swapped for squat (done), Wed's squat day did the deadlift, Thu skipped entirely.
+    const done = (date: string, lift?: number) => {
+      const b = buildSession(date, ctx);
+      return logMain(lift === undefined ? b : swapped(b, lift), 6);
+    };
+    const week = [done("2026-11-02"), done(TUE, ids.backSquat), done(WED, ids.deadlift)];
+    expect(swapChoices(fri, { ...ctx, sessions: week }).choices.map((c) => [c.exerciseId, c.missed])).toEqual([
+      [ids.strictPress, true],
+      [ids.bench, false],
+      [ids.deadlift, false],
+      [ids.backSquat, false],
+      [ids.frontSquat, false],
+    ]);
+    // Thursday's press skipped (a session, its main lift skipped): still to do. Wednesday not done at all: both, latest first.
+    const thuSkipped = { ...buildSession(THU, ctx), blocks: buildSession(THU, ctx).blocks.map((b) => ({ ...b, skipped: true })) };
+    expect(
+      swapChoices(fri, { ...ctx, sessions: [done("2026-11-02"), done(TUE), thuSkipped] })
+        .choices.filter((c) => c.missed)
+        .map((c) => c.exerciseId),
+    ).toEqual([ids.strictPress, ids.backSquat]);
+    // Without the saved sessions nothing is known to be missed (the order is the plan's).
+    const { sessions: _none, ...unknown } = ctx;
+    expect(swapChoices(fri, unknown).choices.some((c) => c.missed)).toBe(false);
+    // Before the program (no cycle week) neither.
+    expect(swapChoices(buildSession("2026-10-30", ctx), { ...ctx, sessions: [] }).choices.some((c) => c.missed)).toBe(false);
   });
   it("offers the planned lift back once swapped, and not the lift done now", () => {
     const { back, choices } = swapChoices(swapped(tue, ids.backSquat), ctx);
@@ -279,6 +315,117 @@ describe("swapChoices", () => {
   it("leaves archived lifts out", () => {
     const xs = exercises.map((e) => (e.id === ids.frontSquat ? { ...e, archived: true } : e));
     expect(swapChoices(tue, { ...ctx, exercises: xs }).choices.map((c) => c.exerciseId)).not.toContain(ids.frontSquat);
+  });
+});
+
+describe("adding a main lift to a day whose plan has none (Friday's Carries & pull)", () => {
+  const fri = buildSession(FRI, history);
+  const added = (s: Session, id: number) => {
+    const r = swapMainLift(s, id, ctx);
+    if (!("session" in r)) throw new Error(`refused: ${r.refused}`);
+    return r.session;
+  };
+
+  it("adds the lift first, calculated from its max with this week's scheme and the day's AMRAP setting (Friday's is off)", () => {
+    expect(fri.label).toBe("Carries & pull");
+    expect(fri.blocks.some((b) => b.kind === "primary")).toBe(false);
+    expect(addBlocked(fri, ctx)).toBeNull();
+    const s = added(fri, ids.strictPress);
+    expect(s.blocks[0]!.kind).toBe("primary");
+    expect(s.blocks.slice(1)).toEqual(fri.blocks);
+    const pos = cyclePosition(settings.program, FRI)!;
+    expect(main(s).exercises[0]!.sets.map((x) => [x.targetReps, x.targetWeight, x.amrap])).toEqual(
+      mainLiftSets(settings.program, 135, pos.week, { progressionDay: false }).map((p) => [p.reps, p.weightLb, p.amrap]),
+    );
+    expect(main(s).exercises[0]!.sets.some((x) => x.amrap)).toBe(false);
+    expect(s.primaryMaxLb).toBe(135);
+    expect([s.label, s.week, s.deload, s.planSig]).toEqual([fri.label, fri.week, fri.deload, null]);
+    // Read as added (never as swapped), and no plan change.
+    expect(mainLiftAdded(s, ctx)).toBe(ids.strictPress);
+    expect(mainLiftSwap(s)).toBeNull();
+    expect(planChanged(s, ctx)).toBe(false);
+    // Friday's AMRAP switch on: the added lift's last set is an AMRAP.
+    const amrapFri = {
+      ...settings,
+      program: { ...settings.program, days: { ...settings.program.days, "5": { ...settings.program.days["5"]!, progression: true } } },
+    };
+    const c = { ...ctx, settings: amrapFri };
+    const r = swapMainLift(buildSession(FRI, c), ids.strictPress, c);
+    expect("session" in r && main(r.session).exercises[0]!.sets.at(-1)!.amrap).toBe(true);
+  });
+
+  it("in the deload week: 4 × 10 from the lift's 12-rep max, no AMRAP", () => {
+    const deloadFri = "2026-12-04";
+    const s = added(buildSession(deloadFri, ctx), ids.strictPress);
+    expect(s.deload).toBe(true);
+    const pos = cyclePosition(settings.program, deloadFri)!;
+    expect(main(s).exercises[0]!.sets.map((x) => [x.targetReps, x.targetWeight, x.amrap])).toEqual(
+      mainLiftSets(settings.program, 135, pos.week, { progressionDay: false }).map((p) => [p.reps, p.weightLb, false]),
+    );
+    expect(main(s).exercises[0]!.sets.every((x) => x.targetReps === 10)).toBe(true);
+  });
+
+  it("is decided by the day's plan, not by a missing signature: seeded and imported sessions aren't 'added'", () => {
+    const seededTue = { ...buildSession(TUE, ctx), planSig: null };
+    expect(mainLiftAdded(seededTue, ctx)).toBeNull();
+    // A Friday session built when Friday had a main lift (its signature names it): a plan change, not an addition.
+    const days = { ...settings.program.days, "5": { ...settings.program.days["5"]!, primaryExerciseId: ids.bench } };
+    const c = { ...ctx, settings: { ...settings, program: { ...settings.program, days } } };
+    const benchFri = buildSession(FRI, c);
+    expect(mainLiftAdded(benchFri, ctx)).toBeNull();
+    expect(planChanged(benchFri, ctx)).toBe(true);
+    // An old session without a signature gets the plan's (none) when a lift is added: no plan change either.
+    const { planSig: _, ...old } = fri;
+    const s = added(old as Session, ids.strictPress);
+    expect(s.planSig).toBeNull();
+    expect(planChanged(s, ctx)).toBe(false);
+    expect(mainLiftAdded(s, ctx)).toBe(ids.strictPress);
+  });
+
+  it("is refused before the program, once finished, for a lift without a max; then it's a swap like any", () => {
+    expect(addBlocked(buildSession("2026-10-30", ctx), ctx)).toBe("not-planned");
+    expect(swapMainLift({ ...fri, completedAt: "x" }, ids.strictPress, ctx)).toEqual({ refused: "finished" });
+    expect(swapMainLift(fri, ids.frontSquat, ctx)).toEqual({ refused: "no-max" });
+    const s = added(fri, ids.strictPress);
+    const b = added(s, ids.bench);
+    expect(main(b).exercises[0]!.exerciseId).toBe(ids.bench);
+    expect(mainLiftAdded(b, ctx)).toBe(ids.bench);
+    expect(swapChoices(b, ctx).back).toBeNull();
+  });
+
+  it("is removed again (nothing logged), and the Undo of the add or the removal puts back only the main lift", () => {
+    const s = added(fri, ids.strictPress);
+    const r = removeMainLift(s, ctx);
+    expect("session" in r && r.session).toEqual({ ...fri, primaryMaxLb: null });
+    // A planned main lift isn't removable; a logged one isn't either.
+    expect(removeMainLift(buildSession(TUE, ctx), ctx)).toEqual({ refused: "no-main" });
+    expect(removeMainLift(logMain(s, 6), ctx)).toEqual({ refused: "finished" });
+    expect(removeMainLift({ ...logMain(s, 6), completedAt: null }, ctx)).toEqual({ refused: "logged" });
+    // Undo of the add, on the session as it is (a note written since): the note stays, the lift goes.
+    const later = { ...s, notes: "hotel gym" };
+    const undone = undoSwap(later, s, fri) as Session;
+    expect(undone.blocks).toEqual(fri.blocks);
+    expect([undone.primaryMaxLb, undone.planSig, undone.notes]).toEqual([fri.primaryMaxLb, fri.planSig, "hotel gym"]);
+    expect(undoSwap({ ...logMain(s, 6), completedAt: null }, s, fri)).toBe("logged");
+    // Undo of a removal: the lift comes back first, unless a main lift is there again.
+    const removed = (r as { session: Session }).session;
+    const back = undoSwap({ ...removed, notes: "x" }, removed, s) as Session;
+    expect(back.blocks).toEqual(s.blocks);
+    expect([back.primaryMaxLb, back.notes]).toEqual([135, "x"]);
+    expect(undoSwap(added(removed, ids.bench), removed, s)).toBe("changed");
+  });
+
+  it("checklist and history: Friday's lift item is the day's as always; the lift's sets are that lift's", () => {
+    const s = logMain(added(fri, ids.strictPress), 6);
+    const lift = (x: Session | undefined) => checklist(FRI, undefined, x, settings).find((i) => i.key === "lift");
+    expect(lift(s)?.done).toBe(true);
+    expect(lift({ ...s, completedAt: null })?.done).toBe(false);
+    expect(lift({ ...fri, completedAt: "x" })?.done).toBe(true);
+    // No AMRAP on Friday: nothing for the press's rep PRs or max.
+    expect(amrapPrs([s])).toEqual([]);
+    // Next Friday pre-fills the day's accessories, not the added lift.
+    const next = buildSession("2026-11-13", { ...history, sessions: [...history.sessions, s] });
+    expect(next.blocks.some((b) => b.kind === "primary")).toBe(false);
   });
 });
 

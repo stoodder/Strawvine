@@ -13,6 +13,7 @@
 import { planList, withPlans } from "../../shared/plans";
 import { byStart, planTimeline } from "../../shared/program";
 import type { Block, BlockExercise, Plan, Session, SetEntry, Settings } from "../../shared/schemas";
+import { mainLiftSwap } from "../../shared/session";
 import { derivedBlockId, MAX_BLOCKS, MAX_SETS, MAX_SUPERSET, normalizeMainLift } from "../../shared/sessionStructure";
 
 /**
@@ -564,7 +565,14 @@ function mergeExercise(a: BlockExercise | undefined, l: BlockExercise, s: BlockE
   return { ...head, sets } as BlockExercise;
 }
 
-const blockFallback = (b: Block) => (b.kind === "primary" ? "primary" : `accessory:${b.exercises.map((e) => e.exerciseId).join(",")}`);
+/**
+ * How blocks built independently on each device pair up: a main lift with the main lift of the same
+ * lift — two different main lifts (one device swapped it, SPEC §6.5) stay two blocks for
+ * `oneMainLift` to choose between, never one block holding both — and accessory blocks by their
+ * exercises.
+ */
+const blockFallback = (b: Block) =>
+  b.kind === "primary" ? `primary:${b.exercises[0]?.exerciseId ?? ""}` : `accessory:${b.exercises.map((e) => e.exerciseId).join(",")}`;
 
 function blockMerger(ids: Idents) {
   return (a: Block | undefined, l: Block, s: Block): Block => {
@@ -592,26 +600,47 @@ const samePlan = (x: Session, y: Session) =>
   (x.planSig ?? null) === (y.planSig ?? null) && (x.plannedFor ?? null) === (y.plannedFor ?? null);
 
 /**
- * One main lift per workout. Two primary blocks survive a merge only when one device rebuilt the
- * session (a different plan: new block ids) while the other logged on the old one. The rule:
+ * One main lift per workout. Two primary blocks survive a merge when one device rebuilt the
+ * session (a different plan: new block ids) while the other logged on the old one, or when one
+ * device swapped the main lift for the session (SPEC §6.5) and the other didn't. The rule:
  * - the primary block kept is the one from the version whose plan (`planSig` and `plannedFor`,
- *   i.e. the program day `plannedFor ?? date`) the merged workout has; when both or neither
- *   match, the one with more logged sets (this device's on a tie);
+ *   i.e. the program day `plannedFor ?? date`) the merged workout has — unless nothing is logged
+ *   in it and another is a lift its own version swapped in, with sets logged (a stale device's
+ *   Recalculate never demotes the swapped lift being lifted); when both or neither match, the one
+ *   with more logged sets (this device's on a tie);
  * - another primary block with nothing logged is dropped;
  * - one with logged sets for the same lift has those sets folded into the kept block (set by
  *   set onto sets not logged there yet; the rest appended);
  * - one with logged sets for a different lift is kept as an accessory block, so no logged work
  *   is lost.
  */
-function oneMainLift(blocks: Block[], head: Session, local: Session, server: Session): Block[] {
+function oneMainLift(blocks: Block[], head: Session, local: Session, server: Session): { blocks: Block[]; from: Session | null } {
   const primaries = blocks.filter((b) => b.kind === "primary");
-  if (primaries.length < 2) return blocks;
+  if (primaries.length < 2) return { blocks, from: null };
   const sideOf = (b: Block): Side | null =>
     local.blocks.some((x) => x.id === b.id) ? "l" : server.blocks.some((x) => x.id === b.id) ? "s" : null;
+  const docOf = (b: Block): Session | null => {
+    const side = sideOf(b);
+    return side === "l" ? local : side === "s" ? server : null;
+  };
+  const liftOf = (b: Block) => b.exercises[0]?.exerciseId;
+  /** A lift its own version swapped in for the session: that version's main lift, another than its plan named. */
+  const swappedIn = (b: Block) => {
+    const doc = docOf(b);
+    const swap = doc ? mainLiftSwap(doc) : null;
+    return !!doc && !!swap && swap.to === liftOf(b) && doc.blocks.find((x) => x.kind === "primary")?.id === b.id;
+  };
   const planSide: Side | null =
     samePlan(head, local) && !samePlan(head, server) ? "l" : samePlan(head, server) && !samePlan(head, local) ? "s" : null;
   let keep = planSide ? primaries.find((b) => sideOf(b) === planSide) : undefined;
-  keep ??= primaries.reduce((best, b) => (doneSets(b) > doneSets(best) ? b : best));
+  if (keep && !doneSets(keep)) {
+    const plan = keep;
+    if (primaries.some((b) => b !== plan && doneSets(b) && liftOf(b) !== liftOf(plan) && swappedIn(b))) keep = undefined;
+  }
+  keep ??= primaries.reduce((best, b) => {
+    const more = doneSets(b) - doneSets(best);
+    return more > 0 || (more === 0 && sideOf(b) === "l" && sideOf(best) !== "l") ? b : best;
+  });
   let kept: Block = keep;
   // Placeholder for the main lift, at the place of the first one (filled in once folded).
   const out: Array<Block | null> = [];
@@ -642,7 +671,7 @@ function oneMainLift(blocks: Block[], head: Session, local: Session, server: Ses
     }
     out.push({ ...b, kind: "accessory" });
   }
-  return out.map((b) => b ?? kept);
+  return { blocks: out.map((b) => b ?? kept), from: docOf(keep) };
 }
 
 /**
@@ -707,8 +736,10 @@ export function mergeSession(ancestor: Session | null | undefined, local: Sessio
     head = { ...head, completedAt: loc.completedAt ?? srv.completedAt, notes: loc.notes || srv.notes };
   }
   let blocks = mergeList(anc?.blocks ?? null, loc.blocks, srv.blocks, (b) => b.id, blockFallback, blockMerger(ids));
-  blocks = oneMainLift(blocks, { ...head, blocks } as Session, local, server);
-  blocks = dedupe(blocks);
+  const main = oneMainLift(blocks, { ...head, blocks } as Session, local, server);
+  blocks = dedupe(main.blocks);
+  // The max the kept main lift was calculated from goes with it (the other may be another lift, swapped in).
+  if (main.from && main.from.primaryMaxLb !== undefined) head = { ...head, primaryMaxLb: main.from.primaryMaxLb };
   return { ...head, date: local.date, blocks } as Session;
 }
 
