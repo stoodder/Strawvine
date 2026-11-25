@@ -262,10 +262,12 @@ async function keyboard(page: Page, kb: { height: number; offsetTop: number } | 
 }
 
 /**
- * Fixed elements (the nav, the dock) measured as WebKit may measure them while the keyboard is up
- * and the visual viewport is panned: shifted up by the pan, while `innerHeight` stays the whole
- * window — two numbers that no longer describe the same screen. Nothing the app keeps (the
- * scroll padding above all) may follow them.
+ * Fixed elements (the nav, the dock) measured as we hypothesise WebKit measures them while the
+ * keyboard is up and the visual viewport is panned: shifted up by the pan, while `innerHeight`
+ * stays the whole window — two numbers that no longer describe the same screen. This is a
+ * simulation of that hypothesised geometry in Chromium, not WebKit: it shows the app doesn't
+ * depend on those rects, not that WebKit reports them so. Nothing the app keeps (the scroll
+ * padding above all) may follow them.
  */
 async function webkitFixedRects(page: Page) {
   await page.evaluate(() => {
@@ -1150,11 +1152,15 @@ for (const viewport of [
 
     // The iPhone report: focus a field, start typing, and the page scrolls the field off the
     // screen. The browser brings the caret clear of html's scroll-padding-bottom at a keystroke;
-    // that padding was `innerHeight - the dock's top`, which with WebKit's keyboard geometry came
-    // out as tall as everything visible. What this proves: with the keyboard up the padding is a
-    // few px whatever the fixed elements measure, and neither the first keystroke, nor the next
-    // field, nor a slow save's sync pill arriving in the dock scrolls the page or takes the field
-    // out of what is visible. What it doesn't: Safari's own caret reveal (only an iPhone has it).
+    // that padding was `innerHeight - the dock's top`, which in the keyboard geometry we
+    // hypothesise for WebKit (fixed rects shifted by the pan, `webkitFixedRects`) comes out as tall
+    // as everything visible. This runs in Chromium with that geometry simulated; it is not WebKit.
+    // What it proves: with the keyboard up over the nav and the dock the padding is a few px
+    // whatever the fixed elements measure, and neither the first keystroke, nor the next field,
+    // nor a slow save's sync pill arriving in the dock scrolls the page or takes the field out of
+    // what is visible; with the visual viewport panned down to the nav, the padding clears the nav
+    // and the dock again. What it doesn't: that WebKit has this geometry, or Safari's own caret
+    // reveal (only an iPhone has those).
     test("Today: with the keyboard up, the first keystroke in a macro field scrolls nothing — nor does the next field's save or the sync pill", async ({
       page,
     }) => {
@@ -1183,9 +1189,11 @@ for (const viewport of [
       await field("Carbs").press("ControlOrMeta+a");
 
       // The keyboard: the visible area above it, panned down to the field, which sits a little
-      // above the keyboard (where Safari leaves a focused field).
+      // above the keyboard (where Safari leaves a focused field). The visible area ends well above
+      // the nav and the dock, the sync pill included: the keyboard covers them all (the padding
+      // would rightly grow by whatever of the pill showed above its edge).
       const up = viewport.height - (viewport.height > 700 ? 336 : 260);
-      const pan = viewport.height > 700 ? 200 : 150;
+      const pan = viewport.height > 700 ? 200 : 100;
       const fieldTop = pan + up - 110;
       await page.evaluate((by) => window.scrollBy(0, by), Math.round((await place(field("Carbs"))).top - fieldTop));
       await settled(page);
@@ -1233,6 +1241,20 @@ for (const viewport of [
         sawPill ||= await pill.isVisible();
       });
       expect(sawPill, "the sync pill showed while typing").toBe(true);
+
+      // A scroll down with the keyboard up, the visual viewport panned to the layout viewport's
+      // bottom: the nav sits on the keyboard, and the padding is 16 px above the nav and the dock.
+      await keyboard(page, { height: up, offsetTop: viewport.height - up });
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const stack = document.querySelector("[data-dock]")!.getBoundingClientRect().height;
+            return Math.round(parseFloat(getComputedStyle(document.documentElement).scrollPaddingBottom) - stack);
+          }),
+        )
+        .toBe(Math.round(16 + nav + 8));
+      await keyboard(page, { height: up, offsetTop: pan });
+      expect(await scrollPaddingBottom(page)).toBe(padding);
 
       await keyboard(page, null);
       await page.unroute("**/api/**");

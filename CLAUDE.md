@@ -19,9 +19,11 @@
 - Transient bottom UI (toasts, sync pill, rest timer) renders into the dock: `<DockItem id priority>` from
   `components/Dock.tsx`, never its own `fixed bottom-…` layer. Inline renames use `components/InlineText.tsx`.
 - html's `scroll-padding-bottom` (`--dock-clearance`) comes only from `dockClearance` in `components/Dock.tsx`: made of
-  heights (nav + dock + gaps), never viewport positions (`innerHeight - rect.top` goes wrong with iOS's keyboard up),
-  at most half of what is visible, and a few px while an on-screen keyboard is up (it covers the nav and dock) — else
-  the caret reveal of a keystroke scrolls the field off the screen (e2e/40).
+  heights (nav + dock + gaps) and, with an on-screen keyboard up, the visual viewport's offsets — never rects
+  (`innerHeight - rect.top` is suspected of going wrong with iOS's keyboard up). No keyboard: the full clearance
+  (WCAG 2.4.11). Keyboard up: 16px above its edge plus only what of the nav and dock sits above it (usually none: it
+  covers them), at most half of what is visible — else the caret reveal of a keystroke can scroll the field off the
+  screen (e2e/40). The layout viewport's height is `clientHeight`, not `innerHeight` (which pinch zoom shrinks on iOS).
 - Screens that aren't a day take their header from `components/ScreenHeader.tsx` (one h1 size and top rhythm).
 - An Undo of a settings change goes through `components/settings/undo.ts`: a toast outlives its screen, so Undo patches
   the settings as they are when it is tapped (`liveSettings`), only its own fields — never a remembered document.

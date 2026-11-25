@@ -146,29 +146,42 @@ describe("Dock", () => {
 });
 
 /**
- * `--dock-clearance` (html's scroll-padding-bottom, styles.css) in the states an iPhone puts the
- * page in. jsdom has no layout, so the nav and the stack are given boxes, and they are reported
- * the way WebKit may report fixed elements while the keyboard is up and the visual viewport is
- * panned: shifted up by the pan (`offsetTop`), while `innerHeight` stays the whole window.
- * Nothing here may follow that shift: the clearance is made of heights only, and with the
- * keyboard up (which covers the nav and the dock) it is a few px.
+ * `--dock-clearance` (html's scroll-padding-bottom, styles.css) and `useDockTop` in the states an
+ * iPhone puts the page in. jsdom has no layout, so the nav and the stack are given boxes, and they
+ * are reported as we suppose WebKit reports fixed elements while the keyboard is up and the visual
+ * viewport is panned: shifted up by the pan (`offsetTop`), while `innerHeight` stays the whole
+ * window. That is a simulation of a hypothesis, not WebKit. Nothing here may follow that shift:
+ * the clearance is made of heights and the visual viewport's offsets, never rects.
  */
 describe("Dock clearance (scroll-padding-bottom)", () => {
   const H = 844;
   const NAV = 84;
   const GAP = 8;
+  /** An iPhone keyboard with its suggestion bar. */
+  const KB = 336;
   let stackHeight = 0;
   let observers: Array<() => void> = [];
-  function fakeViewport(height = H, offsetTop = 0) {
-    const vv = Object.assign(new EventTarget(), { height, offsetTop, scale: 1 });
+  function fakeViewport(height = H, offsetTop = 0, scale = 1) {
+    const vv = Object.assign(new EventTarget(), { height, offsetTop, scale });
     Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
     return vv;
+  }
+  /** The layout viewport (`clientHeight`) and `innerHeight`, which iOS shrinks with pinch zoom. */
+  function viewports({ layout = H, inner = layout }: { layout?: number; inner?: number }) {
+    Object.defineProperty(document.documentElement, "clientHeight", { value: layout, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: inner, configurable: true });
   }
   /** What iOS does as the keyboard comes, changes (the suggestion bar) or goes: resize and pan. */
   const keyboard = (vv: ReturnType<typeof fakeViewport>, o: Partial<{ height: number; offsetTop: number; scale: number }>) =>
     act(() => {
       Object.assign(vv, o);
       vv.dispatchEvent(new Event("resize"));
+      vv.dispatchEvent(new Event("scroll"));
+    });
+  /** The visual viewport panned (a scroll with the keyboard up): `scroll` only, no resize. */
+  const pan = (vv: ReturnType<typeof fakeViewport>, offsetTop: number) =>
+    act(() => {
+      vv.offsetTop = offsetTop;
       vv.dispatchEvent(new Event("scroll"));
     });
   const clearance = () => document.documentElement.style.getPropertyValue("--dock-clearance");
@@ -179,7 +192,7 @@ describe("Dock clearance (scroll-padding-bottom)", () => {
     stackHeight = 0;
     observers = [];
     const innerHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
-    Object.defineProperty(window, "innerHeight", { value: H, configurable: true });
+    viewports({});
     const ro = globalThis.ResizeObserver;
     globalThis.ResizeObserver = class {
       cb: () => void;
@@ -204,6 +217,7 @@ describe("Dock clearance (scroll-padding-bottom)", () => {
       () => spy.mockRestore(),
       () => (globalThis.ResizeObserver = ro),
       () => (innerHeight ? Object.defineProperty(window, "innerHeight", innerHeight) : Reflect.deleteProperty(window, "innerHeight")),
+      () => Reflect.deleteProperty(document.documentElement, "clientHeight"),
       () => Object.defineProperty(window, "visualViewport", { value: undefined, configurable: true }),
     ];
   });
@@ -214,12 +228,16 @@ describe("Dock clearance (scroll-padding-bottom)", () => {
     useDockAnchor(ref);
     return <nav ref={ref} aria-label="Primary" />;
   }
+  function DockTop() {
+    return <output aria-label="Dock top">{useDockTop()}</output>;
+  }
   function App({ pill = false }: { pill?: boolean }) {
     return (
       <DockProvider>
         <input aria-label="Carbs" />
         <textarea aria-label="Journal" />
         <button type="button">Save</button>
+        <DockTop />
         {pill && (
           <DockItem id="sync">
             <p>Syncing…</p>
@@ -229,12 +247,14 @@ describe("Dock clearance (scroll-padding-bottom)", () => {
       </DockProvider>
     );
   }
+  const dockTop = () => Number(screen.getByRole("status", { name: "Dock top" }).textContent);
   /** The stack changed size (an item came or went): what its ResizeObserver reports. */
   const stackResized = (h: number) =>
     act(() => {
       stackHeight = h;
       observers.forEach((o) => o());
     });
+  const focus = (name: string) => act(() => screen.getByRole("textbox", { name }).focus());
 
   it("without a keyboard: the nav, the stack and a gap on each — from their heights", () => {
     fakeViewport();
@@ -243,58 +263,136 @@ describe("Dock clearance (scroll-padding-bottom)", () => {
     stackResized(40);
     expect(px()).toBe(NAV + GAP + 40 + GAP);
     // A hardware keyboard (or Tab) into a field: no on-screen keyboard, the same clearance (WCAG 2.4.11).
-    act(() => screen.getByRole("textbox", { name: "Carbs" }).focus());
+    focus("Carbs");
     expect(px()).toBe(NAV + GAP + 40 + GAP);
   });
 
-  it("with the keyboard up and the view panned (as WebKit has it): a few px — never the pan, never what is visible", () => {
-    const vv = fakeViewport();
+  it("without a keyboard, in full however tall the dock (WCAG 2.4.11: landscape, a full dock, Tab)", () => {
+    // A phone on its side: 390 px tall, the dock holding a toast, the rest pill and the sync pill.
+    viewports({ layout: 390 });
+    fakeViewport(390);
     render(<App />);
-    act(() => screen.getByRole("textbox", { name: "Carbs" }).focus());
-    // The keyboard: 463 px visible above it, the visual viewport panned 381 px down to the field.
-    keyboard(vv, { height: 463, offsetTop: 381 });
-    expect(px()).toBeGreaterThan(0);
-    expect(px()).toBeLessThanOrEqual(16);
-    // The suggestion bar comes, Safari pans again: still the same.
-    keyboard(vv, { height: 418, offsetTop: 300 });
-    expect(px()).toBeLessThanOrEqual(16);
-    // A field taking focus with the keyboard already up (field to field) keeps it.
-    act(() => screen.getByRole("textbox", { name: "Journal" }).focus());
-    expect(px()).toBeLessThanOrEqual(16);
+    stackResized(150);
+    expect(px()).toBe(NAV + GAP + 150 + GAP);
+    act(() => screen.getByRole("button", { name: "Save" }).focus());
+    expect(px()).toBe(NAV + GAP + 150 + GAP);
+    focus("Carbs");
+    expect(px()).toBe(NAV + GAP + 150 + GAP);
   });
 
-  it("with the keyboard up, the first save's sync pill arriving in (and leaving) the dock changes nothing", () => {
+  it("with the keyboard up over the nav and the dock: a few px — never the pan, never what is visible", () => {
+    const vv = fakeViewport();
+    render(<App />);
+    focus("Carbs");
+    // The keyboard: 508 px visible above it, the visual viewport panned 200 px down to the field;
+    // it ends at 708, above the nav (760).
+    keyboard(vv, { height: H - KB, offsetTop: 200 });
+    expect(px()).toBe(16);
+    // The suggestion bar comes, Safari pans again: still the same.
+    keyboard(vv, { height: 418, offsetTop: 300 });
+    expect(px()).toBe(16);
+    // A field taking focus with the keyboard already up (field to field) keeps it.
+    focus("Journal");
+    expect(px()).toBe(16);
+  });
+
+  it("with the keyboard up, a sync pill arriving under it (and leaving) changes nothing", () => {
     const vv = fakeViewport();
     const { rerender } = render(<App />);
-    act(() => screen.getByRole("textbox", { name: "Journal" }).focus());
-    keyboard(vv, { height: 463, offsetTop: 381 });
-    const before = clearance();
+    focus("Journal");
+    keyboard(vv, { height: H - KB, offsetTop: 200 });
+    expect(px()).toBe(16);
     rerender(<App pill />);
     stackResized(32);
-    expect(clearance()).toBe(before);
+    expect(px()).toBe(16);
     stackResized(0);
     rerender(<App />);
-    expect(clearance()).toBe(before);
+    expect(px()).toBe(16);
+  });
+
+  it("with the keyboard up and the nav sitting on it (scrolled down): the nav, the stack and a gap above the keyboard's edge", () => {
+    const vv = fakeViewport();
+    render(<App />);
+    focus("Carbs");
+    keyboard(vv, { height: H - KB, offsetTop: 200 });
+    expect(px()).toBe(16);
+    // A scroll down with the keyboard up: the visual viewport pans to the layout viewport's bottom,
+    // where the nav is — only a `scroll` event.
+    pan(vv, KB);
+    expect(px()).toBe(16 + NAV + GAP);
+    stackResized(40);
+    expect(px()).toBe(16 + NAV + GAP + 40);
+    // Halfway: what of the dock and the nav is above the keyboard's edge.
+    pan(vv, KB - 60);
+    expect(px()).toBe(16 + NAV + GAP + 40 - 60);
+    // Back up: covered again.
+    pan(vv, 200);
+    expect(px()).toBe(16);
+  });
+
+  it("with the keyboard up, never more than half of what is visible, whatever the dock holds", () => {
+    const vv = fakeViewport();
+    render(<App />);
+    stackResized(300);
+    focus("Carbs");
+    keyboard(vv, { height: H - KB, offsetTop: KB });
+    expect(px()).toBe(Math.floor((H - KB) / 2));
+  });
+
+  it("pinch zoom: innerHeight shrinks with the scale, the layout viewport doesn't — the keyboard is read against the layout viewport", () => {
+    // Zoomed 1.5×: innerHeight ≈ H / 1.5, clientHeight stays H, the visual viewport is H / 1.5 tall.
+    viewports({ layout: H, inner: H / 1.5 });
+    const vv = fakeViewport(H / 1.5, 0, 1.5);
+    render(<App />);
+    focus("Carbs");
+    // No keyboard (only zoom): the full clearance, and the dock's top in the layout viewport.
+    expect(px()).toBe(NAV + GAP + GAP);
+    expect(dockTop()).toBe(H - NAV - GAP);
+    // The keyboard comes: (H - KB) screen px visible, (H - KB) / 1.5 CSS px. innerHeight - that × scale
+    // is 54 px, as if there were no keyboard; clientHeight - that × scale is the keyboard's 336.
+    keyboard(vv, { height: (H - KB) / 1.5, offsetTop: 100 });
+    expect(px()).toBe(16);
+    stackResized(40);
+    expect(px()).toBe(16);
+    expect(dockTop()).toBe(H - NAV - GAP - 40);
+  });
+
+  it("a browser that shrinks the layout viewport for the keyboard (resizes-content): no keyboard to allow for — the full clearance", () => {
+    const vv = fakeViewport();
+    render(<App />);
+    focus("Carbs");
+    act(() => {
+      viewports({ layout: H - KB });
+      window.dispatchEvent(new Event("resize"));
+    });
+    keyboard(vv, { height: H - KB, offsetTop: 0 });
+    expect(px()).toBe(NAV + GAP + GAP);
+    expect(dockTop()).toBe(H - KB - NAV - GAP);
   });
 
   it("focus leaving the fields (the keyboard on its way down) brings the clearance back", () => {
     const vv = fakeViewport();
     render(<App />);
-    act(() => screen.getByRole("textbox", { name: "Carbs" }).focus());
-    keyboard(vv, { height: 463, offsetTop: 381 });
+    focus("Carbs");
+    keyboard(vv, { height: H - KB, offsetTop: 200 });
+    expect(px()).toBe(16);
     act(() => screen.getByRole("button", { name: "Save" }).focus());
     expect(px()).toBe(NAV + GAP + GAP);
     keyboard(vv, { height: H, offsetTop: 0 });
     expect(px()).toBe(NAV + GAP + GAP);
   });
 
-  it("never more than half of what is visible, whatever the dock holds", () => {
+  it("without a nav: the safe area and 1rem under the stack, and with the keyboard up the same rule in CSS", () => {
     const vv = fakeViewport();
-    render(<App />);
-    stackResized(500);
-    expect(px()).toBeLessThanOrEqual(H / 2);
-    // Something shorter visible and no field focused (pinch zoom, a keyboard going down).
-    keyboard(vv, { height: 300, offsetTop: 0 });
-    expect(px()).toBeLessThanOrEqual(150);
+    render(
+      <DockProvider>
+        <input aria-label="Carbs" />
+      </DockProvider>,
+    );
+    expect(clearance()).toBe("calc(env(safe-area-inset-bottom) + 1rem + 8px)");
+    focus("Carbs");
+    keyboard(vv, { height: H - KB, offsetTop: 200 });
+    // The visible area ends 136 px above the layout viewport's bottom: above the dock unless the safe area and 1rem reach it.
+    expect(clearance()).toBe(`min(calc(16px + max(0px, -136px + 1rem + env(safe-area-inset-bottom))), ${Math.floor((H - KB) / 2)}px)`);
   });
 });

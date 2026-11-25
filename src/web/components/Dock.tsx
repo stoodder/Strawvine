@@ -18,8 +18,8 @@
  * positioned live region (sr-only) and it takes no space either.
  *
  * The provider also keeps html's scroll-padding-bottom (`--dock-clearance`) up to date: see
- * `dockClearance` — heights only, never viewport positions, and a few px while an on-screen
- * keyboard is up.
+ * `dockClearance` — heights and the visual viewport's offsets, never rects; with an on-screen
+ * keyboard up, only what of the nav and the dock is above it.
  */
 import {
   createContext,
@@ -65,24 +65,34 @@ const GAP_PX = 8;
 
 /** With an on-screen keyboard up: room kept between the caret and the keyboard's top edge. */
 const KEYBOARD_CLEARANCE_PX = 16;
-/** The visible area this much shorter than the window, a field focused: an on-screen keyboard is up. */
+/** The visible area this much shorter than the layout viewport, a field focused: an on-screen keyboard is up. */
 const KEYBOARD_MIN_PX = 100;
-/** The clearance never takes more than this share of what is visible. */
+/** With an on-screen keyboard up, the clearance never takes more than this share of what is visible. */
 const MAX_SHARE = 0.5;
 
 /**
+ * The layout viewport's height in CSS px: where the nav and the dock are fixed, and what
+ * `getBoundingClientRect` is relative to. Not `innerHeight`: on iOS that shrinks with pinch zoom
+ * (to about this / the scale) though the layout viewport doesn't. jsdom has no layout (0): then
+ * `innerHeight`.
+ */
+function layoutHeight(): number {
+  return document.documentElement.clientHeight || window.innerHeight;
+}
+
+/**
  * Whether an on-screen keyboard is up: a field that raises one has focus (`focused`, by default
- * the active element) and the visual viewport is at least KEYBOARD_MIN_PX shorter than the
- * window. iOS Safari, and Chrome on Android by default, don't shrink the layout viewport — where
- * the nav and the dock are fixed — for the keyboard: it covers them. (A browser that does shrink
- * it, `interactive-widget=resizes-content`, shrinks `innerHeight` too and reads as no keyboard,
- * which is right: the nav then sits above the keyboard.) Pinch zoom (vv.height × scale stays the
- * window's) and a hardware keyboard (nothing gets shorter) aren't one.
+ * the active element) and the visual viewport, at the page's scale, is at least KEYBOARD_MIN_PX
+ * shorter than the layout viewport. iOS Safari, and Chrome on Android by default, don't shrink the
+ * layout viewport — where the nav and the dock are fixed — for the keyboard. (A browser that does,
+ * `interactive-widget=resizes-content`, shrinks both and reads as no keyboard, which is right:
+ * the nav then sits above the keyboard.) Pinch zoom (vv.height × scale stays the layout
+ * viewport's) and a hardware keyboard (nothing gets shorter) aren't one.
  */
 export function onScreenKeyboardUp(focused: Element | null = document.activeElement): boolean {
   const vv = window.visualViewport;
   if (!vv || !isEditable(focused)) return false;
-  return window.innerHeight - vv.height * vv.scale >= KEYBOARD_MIN_PX;
+  return layoutHeight() - vv.height * vv.scale >= KEYBOARD_MIN_PX;
 }
 
 /**
@@ -90,35 +100,50 @@ export function onScreenKeyboardUp(focused: Element | null = document.activeElem
  * bottom of the screen, so that a control taking focus by keyboard, or a caret the browser brings
  * into view, ends up clear of the nav and the dock (WCAG 2.4.11).
  *
- * Made of heights only — the nav's (`nav`, with its safe-area inset; null when there is none: the
- * stack then sits `env(safe-area-inset-bottom) + 1rem` up), the stack's and the gaps — never of
- * where things are in the viewport: with the keyboard up and the view panned, WebKit's
- * `getBoundingClientRect` for a fixed element and `innerHeight` need not describe the same
- * screen, and `innerHeight - top` (as this was once measured) can come out as tall as everything
- * visible above the keyboard — the caret the first keystroke brings into view then goes to the
- * top of the screen or past it. With the keyboard up the nav and the dock are under it: there is
- * nothing to clear but the keyboard's edge, so it is a few px and doesn't change while typing (a
- * sync pill or toast arriving with the first save). And it is never more than half of what is
- * visible.
+ * Made of heights — the nav's (`nav`, with its safe-area inset; null when there is none: the
+ * stack then sits `env(safe-area-inset-bottom) + 1rem` up), the stack's and the gaps — and, with
+ * an on-screen keyboard up, the visual viewport's height and offset; never of rects. It was once
+ * `innerHeight - the stack's top`. Our hypothesis for the iPhone bug is that with the keyboard up
+ * and the view panned, WebKit reports a fixed element's rect shifted by the pan while
+ * `innerHeight` stays the whole window; that difference then comes out as tall as everything
+ * visible above the keyboard, and the caret the first keystroke brings into view goes to the top
+ * of the screen or past it. (Dock.test.tsx and e2e/40 simulate that geometry; they don't run
+ * WebKit, so they don't show WebKit behaves so.)
+ *
+ * No keyboard (`keyboard` null: Tab, a hardware keyboard): the nav, the stack and the gaps, in
+ * full. With an on-screen keyboard up: KEYBOARD_CLEARANCE_PX above the keyboard's edge, plus
+ * whatever of the dock and the nav sits above that edge. That is nothing while the keyboard
+ * covers them (the usual case), so a sync pill or toast arriving under the keyboard with the
+ * first save changes nothing; it is the nav, a gap and the stack when the fixed nav sits right on
+ * top of the keyboard (where WebKit may put it after a scroll down with the keyboard up). Which
+ * of those it is comes from where the visual viewport ends, not from what the dock holds. And
+ * then never more than half of what is visible.
  */
 export function dockClearance({
   nav,
   stack,
   keyboard,
-  visible,
 }: {
   nav: number | null;
   stack: number;
-  keyboard: boolean;
-  /** The visible height (the visual viewport's). */
-  visible: number;
+  /** While an on-screen keyboard is up: the visual viewport's offsetTop and height, and the layout viewport's height (CSS px). */
+  keyboard: { offsetTop: number; height: number; layout: number } | null;
 }): string {
-  if (keyboard) return `${KEYBOARD_CLEARANCE_PX}px`;
-  const cap = Math.max(KEYBOARD_CLEARANCE_PX, Math.floor(visible * MAX_SHARE));
-  // The stack and a gap above it, on top of what it sits on: the nav and a gap, or the safe area and 1rem.
-  const stackAndGap = stack + GAP_PX;
-  if (nav === null) return `min(calc(env(safe-area-inset-bottom) + 1rem + ${stackAndGap}px), ${cap}px)`;
-  return `${Math.min(Math.round(nav + GAP_PX + stackAndGap), cap)}px`;
+  if (!keyboard) {
+    // The stack and a gap above it, on top of what it sits on: the nav and a gap, or the safe area and 1rem.
+    const stackAndGap = stack + GAP_PX;
+    if (nav === null) return `calc(env(safe-area-inset-bottom) + 1rem + ${stackAndGap}px)`;
+    return `${Math.round(nav + GAP_PX + stackAndGap)}px`;
+  }
+  const cap = Math.max(KEYBOARD_CLEARANCE_PX, Math.floor(keyboard.height * MAX_SHARE));
+  // In the layout viewport, the visible area's bottom edge less the stack's top, were the stack to
+  // sit on the very bottom; with what it sits on (the nav and a gap, or the safe area and 1rem)
+  // added, how much of the dock and the nav is visible above the keyboard.
+  const reach = keyboard.offsetTop + keyboard.height - keyboard.layout + stack;
+  if (nav === null) {
+    return `min(calc(${KEYBOARD_CLEARANCE_PX}px + max(0px, ${Math.round(reach)}px + 1rem + env(safe-area-inset-bottom))), ${cap}px)`;
+  }
+  return `${Math.min(Math.round(KEYBOARD_CLEARANCE_PX + Math.max(0, reach + nav + GAP_PX)), cap)}px`;
 }
 
 export function DockProvider({ children }: { children: ReactNode }) {
@@ -184,41 +209,47 @@ export function DockProvider({ children }: { children: ReactNode }) {
     return () => ro.disconnect();
   }, []);
 
-  // The stack's top edge in the viewport. An empty stack has no height, so its top is where it
-  // would start (just above the nav). And the clearance styles.css turns into html's
+  // The stack's top edge in the layout viewport. An empty stack has no height, so its top is where
+  // it would start (just above the nav). And the clearance styles.css turns into html's
   // scroll-padding-bottom (see dockClearance). Both from heights where there is a nav; again when
-  // the stack or the nav changes size, on viewport resizes (rotation, the on-screen keyboard) and
+  // the stack or the nav changes size, on viewport resizes (rotation, the on-screen keyboard), as
+  // the visual viewport pans (with the keyboard up, that decides what of the nav is above it) and
   // as focus enters or leaves a field (the keyboard comes or goes with it).
   useLayoutEffect(() => {
     const stack = stackRef.current;
     if (!stack) return;
+    const root = document.documentElement;
     const measure = (focused: Element | null = document.activeElement) => {
-      if (base !== null) setTop(Math.round(window.innerHeight - base - GAP_PX - height));
+      const layout = layoutHeight();
+      if (base !== null) setTop(Math.round(layout - base - GAP_PX - height));
       else {
         const r = stack.getBoundingClientRect();
         // No layout (jsdom, display: none): fall back to the viewport's bottom edge.
-        setTop(r.top <= 0 && r.height === 0 ? window.innerHeight : Math.round(Math.min(window.innerHeight, r.top)));
+        setTop(r.top <= 0 && r.height === 0 ? layout : Math.round(Math.min(layout, r.top)));
       }
+      const vv = window.visualViewport;
       const clearance = dockClearance({
         nav: base,
         stack: height,
-        keyboard: onScreenKeyboardUp(focused),
-        visible: Math.min(window.innerHeight, window.visualViewport?.height ?? window.innerHeight),
+        keyboard: vv && onScreenKeyboardUp(focused) ? { offsetTop: vv.offsetTop, height: vv.height, layout } : null,
       });
-      document.documentElement.style.setProperty("--dock-clearance", clearance);
+      // The visual viewport scrolls often: write only a change.
+      if (root.style.getPropertyValue("--dock-clearance") !== clearance) root.style.setProperty("--dock-clearance", clearance);
     };
-    const onResize = () => measure();
+    const onViewport = () => measure();
     const onFocusIn = (e: FocusEvent) => measure(e.target as Element | null);
     // Field to field keeps the keyboard: judged by where focus goes, not by the body in between.
     const onFocusOut = (e: FocusEvent) => measure(e.relatedTarget as Element | null);
     measure();
-    window.addEventListener("resize", onResize);
-    window.visualViewport?.addEventListener("resize", onResize);
+    window.addEventListener("resize", onViewport);
+    window.visualViewport?.addEventListener("resize", onViewport);
+    window.visualViewport?.addEventListener("scroll", onViewport);
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onFocusOut);
     return () => {
-      window.removeEventListener("resize", onResize);
-      window.visualViewport?.removeEventListener("resize", onResize);
+      window.removeEventListener("resize", onViewport);
+      window.visualViewport?.removeEventListener("resize", onViewport);
+      window.visualViewport?.removeEventListener("scroll", onViewport);
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
     };
@@ -320,12 +351,13 @@ export function useDockHeight(): number {
 }
 
 /**
- * The viewport y of the dock's top edge: content below it is covered by the dock (rest pill,
- * toasts, sync pill) or the nav under it. With nothing docked it is the top of the nav (where the
- * stack would start); outside a <DockProvider>, `window.innerHeight`. Updates when the stack or
- * the nav changes size and when the viewport resizes. For scroll helpers ("reveal above the dock").
+ * The y of the dock's top edge in the layout viewport (what `getBoundingClientRect` reports,
+ * pinch zoom or not): content below it is covered by the dock (rest pill, toasts, sync pill) or
+ * the nav under it. With nothing docked it is the top of the nav (where the stack would start);
+ * outside a <DockProvider>, the layout viewport's bottom. Updates when the stack or the nav
+ * changes size and when the viewport resizes. For scroll helpers ("reveal above the dock").
  */
 export function useDockTop(): number {
   const top = useContext(DockTopContext);
-  return top ?? (typeof window === "undefined" ? 0 : window.innerHeight);
+  return top ?? (typeof window === "undefined" ? 0 : layoutHeight());
 }
