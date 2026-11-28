@@ -97,7 +97,9 @@ an older server without it — the block stays an accessory block with all its s
 be rolled back. From the release that writes rehab (`kind: "rehab"` blocks, `settings.rehab`) onward it can't: an
 older server refuses (400) every save of a day holding a rehab block, its settings save drops the rehab blocks
 (`settings.rehab`) as a key it doesn't know, and an older build's merge can pair a rehab block with an accessory block
-and save it as one. Those releases are roll forward only: fix forward, or restore a backup taken before them.
+and save it as one. Those releases are roll forward only: fix forward, or restore a backup taken before them. And never
+roll back, from any release, past the one that brought the rehab gate (build level 1, see _Outdated builds and rehab_):
+a server without it lets devices still on an outdated build write rehab.
 
 Avoid long table rewrites and locks: a booting dyno waits at most 30 s for the migration lock (Heroku kills a dyno that
 doesn't bind its port within 60 s) and the release phase at most 15 minutes.
@@ -113,6 +115,11 @@ doesn't bind its port within 60 s) and the release phase at most 15 minutes.
   environment, which could disagree with what the client was compiled with — and sends it as the `x-strawvine-build`
   header on every `/api/*` response, so an open client can tell a newer deploy is live. No header is sent in dev
   (no `dist/build-id.txt`).
+- The **build level** (`BUILD_LEVEL` in `src/shared/buildLevel.ts`) orders the client code: a whole number in the
+  source, which the client sends as `x-strawvine-build-level` on every API call. The build id can't do that — it is
+  any label (CI's image uses the commit sha), and rebuilding old code, as redeploying an earlier commit does, stamps a
+  newer one. Raise the level by one in a change that makes older clients unsafe for some write (see _Outdated builds
+  and rehab_); never lower it.
 
 ## Deploying to Heroku
 
@@ -138,15 +145,47 @@ default. The log says exactly what to fix.
 
 ### Environment
 
-| Variable         |                                                                                                                                                                                         |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`   | Postgres connection string (TLS is used automatically for non-local hosts)                                                                                                              |
-| `APP_PASSWORD`   | the single sign-in password (production: 12+ characters)                                                                                                                                |
-| `SESSION_SECRET` | signs session cookies; production requires `openssl rand -hex 32` strength                                                                                                              |
-| `NODE_ENV`       | `production` in the image: secure `__Host-` cookie, HTTPS redirect, strict secret checks                                                                                                |
-| `TRUST_PROXY`    | `1` to trust `X-Forwarded-For`/`-Proto` from a TLS-terminating proxy (login rate limiting by client IP, HTTP→HTTPS redirect). Defaults to on when `DYNO` is set (Heroku), off elsewhere |
-| `BUILD_ID`       | **build time only** (`npm run build` / `docker build --build-arg`): labels the build (see _Builds_). Ignored at runtime                                                                 |
-| `PORT`           | default 3000                                                                                                                                                                            |
+| Variable                |                                                                                                                                                                                              |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`          | Postgres connection string (TLS is used automatically for non-local hosts)                                                                                                                   |
+| `APP_PASSWORD`          | the single sign-in password (production: 12+ characters)                                                                                                                                     |
+| `SESSION_SECRET`        | signs session cookies; production requires `openssl rand -hex 32` strength                                                                                                                   |
+| `NODE_ENV`              | `production` in the image: secure `__Host-` cookie, HTTPS redirect, strict secret checks                                                                                                     |
+| `TRUST_PROXY`           | `1` to trust `X-Forwarded-For`/`-Proto` from a TLS-terminating proxy (login rate limiting by client IP, HTTP→HTTPS redirect). Defaults to on when `DYNO` is set (Heroku), off elsewhere      |
+| `BUILD_ID`              | **build time only** (`npm run build` / `docker build --build-arg`): labels the build (see _Builds_). Ignored at runtime                                                                      |
+| `MIN_REHAB_BUILD_LEVEL` | lowest build level that may write workouts or settings involving rehab (default 1; 1 up to the deployed build's own level, else the server refuses to boot). See _Outdated builds and rehab_ |
+| `PORT`                  | default 3000                                                                                                                                                                                 |
+
+### Outdated builds and rehab
+
+A device can go on running a cached build for days: an installed app on a phone opens its cached version and only
+switches on a later launch. Builds from before the rehab gate (build level 1) send no build level, and their merge can
+pair a rehab block with an accessory block of the same exercises and save the two as one accessory block. So the server
+refuses, with a 409 `{ "code": "upgrade-required" }` and nothing written, any write from a build below
+`MIN_REHAB_BUILD_LEVEL` (default 1) that involves rehab:
+
+- a workout save or delete when the workout it sends or the one stored holds a rehab block (checked before the
+  revision, so such a build is never handed a stored rehab workout to merge);
+- a settings save that would change the rehab blocks (`settings.rehab`). One without the key — a build that doesn't
+  know it — is saved with the stored rehab blocks kept.
+
+Everything else such a build writes (days, exercises, maxes, workouts and settings without rehab) goes through as
+before. The refused change stays on that device, not saved, with "This version of the app is out of date. Reopen the
+app to update; the change is kept." (Retry sends it once more and is refused again; it never loops.) When the app is
+reopened on the new build, it sends the change on its own, merged with whatever changed since. A build with the gate
+that is refused shows **Update the app** in the dock, which reloads into the new version.
+
+Deploying:
+
+- The gate ships one release before anything writes rehab blocks (it ships with wave 2; the new Train writes them in
+  the next one), so rolling the rehab-writing release back still lands on a server with the gate. Never roll back past
+  the release that brought it (see _Migrations must be backward compatible_).
+- The boot log says the levels: `Strawvine listening on :3000 (build 1795884795, level 1; rehab writes from level 1)`.
+  Each refusal logs `Outdated build refused {"method":"PUT","route":"/api/sessions/:date","level":0,"min":1}` (no data).
+  Refusals that keep coming mean a device is still on an old build: close the app there and open it again.
+- To shut out a build found unsafe later: raise `BUILD_LEVEL` in the fix and deploy it, then
+  `heroku config:set MIN_REHAB_BUILD_LEVEL=<that level>`. The server refuses to boot with a minimum below 1 or above its
+  own build's level (it would refuse its own app).
 
 ### Sessions
 
