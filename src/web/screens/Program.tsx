@@ -1,7 +1,8 @@
 /**
  * Program (`/program`, reached from Train's header and from Settings): the training program —
  * where the cycle is now (and the next cycle, once one is set up), the weekly layout, the targets
- * and training days, the cycle's weeks, the rules, the rep-max table and the exercise library. It
+ * and training days, the rehab blocks (behind the `rehab` flag), the cycle's weeks, the rules, the
+ * rep-max table and the exercise library. It
  * edits the same settings document as Settings, through the same save path (`useSettingsEditor`).
  *
  * The weekly layout, targets and weeks are the plan's (SPEC §6.4). While a next cycle is set up, one
@@ -26,11 +27,13 @@ import {
   type PlanEdit,
 } from "../components/program/ProgramSections";
 import { useCycleChoice } from "../components/program/useCycleChoice";
+import { RehabBlockSection } from "../components/program/RehabBlockSection";
 import { PROGRAM_SECTIONS } from "../components/program/sections";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { JumpList, useJumpToHash } from "../components/settings/JumpList";
 import { useSettingsEditor } from "../components/settings/useSettingsEditor";
 import { useTitle } from "../components/useTitle";
+import { feature } from "../lib/features";
 import { useData } from "../lib/store";
 
 /**
@@ -48,6 +51,16 @@ export function programBackTarget(state: unknown): { to: string; label: string }
   return { to: "/train", label: "Back to Train" };
 }
 
+/**
+ * The jump list's sections: Program's, with Rehab after Targets while the `rehab` flag is on for
+ * this device (lib/features.ts) — without it, exactly as before.
+ */
+export function programJumps(rehab: boolean): ReadonlyArray<readonly [string, string]> {
+  if (!rehab) return PROGRAM_SECTIONS;
+  const at = PROGRAM_SECTIONS.findIndex(([id]) => id === "targets") + 1;
+  return [...PROGRAM_SECTIONS.slice(0, at), ["rehab", "Rehab"], ...PROGRAM_SECTIONS.slice(at)];
+}
+
 export function ProgramScreen() {
   const { data, today } = useData();
   const { settings, training, error, setProgram, setTraining, undoableSettings, setPlan, undoablePlan } = useSettingsEditor();
@@ -55,6 +68,7 @@ export function ProgramScreen() {
   const location = useLocation();
   const choice = useCycleChoice();
   useTitle("Program");
+  const rehab = feature("rehab");
 
   useJumpToHash();
 
@@ -89,7 +103,7 @@ export function ProgramScreen() {
         title="Program"
         tagline="The program Train follows. Change it and the sessions ahead recalculate."
       />
-      <JumpList label="Program sections" items={PROGRAM_SECTIONS} />
+      <JumpList label="Program sections" items={programJumps(rehab)} />
       {error && (
         <p role="alert" className="mt-4 text-sm text-warn">
           {error}
@@ -111,6 +125,9 @@ export function ProgramScreen() {
       {next && <PlanSwitch value={onNext ? "next" : "this"} onChange={setPicked} nextStart={next.start} />}
       <WeeklyLayout id="layout" {...edit} />
       <PlanTargetsSection id="targets" {...edit} />
+      {rehab && (
+        <RehabBlockSection id="rehab" settings={settings} sessions={data.sessions} today={today} undoableSettings={undoableSettings} />
+      )}
       <CycleWeeks id="weeks" {...edit} />
       <ProgramRules
         id="rules"

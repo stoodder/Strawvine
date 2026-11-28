@@ -13,6 +13,7 @@ import { useToast } from "../components/Toast";
 import { useFocusAfter } from "../components/useFocusAfter";
 import { Field, Section, Toggle } from "../components/ui";
 import { useTitle } from "../components/useTitle";
+import { feature } from "../lib/features";
 import { forgetDevice, signOut, useSyncInfo } from "../lib/store";
 import { noteOfflineSignOut } from "./Login";
 
@@ -68,6 +69,10 @@ function SettingsBody() {
           {(
             [
               ["/program#targets", "Steps, Zone 2 & metcon", "Daily targets and training days", "targets"],
+              // Behind the `rehab` flag (lib/features.ts): without it, the two rows as before.
+              ...(feature("rehab")
+                ? ([["/program#rehab", "Rehab", "Rehab blocks: their days, length and history", "rehab"]] as const)
+                : []),
               ["/program", "Training program", "Lifting days, cycles, rules, rest timers and the exercise library", "program"],
             ] as const
           ).map(([to, title, hint, key]) => (
