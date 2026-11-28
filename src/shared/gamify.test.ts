@@ -457,6 +457,69 @@ describe("moved sessions (do this session today)", () => {
   });
 });
 
+describe("rehab is outside the lift, the streak and the strength achievements (SPEC §6.8)", () => {
+  const knee = {
+    id: "knee",
+    name: "Knee rehab",
+    start: "2026-11-02",
+    weeks: 6,
+    days: [false, true, false, true, false, true, false],
+    carry: "last" as const,
+  };
+  const withRehab: Settings = { ...settings, rehab: { programs: [knee] } };
+  const set = (id: string, reps: number, weight: number, amrap = false) => ({
+    id,
+    targetReps: reps,
+    targetWeight: weight,
+    reps,
+    weight,
+    done: true,
+    amrap,
+    appliedProgressionLb: null,
+  });
+  /** Only rehab logged on `date` (with the main lift's exercise, so a strength reading would notice it). */
+  const rehabOnly = (date: string): Session => ({
+    date,
+    label: "Training",
+    cycle: 1,
+    week: 1,
+    deload: false,
+    primaryMaxLb: null,
+    blocks: [
+      { id: `r-${date}`, kind: "rehab", rehab: "knee", exercises: [{ exerciseId: 1, measure: "reps", sets: [set(`s-${date}`, 12, 100)] }] },
+    ],
+    notes: "",
+    completedAt: null,
+  });
+  const days = dateRange("2026-11-02", "2026-12-06").map(fullDay);
+
+  it("a rehab-only session never closes the lift: program days stay open, rest days need no lift", () => {
+    const sessions = dateRange("2026-11-02", "2026-12-06").map(rehabOnly);
+    const data = appData({ settings: withRehab, days, sessions });
+    // Mon–Fri are program days (lift not done); Sat and Sun close on the rest of the checklist.
+    expect([...closedDates(data, "2026-12-06")].sort()).toEqual(
+      dateRange("2026-11-02", "2026-12-06").filter((d) => [0, 6].includes(new Date(`${d}T12:00:00Z`).getUTCDay())),
+    );
+    expect(streaks(data, "2026-12-06")).toEqual(streaks(appData({ settings: withRehab, days }), "2026-12-06"));
+    expect(dayChecklist("2026-11-02", data).find((i) => i.key === "lift")).toMatchObject({ done: false });
+    expect(dayChecklist("2026-11-08", data).map((i) => i.key)).not.toContain("lift");
+    expect(buildModel(data, "2026-11-10").checkin.lifts).toEqual({ planned: 5, done: 0 });
+  });
+
+  it("no cycle completion or rep PR from rehab; lifetime volume sums every block, rehab included (as an older build does)", () => {
+    const sessions = dateRange("2026-11-02", "2026-12-06").map(rehabOnly);
+    const keys = achievements(appData({ settings: withRehab, sessions }), "2026-12-31").map((a) => a.key);
+    expect(
+      keys.filter((k) => k.startsWith("cycle-") || k.startsWith("amrap-") || k.startsWith("close-") || k.startsWith("streak-")),
+    ).toEqual([]);
+    const heavy = sessions.map((s) => ({
+      ...s,
+      blocks: s.blocks.map((b) => ({ ...b, exercises: b.exercises.map((e) => ({ ...e, sets: [set(`h-${s.date}`, 10, 1000)] })) })),
+    }));
+    expect(find(appData({ settings: withRehab, sessions: heavy }), "volume-250000")).toMatchObject({ date: "2026-11-26" });
+  });
+});
+
 describe("scheduledProgramDay", () => {
   it("matches the cycle position rule exactly", () => {
     const programs = [

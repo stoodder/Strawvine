@@ -10,7 +10,17 @@
 import { addDays, type ISODate } from "./dates";
 import { currentMax, cyclePosition, planAt, programDayFor } from "./program";
 import type { Block, Session } from "./schemas";
-import { mainLiftAdded, mainLiftBlock, mainLiftSwap, planDateOf, planHasNoMainLift, planSignature, type BuildContext } from "./session";
+import {
+  buildSession,
+  buildSessionFrom,
+  mainLiftAdded,
+  mainLiftBlock,
+  mainLiftSwap,
+  planDateOf,
+  planHasNoMainLift,
+  planSignature,
+  type BuildContext,
+} from "./session";
 
 type Ctx = Omit<BuildContext, "sessions">;
 
@@ -99,6 +109,35 @@ export function removeMainLift(session: Session, ctx: Pick<Ctx, "settings">): { 
   if (session.completedAt) return { refused: "finished" };
   if (hasLogged(main)) return { refused: "logged" };
   return { session: { ...session, primaryMaxLb: null, blocks: session.blocks.filter((b) => b !== main) } };
+}
+
+/**
+ * "Recalculate" (the plan changed, a new max, a main lift missing): the session's main lift as the
+ * plan calculates it now for its program day (`plannedFor ?? date`) — or, swapped or added, that
+ * lift's (this week's scheme on its max), unless the plan now has that lift itself — with the
+ * plan's label, cycle, week, deload, max and signature. Only the main block is replaced (fresh
+ * ids; it stays skipped when it was): accessories, Core and rehab blocks, notes and everything
+ * else stay as they are. Train offers it while nothing is logged.
+ */
+export function recalculateMainLift(session: Session, ctx: BuildContext): Session {
+  const plannedFor = session.plannedFor ?? null;
+  const planFresh = plannedFor ? buildSessionFrom(plannedFor, session.date, ctx) : buildSession(session.date, ctx);
+  const freshPrimary = mainOf(planFresh);
+  const unplanned = mainLiftSwap(session)?.to ?? mainLiftAdded(session, ctx);
+  const swapPlan =
+    unplanned !== null && freshPrimary?.exercises[0]?.exerciseId !== unplanned ? mainLiftBlock(plannedFor ?? session.date, ctx, unplanned) : null;
+  const planPrimary = swapPlan?.block ?? freshPrimary;
+  const nextPrimary = planPrimary && (mainOf(session)?.skipped ? { ...planPrimary, skipped: true } : planPrimary);
+  return {
+    ...session,
+    label: planFresh.label,
+    cycle: planFresh.cycle,
+    week: planFresh.week,
+    deload: planFresh.deload,
+    primaryMaxLb: swapPlan?.primaryMaxLb ?? planFresh.primaryMaxLb ?? session.primaryMaxLb,
+    planSig: planFresh.planSig,
+    blocks: [...(nextPrimary ? [nextPrimary] : []), ...session.blocks.filter((b) => b.kind !== "primary")],
+  };
 }
 
 /**

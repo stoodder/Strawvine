@@ -206,7 +206,7 @@ function scaleLoad(weightLb: number, factor: number, roundToLb: number): number 
  * was done (reps then, timed now), only the set count and loads carry: every target starts at the
  * new measure's `defaultTarget`.
  */
-function carryOverExercise(
+export function carryOverExercise(
   ex: BlockExercise,
   loadFactor: number,
   roundToLb: number,
@@ -278,12 +278,36 @@ export function setsForAddedExercise(
   exercise: Pick<Exercise, "id" | "measure" | "weighted">,
   into: Pick<Session, "date" | "plannedFor" | "deload">,
   ctx: Pick<BuildContext, "settings" | "sessions">,
+  opts: { rehab?: boolean } = {},
 ): SetEntry[] {
   const { program } = ctx.settings;
-  const done = lastPerformance(exercise.id, into.date, ctx, planDateOf(into));
-  const factor = done ? loadFactor(program, into.deload, done.session.deload) : 1;
+  // Rehab (SPEC §6.8): its own last rehab performance first, else the accessory one; never scaled
+  // (rehab isn't in the strength cycle: a deload week means nothing to it).
+  const rehab = opts.rehab ? lastRehabPerformance(exercise.id, into.date, ctx.sessions) : null;
+  const done = rehab ?? lastPerformance(exercise.id, into.date, ctx, planDateOf(into));
+  const factor = done && !opts.rehab ? loadFactor(program, into.deload, done.session.deload) : 1;
   const carried = done ? carryOverExercise(done.exercise, factor, program.roundToLb, exercise).sets : [];
   return carried.length ? carried : Array.from({ length: 3 }, () => blankSet({ targetReps: defaultTarget(exercise.measure) }));
+}
+
+/**
+ * The most recent time `exerciseId` was done (not skipped) in a rehab block of a session before
+ * `date` — of the rehab block `rehabId` when given (a session's rehab blocks name theirs), else
+ * of any.
+ */
+export function lastRehabPerformance(
+  exerciseId: number,
+  date: ISODate,
+  sessions: ReadonlyArray<Session>,
+  rehabId?: string,
+): { session: Session; exercise: BlockExercise } | null {
+  for (const s of sessions.filter((x) => x.date < date).sort(byDateDesc))
+    for (const b of s.blocks) {
+      if (b.kind !== "rehab" || (rehabId !== undefined && b.rehab !== rehabId)) continue;
+      const exercise = b.exercises.find((e) => e.exerciseId === exerciseId && !e.skipped);
+      if (exercise) return { session: s, exercise };
+    }
+  return null;
 }
 
 /**
@@ -393,16 +417,28 @@ export function mainLiftAdded(session: Pick<Session, "date" | "plannedFor" | "pl
   return main.exerciseId;
 }
 
+/**
+ * A day's strength session from the plan (SPEC §6.5): the main lift calculated, the accessory
+ * blocks carried from `templateSource`, each into its own subsection (`section`: Core; absent =
+ * Accessories), stored Accessories first, then Core (`normalizeSectionOrder`'s order). A source
+ * saved before subsections existed (no block has a `section`) files a block made only of
+ * core-category exercises under Core, so the old core couplet lands there on the first pre-fill,
+ * with no migration. Rehab is never part of it — the day's rehab draft is added by
+ * `withRehabDraft` (rehab.ts) — so this stays exactly the strength plan every caller had.
+ */
 export function buildSession(date: ISODate, ctx: BuildContext): Session {
   const { program } = ctx.settings;
   const { day, pos, block: primary, primaryMaxLb } = plannedPrimary(date, ctx);
   const blocks: Block[] = primary ? [primary] : [];
+  const core: Block[] = [];
 
   const source = templateSource(date, ctx);
   if (source) {
     // Loads are scaled from the week they come from to this one: down into a deload, and back up
     // when only a deload performance exists, so deload loads never carry into a normal week.
     const factorFrom = (from: Session) => loadFactor(program, pos?.week.deload ?? false, from.deload);
+    const legacy = !source.blocks.some((b) => b.section !== undefined);
+    const isCore = (id: number) => ctx.exercises.find((x) => x.id === id)?.category === "core";
     for (const b of source.blocks) {
       if (b.kind !== "accessory") continue;
       const exercises = b.exercises.flatMap((e) => {
@@ -416,9 +452,13 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
             : carryOverExercise(e, factorFrom(source), program.roundToLb, ex),
         ];
       });
-      if (exercises.length) blocks.push({ id: newId(), kind: "accessory", exercises });
+      if (!exercises.length) continue;
+      if (b.section === "core" || (legacy && exercises.every((e) => isCore(e.exerciseId))))
+        core.push({ id: newId(), kind: "accessory", exercises, section: "core" });
+      else blocks.push({ id: newId(), kind: "accessory", exercises });
     }
   }
+  blocks.push(...core);
 
   return {
     date,
@@ -439,10 +479,33 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
  * week, and the accessories carried into it — saved under `targetDate`. Keeps the source day's
  * label, cycle, week and plan signature, and records `plannedFor: sourceDate` so pre-fill, the
  * plan-changed check and recalculation keep following the source day.
+ *
+ * It moves strength only (SPEC §6.8): the target day keeps its own rehab blocks — those of `keep`
+ * (the session saved on `targetDate`, which this replaces), after the moved strength. With none,
+ * the target day's rehab stays its live draft (`withRehabDraft`, rehab.ts).
  */
-export function buildSessionFrom(sourceDate: ISODate, targetDate: ISODate, ctx: BuildContext): Session {
+export function buildSessionFrom(sourceDate: ISODate, targetDate: ISODate, ctx: BuildContext, keep?: Session | null): Session {
   const planned = buildSession(sourceDate, ctx);
-  return { ...planned, date: targetDate, plannedFor: sourceDate === targetDate ? null : sourceDate };
+  const moved: Session = { ...planned, date: targetDate, plannedFor: sourceDate === targetDate ? null : sourceDate };
+  const rehab = keep?.blocks.filter((b) => b.kind === "rehab") ?? [];
+  return rehab.length ? { ...moved, blocks: [...moved.blocks, ...rehab] } : moved;
+}
+
+/** A block of Strength (SPEC §6.7): the main lift or an accessory block (Accessories or Core) — never rehab. */
+export const isStrengthBlock = (b: Pick<Block, "kind">): boolean => b.kind === "primary" || b.kind === "accessory";
+
+/**
+ * "Reset to plan" — and "Back to today's plan" of a moved session — scoped to strength: the
+ * session's strength rebuilt from its own date's plan (`buildSession(session.date)`: label, week,
+ * main lift, accessories; open, not moved), its rehab blocks and notes kept. Null when nothing else
+ * is left in it (no rehab block, no notes): the document is deleted then, as before. Offered while
+ * no strength set is logged (`isStrengthStarted`).
+ */
+export function resetStrength(session: Session, ctx: BuildContext): Session | null {
+  const rehab = session.blocks.filter((b) => b.kind === "rehab");
+  if (!rehab.length && !session.notes) return null;
+  const plan = buildSession(session.date, ctx);
+  return { ...plan, notes: session.notes, blocks: [...plan.blocks, ...rehab] };
 }
 
 /**
@@ -577,16 +640,31 @@ export function blockCounts(block: Block): SetCounts {
   return { done, total };
 }
 
-/** Logged and total sets of a session, leaving out exercises (and a main lift) skipped today. */
+/**
+ * Logged and total sets of a session, leaving out exercises (and a main lift) skipped today: the
+ * whole session, rehab included (as an older build counts it). Finish, the dock pill, the Lift row
+ * and `settled` go by `strengthCounts`.
+ */
 export function sessionCounts(session: Session): SetCounts {
+  return countsOf(session.blocks);
+}
+
+/** `blockCounts` summed over the blocks `which` keeps (all by default). */
+export function countsOf(blocks: ReadonlyArray<Block>, which: (b: Block) => boolean = () => true): SetCounts {
   let done = 0;
   let total = 0;
-  for (const b of session.blocks) {
+  for (const b of blocks) {
+    if (!which(b)) continue;
     const c = blockCounts(b);
     done += c.done;
     total += c.total;
   }
   return { done, total };
+}
+
+/** Logged and total sets of Strength only (main lift, Accessories, Core): what "finished" is about. */
+export function strengthCounts(session: Pick<Session, "blocks">): SetCounts {
+  return countsOf(session.blocks, isStrengthBlock);
 }
 
 /**
@@ -729,8 +807,22 @@ export function sessionVolume(session: Session): number {
   return total;
 }
 
+/** `sessionVolume` of Strength only: the Strength section's "lb moved" (lifetime volume sums every block). */
+export function strengthVolume(session: Session): number {
+  return sessionVolume({ ...session, blocks: session.blocks.filter(isStrengthBlock) });
+}
+
+/** A set of the session is logged (any block, rehab included). */
 export function isSessionStarted(session: Session): boolean {
   return session.blocks.some((b) => b.exercises.some((e) => e.sets.some((s) => s.done)));
+}
+
+/**
+ * A set of Strength is logged — what Reset to plan, "Do this session today" ("today already holds
+ * logged work") and Strength's Not today look at. Rehab sets don't count.
+ */
+export function isStrengthStarted(session: Pick<Session, "blocks">): boolean {
+  return session.blocks.some((b) => isStrengthBlock(b) && b.exercises.some((e) => e.sets.some((s) => s.done)));
 }
 
 /**
@@ -756,7 +848,7 @@ export function effectiveMeasure(ex: BlockExercise, exercise: Pick<Exercise, "me
 const viewMemo = new WeakMap<Session, { exercises: ReadonlyArray<Pick<Exercise, "id" | "measure">>; view: Session }>();
 
 /**
- * `session` as it is shown and logged: every accessory exercise through `effectiveBlockExercise`.
+ * `session` as it is shown and logged: every accessory (and rehab) exercise through `effectiveBlockExercise`.
  * A completed session is history and shows as saved; the main lift is always counted in reps.
  * Blocks and exercises that don't change are the same objects (the whole session when nothing
  * does), so an edit made on the view can be told apart (`savedAfterEdit`). Memoized per session
@@ -768,7 +860,7 @@ export function effectiveSession(session: Session, exercises: ReadonlyArray<Pick
   if (memo && memo.exercises === exercises) return memo.view;
   let changed = false;
   const blocks = session.blocks.map((b) => {
-    if (b.kind !== "accessory") return b;
+    if (b.kind === "primary") return b;
     const xs = b.exercises.map((e) =>
       effectiveBlockExercise(
         e,

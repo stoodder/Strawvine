@@ -53,7 +53,7 @@ export function rejoinSuperset(
   const ids = new Set(known.flatMap((c) => c.sets.map((s) => s.id)));
   const matches = (e: BlockExercise) => e.exerciseId === exerciseId && (known.includes(e) || e.sets.some((s) => ids.has(s.id)));
   let place: ExPlace | null = null;
-  const own = session.blocks.find((b) => b.id === ownId && b.kind === "accessory");
+  const own = session.blocks.find((b) => b.id === ownId && b.kind !== "primary");
   if (own) {
     let i = own.exercises.findIndex(matches);
     if (i === -1 && own.exercises.length === 1 && own.exercises[0]!.exerciseId === exerciseId) i = 0;
@@ -61,7 +61,7 @@ export function rejoinSuperset(
   }
   if (!place)
     for (const b of session.blocks) {
-      if (b.kind !== "accessory") continue;
+      if (b.kind === "primary") continue;
       const i = b.exercises.findIndex(matches);
       if (i !== -1) {
         place = { blockId: b.id, exIdx: i };
@@ -69,7 +69,7 @@ export function rejoinSuperset(
       }
     }
   if (!place) return { cannot: "gone" };
-  const dest = session.blocks.find((b) => b.id === from.blockId && b.kind === "accessory");
+  const dest = session.blocks.find((b) => b.id === from.blockId && b.kind !== "primary");
   if (!dest) return { cannot: "superset-gone" };
   if (place.blockId === from.blockId) return { session: reorderInBlock(session, from.blockId, place.exIdx, from.exIdx) };
   if (dest.exercises.length >= MAX_SUPERSET) return { cannot: "full" };

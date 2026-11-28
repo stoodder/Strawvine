@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./defaults";
 import { amrapPrs, checklist } from "./gamify";
 import { currentMax, mainLiftSets, cyclePosition } from "./program";
-import { sessionSchema, type Exercise, type MaxEntry, type Session } from "./schemas";
+import { sessionSchema, type Block, type Exercise, type MaxEntry, type Session } from "./schemas";
 import { buildSession, buildSessionFrom, mainLiftAdded, mainLiftSwap, planChanged, plannedLiftOf, planSignature, templateSource } from "./session";
-import { addBlocked, removeMainLift, swapBlocked, swapChoices, swapMainLift, swapSuggestion, undoSwap } from "./swap";
+import { addBlocked, recalculateMainLift, removeMainLift, swapBlocked, swapChoices, swapMainLift, swapSuggestion, undoSwap } from "./swap";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 // The program starts Monday 2026-11-02 (week 1: 6/8/10/12, AMRAP last).
@@ -476,5 +476,56 @@ describe("swapSuggestion (between days, derived)", () => {
     expect(currentMax(bumped, ids.backSquat)!.valueLb).toBe(318);
     const wed = swapMainLift(buildSession(WED, { ...ctx, maxEntries: bumped }), ids.deadlift, { ...ctx, maxEntries: bumped });
     expect("session" in wed && wed.session.primaryMaxLb).toBe(405);
+  });
+});
+
+describe("swap and Recalculate keep Core and rehab (SPEC §6.8)", () => {
+  const coreBlock: Block = { id: "core", kind: "accessory", section: "core", exercises: [{ exerciseId: 11, measure: "reps", sets: [set("k1", 10, 0)] }] };
+  const rehabBlock: Block = { id: "knee", kind: "rehab", rehab: "knee", exercises: [{ exerciseId: 10, measure: "reps", sets: [set("q1", 12, 20)] }] };
+  /** Tuesday with its accessories, a Core block and logged rehab. */
+  const full = (s: Session): Session => ({ ...s, blocks: [...s.blocks, coreBlock, rehabBlock] });
+  const others = (s: Session) => s.blocks.filter((b) => b.kind !== "primary");
+
+  it("a swap replaces only the main block; a removal and the Undo keep the rest in place", () => {
+    const tue = full(buildSession(TUE, history));
+    expect(swapBlocked(tue)).toBeNull(); // a logged rehab set is no logged main-lift set
+    const s = swapped(tue, ids.backSquat);
+    expect(others(s)).toEqual(others(tue));
+    expect(s.blocks.at(-1)).toBe(rehabBlock);
+    expect(undoSwap(s, s, tue)).toEqual(tue);
+    const fri = full(buildSession(FRI, history));
+    const added = swapped(fri, ids.strictPress);
+    expect(added.blocks[0]!.kind).toBe("primary");
+    expect(added.blocks.slice(1)).toEqual(fri.blocks);
+    const removed = removeMainLift(added, ctx);
+    expect("session" in removed && removed.session.blocks).toEqual(fri.blocks);
+  });
+
+  it("Recalculate replaces only the main block (plan changed, new max): Core, rehab and notes stay; a skipped main lift stays skipped", () => {
+    const tue = { ...full(buildSession(TUE, history)), notes: "knee ok" };
+    const newMax = { ...history, maxEntries: [...maxEntries, max(9, ids.deadlift, 425, "2026-11-02")] };
+    const r = recalculateMainLift(tue, newMax);
+    expect(r.primaryMaxLb).toBe(425);
+    expect(main(r).id).not.toBe(main(tue).id);
+    expect(others(r)).toEqual(others(tue));
+    expect(r.notes).toBe("knee ok");
+    expect(planChanged(r, newMax)).toBe(false);
+    const skipped = { ...tue, blocks: tue.blocks.map((b) => (b.kind === "primary" ? { ...b, skipped: true } : b)) };
+    expect(main(recalculateMainLift(skipped, newMax)).skipped).toBe(true);
+    // A swapped session recalculates its swapped lift; a moved one follows its own program day.
+    const swap = swapped(tue, ids.backSquat);
+    expect(main(recalculateMainLift(swap, newMax)).exercises[0]!.exerciseId).toBe(ids.backSquat);
+    const moved = full(buildSessionFrom(WED, TUE, history));
+    expect(main(recalculateMainLift(moved, newMax)).exercises[0]!.exerciseId).toBe(ids.backSquat);
+    expect(others(recalculateMainLift(moved, newMax))).toEqual(others(moved));
+  });
+
+  it("the swap sheet's 'still to do this week' and the suggestion read main lifts only, never rehab", () => {
+    const tue = full(swapped(buildSession(TUE, history), ids.backSquat));
+    const logged = { ...tue, blocks: tue.blocks.map((b) => (b.kind === "primary" ? { ...b, exercises: [{ ...b.exercises[0]!, sets: b.exercises[0]!.sets.map((x) => ({ ...x, done: true })) }] } : b)) };
+    expect(swapSuggestion(WED, { ...history, sessions: [logged] })?.suggest).toBe(ids.deadlift);
+    const rehabOnly: Session = { ...buildSession(TUE, history), blocks: [rehabBlock] };
+    expect(swapSuggestion(WED, { ...history, sessions: [rehabOnly] })).toBeNull();
+    expect(swapChoices(buildSession(THU, history), { ...ctx, sessions: [rehabOnly] }).choices.find((c) => c.exerciseId === ids.deadlift)?.missed).toBe(true);
   });
 });

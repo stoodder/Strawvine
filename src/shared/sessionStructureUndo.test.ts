@@ -92,4 +92,18 @@ describe("rejoinSuperset (undo Remove from superset)", () => {
     };
     expect(rejoinSuperset(filled, { blockId: "X", exIdx: 1 }, "own", 11, [curls])).toEqual({ cannot: "full" });
   });
+
+  it("works the same in a Core or rehab superset, and never across groups", () => {
+    const step = ex(30, set("s1"));
+    const ext = ex(31, set("e1"));
+    const knee: Block = { id: "R", kind: "rehab", exercises: [step, ext], rehab: "knee" };
+    const s = sess([main, block("X", ex(10, set("a"))), knee]);
+    const split = splitOut(s, { blockId: "R", exIdx: 1 }, "own");
+    expect(split.blocks.find((b) => b.id === "own")).toMatchObject({ kind: "rehab", rehab: "knee" });
+    const back = rejoinSuperset(split, { blockId: "R", exIdx: 1 }, "own", 31, [ext]);
+    expect("session" in back && shape(back.session)).toBe("P[1] X[10] R[30|31]");
+    // The superset is in another group than the exercise now: it can't go back.
+    const moved = sess([main, block("X", ex(10, set("a")), ex(31, set("e1"))), { ...knee, exercises: [step] }]);
+    expect(rejoinSuperset(moved, { blockId: "R", exIdx: 1 }, "own", 31, [ext])).toEqual({ cannot: "gone" });
+  });
 });
