@@ -1003,19 +1003,20 @@ describe("forget this device", () => {
   });
 });
 
-describe("a change refused as from an outdated build (SPEC §8)", () => {
-  /** A window on a build of `level` (this code otherwise): what it sends in `x-strawvine-build-level`. */
-  async function deviceAt(level: number): Promise<Sync> {
-    vi.doMock("../../shared/buildLevel", async (actual) => ({
-      ...(await actual<typeof import("../../shared/buildLevel")>()),
-      BUILD_LEVEL: level,
-    }));
-    try {
-      return await device();
-    } finally {
-      vi.doUnmock("../../shared/buildLevel");
-    }
+/** A window on a build of `level` (this code otherwise): what it sends in `x-strawvine-build-level`. */
+async function deviceAt(level: number): Promise<Sync> {
+  vi.doMock("../../shared/buildLevel", async (actual) => ({
+    ...(await actual<typeof import("../../shared/buildLevel")>()),
+    BUILD_LEVEL: level,
+  }));
+  try {
+    return await device();
+  } finally {
+    vi.doUnmock("../../shared/buildLevel");
   }
+}
+
+describe("a change refused as from an outdated build (SPEC §8)", () => {
   const sessionWrites = () => server.writes().filter((w) => w.path === `/sessions/${D}`);
 
   it("stays not saved on the device — never merged or re-sent on its own — and the app asks to be updated", async () => {
@@ -1081,5 +1082,139 @@ describe("a change refused as from an outdated build (SPEC §8)", () => {
       String(BUILD_LEVEL),
       String(BUILD_LEVEL),
     ]);
+  });
+});
+
+describe("what the updated app sends of an outdated build's refused change: strength only (SPEC §8)", () => {
+  const rehabBlock = {
+    id: "rh",
+    kind: "rehab" as const,
+    rehab: "knee",
+    exercises: [{ exerciseId: 10, measure: "reps" as const, sets: [logged("r1", 15)] }],
+  };
+  const withRehab = (s: Session, block: Session["blocks"][number] = rehabBlock): Session => ({ ...s, blocks: [...s.blocks, block] });
+  const rehabOf = (s: Session | undefined) => s?.blocks.filter((b) => b.kind === "rehab");
+  /** The old build's change, refused; then the updated build opens (after `meanwhile`) and settles. */
+  async function refusedThenUpdated(change: (old: Sync) => void, meanwhile = () => {}): Promise<Sync> {
+    server.minLevel = BUILD_LEVEL;
+    const old = await deviceAt(BUILD_LEVEL - 1);
+    change(old);
+    await vi.waitFor(() => expect(old.getSyncState().outdated).toBe(true));
+    old.stopSync();
+    meanwhile();
+    const updated = await device();
+    await settled(updated);
+    expect(updated.getSyncState()).toMatchObject({ failed: 0, outdated: false });
+    return updated;
+  }
+
+  it("a delete of a workout holding rehab saves it with only its rehab blocks (the current Discard)", async () => {
+    server.otherDevice(D, { ...withRehab(server.session()!), notes: "knee ok" });
+    // b4999a8's "Discard session" / "Reset to plan" delete the whole workout; its screen never showed the rehab block.
+    const updated = await refusedThenUpdated((old) => old.enqueue({ kind: "session", date: D, doc: null }));
+    expect(server.session()).toMatchObject({ blocks: [rehabBlock], notes: "knee ok" });
+    expect(shown(updated)).toEqual(server.session());
+  });
+
+  it("a delete of a workout without rehab is still a delete", async () => {
+    await refusedThenUpdated((old) => old.enqueue({ kind: "session", date: D, doc: null }));
+    expect(server.session()).toBeUndefined();
+  });
+
+  it("a whole-workout save that lacks the rehab block gets it back; its strength is saved", async () => {
+    server.otherDevice(D, withRehab(server.session()!));
+    // b4999a8's "Do this session today" / "Back to today's plan" rebuild the workout from the plan: no rehab block.
+    const rebuilt = { ...logAt(session([set("a"), set("b"), set("c")]), 0), notes: "moved" };
+    const updated = await refusedThenUpdated((old) => old.enqueue({ kind: "session", date: D, doc: rebuilt }));
+    expect(server.session()).toEqual(withRehab(rebuilt));
+    expect(shown(updated)).toEqual(server.session());
+  });
+
+  it("a save that altered the rehab block, or folded its sets into an accessory block, can't change them", async () => {
+    server.otherDevice(D, withRehab(server.session()!));
+    const base = server.session()!;
+    const folded: Session = {
+      ...logAt(base, 0),
+      blocks: [
+        logAt(base, 0).blocks[0]!,
+        {
+          id: "acc",
+          kind: "accessory",
+          exercises: [{ exerciseId: 10, measure: "reps", sets: [{ ...logged("r1", 15), reps: 9 }, set("x1")] }],
+        },
+        { ...rehabBlock, exercises: [{ ...rehabBlock.exercises[0]!, sets: [] }] },
+      ],
+    };
+    await refusedThenUpdated((old) => old.enqueue({ kind: "session", date: D, doc: folded }));
+    expect(server.session()!.blocks).toEqual([
+      logAt(base, 0).blocks[0],
+      { id: "acc", kind: "accessory", exercises: [{ exerciseId: 10, measure: "reps", sets: [set("x1")] }] },
+      rehabBlock,
+    ]);
+  });
+
+  it("merged with what changed since: the other device's rehab sets and strength stay, the old build's strength joins", async () => {
+    server.otherDevice(D, withRehab(server.session()!));
+    const updated = await refusedThenUpdated(
+      (old) => old.enqueue({ kind: "session", date: D, doc: logAt(session([set("a"), set("b"), set("c")]), 0) }),
+      // Meanwhile a current device logs strength set b and a second rehab set.
+      () =>
+        server.otherDevice(
+          D,
+          withRehab(logAt(session([set("a"), set("b"), set("c")]), 1), {
+            ...rehabBlock,
+            exercises: [{ ...rehabBlock.exercises[0]!, sets: [logged("r1", 15), logged("r2", 12)] }],
+          }),
+        ),
+    );
+    expect(doneOf(server.session())).toEqual([true, true, false]);
+    expect(rehabOf(server.session())).toEqual([
+      { ...rehabBlock, exercises: [{ ...rehabBlock.exercises[0]!, sets: [logged("r1", 15), logged("r2", 12)] }] },
+    ]);
+    expect(shown(updated)).toEqual(server.session());
+  });
+
+  describe("settings", () => {
+    const knee = {
+      id: "knee",
+      name: "Knee rehab",
+      start: "2026-10-19",
+      weeks: 6,
+      days: [false, true, false, true, false, true, false],
+      carry: "last" as const,
+    };
+    const steps = (s: Settings, n: number): Settings => ({ ...s, targets: { ...s.targets, steps: n } });
+
+    it.each([
+      ["dropped", { programs: [] }],
+      ["altered", { programs: [{ ...knee, weeks: 2 }] }],
+      ["a stale copy brought back", { programs: [knee, { ...knee, id: "ankle", name: "Ankle" }] }],
+    ])("a save whose rehab blocks differ from the server's (%s) is sent with the server's", async (_, rehab) => {
+      server.otherDeviceSettings({ ...settings, rehab: { programs: [knee] } });
+      await refusedThenUpdated((old) => old.enqueue({ kind: "settings", settings: { ...steps(server.settings.doc, 12345), rehab } }));
+      expect(server.settings.doc).toEqual({ ...steps(settings, 12345), rehab: { programs: [knee] } });
+    });
+
+    it("merged with what changed since: rehab blocks edited on another device meanwhile stay as edited", async () => {
+      server.otherDeviceSettings({ ...settings, rehab: { programs: [knee] } });
+      await refusedThenUpdated(
+        (old) => old.enqueue({ kind: "settings", settings: { ...steps(server.settings.doc, 12345), rehab: { programs: [] } } }),
+        () => server.otherDeviceSettings({ ...server.settings.doc, rehab: { programs: [{ ...knee, weeks: 8 }] } }),
+      );
+      expect(server.settings.doc).toEqual({ ...steps(settings, 12345), rehab: { programs: [{ ...knee, weeks: 8 }] } });
+    });
+
+    it("one from settings without rehab blocks, refused once they exist on the server, keeps them", async () => {
+      // Based on settings without the key (before any rehab block); a current device then adds one.
+      const old = await deviceAt(BUILD_LEVEL - 1);
+      server.minLevel = BUILD_LEVEL;
+      old.enqueue({ kind: "settings", settings: { ...steps(settings, 12345), rehab: { programs: [{ ...knee, id: "stale" }] } } });
+      await vi.waitFor(() => expect(old.getSyncState().outdated).toBe(true));
+      old.stopSync();
+      server.otherDeviceSettings({ ...settings, rehab: { programs: [knee] } });
+      const updated = await device();
+      await settled(updated);
+      expect(server.settings.doc).toEqual({ ...steps(settings, 12345), rehab: { programs: [knee] } });
+    });
   });
 });

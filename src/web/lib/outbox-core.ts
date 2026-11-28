@@ -10,7 +10,7 @@
  * until retried or discarded). Acked entries keep the server's response until the base that
  * includes it has been written to disk, so a crash between the two can't lose it.
  */
-import { UPGRADE_REQUIRED_MESSAGE } from "../../shared/buildLevel";
+import { BUILD_LEVEL, UPGRADE_REQUIRED_MESSAGE } from "../../shared/buildLevel";
 import { formatShortDate } from "../../shared/dates";
 import { emptyDayLog } from "../../shared/empty";
 import { hasIllFormedText } from "../../shared/text";
@@ -787,13 +787,26 @@ export function failEntry(s: OutboxState, seq: number, error: string, outdatedLe
   };
 }
 
-export function retryFailed(s: OutboxState): OutboxState {
+/**
+ * Puts every failed entry back in the queue (Retry). One refused as from a build below `level` (this window's) goes
+ * back as `strengthOnly` — `fill` gives it the device's base first when it has none — or, when that can't be made,
+ * stays failed: an outdated build never removes or alters rehab, not even through a Retry here.
+ */
+export function retryFailed(s: OutboxState, level = BUILD_LEVEL, fill: (op: Op) => Op = (op) => op): OutboxState {
   if (!s.entries.some((e) => e.state === "failed")) return s;
-  return { ...s, entries: s.entries.map((e) => (e.state === "failed" ? requeued(e) : e)) };
+  return { ...s, entries: s.entries.map((e) => (e.state === "failed" ? (requeuedAt(e, level, fill) ?? e) : e)) };
 }
 
 /** A failed entry back in the queue, as if never sent. */
-const requeued = (e: Entry): Entry => ({ ...e, state: "pending", error: undefined, outdatedLevel: undefined, rev: bump(e) });
+const requeued = (e: Entry, op = e.op): Entry => ({ ...e, op, state: "pending", error: undefined, outdatedLevel: undefined, rev: bump(e) });
+
+/** `requeued`, as `strengthOnly` when an outdated build below `level` sent it; null when that can't be made. */
+function requeuedAt(e: Entry, level: number, fill: (op: Op) => Op): Entry | null {
+  const at = outdatedLevelOf(e);
+  if (at === null || at >= level) return requeued(e);
+  const op = strengthOnly(fill(e.op));
+  return op && requeued(e, op);
+}
 
 /**
  * The build level a failed entry was refused at as outdated (409 `upgrade-required`, SPEC §8): its `outdatedLevel`,
@@ -805,21 +818,69 @@ export function outdatedLevelOf(e: Entry): number | null {
   return e.error === UPGRADE_REQUIRED_MESSAGE ? 0 : null;
 }
 
+const rehabBlocksOf = (s: Session | null | undefined) => s?.blocks.filter((b) => b.kind === "rehab") ?? [];
+
+/**
+ * An outdated build's refused change (SPEC §8) as a build that knows rehab sends it: strength only. That build never
+ * showed rehab (and, merging, may have dropped a rehab block or folded it into an accessory block), so what its copy
+ * says of rehab is replaced by what its base — the server's copy the change was made from — holds; the version
+ * check and the merge then keep whatever the server has changed since.
+ * - A workout save: its rehab blocks (and rehab sets folded into other blocks) out, the base's rehab blocks back.
+ * - A workout delete whose base holds rehab: a save of the base with only its rehab blocks (Discard, Strength only).
+ * - Settings: `rehab` as in the base.
+ * Null when it has no base (a copy from before revisions): it can't be made strength only, so it isn't sent.
+ */
+export function strengthOnly(op: Op): Op | null {
+  if (op.kind === "session") {
+    if (op.baseRev === undefined) return null;
+    const rehab = rehabBlocksOf(op.base);
+    if (!op.doc) return rehab.length ? { ...op, doc: { ...op.base!, blocks: rehab } } : op;
+    const ids = new Set(rehab.map((b) => b.id));
+    const sets = new Set(rehab.flatMap((b) => b.exercises.flatMap((x) => x.sets.map((st) => st.id))));
+    const strength = op.doc.blocks.flatMap((b) => {
+      if (b.kind === "rehab" || ids.has(b.id)) return [];
+      const exercises = b.exercises.flatMap((x) => {
+        const kept = x.sets.filter((st) => !sets.has(st.id));
+        return kept.length === x.sets.length ? [x] : kept.length ? [{ ...x, sets: kept }] : [];
+      });
+      if (exercises.length === b.exercises.length && exercises.every((x, i) => x === b.exercises[i])) return [b];
+      return exercises.length ? [{ ...b, exercises }] : [];
+    });
+    const doc = { ...op.doc, blocks: [...strength, ...rehab] };
+    return deepEqual(doc, op.doc) ? op : { ...op, doc };
+  }
+  if (op.kind === "settings") {
+    if (op.baseRev === undefined || !op.base) return null;
+    const { rehab: _theirs, ...rest } = op.settings;
+    const settings: Settings = op.base.rehab === undefined ? rest : { ...rest, rehab: op.base.rehab };
+    return deepEqual(settings, op.settings) ? op : { ...op, settings };
+  }
+  return op;
+}
+
 /**
  * Puts back in the queue the entries refused as from an outdated build that a build below `level` (this window's)
- * sent: the updated app re-sends on its own what the outdated one couldn't save — version-checked as any save, so a
+ * sent: the updated app re-sends on its own what the outdated one couldn't save, as `strengthOnly` (`fill` gives an
+ * entry without a base the device's; one that can't be made so stays failed) — version-checked as any save, so a
  * workout or settings changed since is merged by this build. Never one this level was refused at itself. `skip`: the
  * entries this window has put back before; each is put back once, so with a window on an outdated build still
  * sending (and refused again), it stays not saved instead of going back and forth.
  */
-export function retryOutdated(s: OutboxState, level: number, skip: ReadonlySet<number>): { state: OutboxState; seqs: number[] } {
-  const seqs = s.entries.flatMap((e) => {
+export function retryOutdated(
+  s: OutboxState,
+  level: number,
+  skip: ReadonlySet<number>,
+  fill: (op: Op) => Op = (op) => op,
+): { state: OutboxState; seqs: number[] } {
+  const back = new Map<number, Entry>();
+  for (const e of s.entries) {
     const at = outdatedLevelOf(e);
-    return at !== null && at < level && !skip.has(e.seq) ? [e.seq] : [];
-  });
-  if (!seqs.length) return { state: s, seqs };
-  const set = new Set(seqs);
-  return { state: { ...s, entries: s.entries.map((e) => (set.has(e.seq) ? requeued(e) : e)) }, seqs };
+    if (at === null || at >= level || skip.has(e.seq)) continue;
+    const r = requeuedAt(e, level, fill);
+    if (r) back.set(e.seq, r);
+  }
+  if (!back.size) return { state: s, seqs: [] };
+  return { state: { ...s, entries: s.entries.map((e) => back.get(e.seq) ?? e) }, seqs: [...back.keys()] };
 }
 
 /**

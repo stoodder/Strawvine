@@ -1353,11 +1353,14 @@ function onOutdated(seq: number, message: string) {
   publish();
 }
 
-/** Queues again what a window on an older build was refused as outdated (`retryOutdated`): this build sends it. */
+/**
+ * Queues again what a window on an older build was refused as outdated (`retryOutdated`): this build sends it,
+ * strength only (`strengthOnly`; based on this device's copy when it carries no base of its own).
+ */
 function requeueOutdated() {
   let seqs: number[] = [];
   mutate((s) => {
-    const r = retryOutdated(s, BUILD_LEVEL, retriedOutdated);
+    const r = retryOutdated(s, BUILD_LEVEL, retriedOutdated, withDocBase);
     seqs = r.seqs;
     return r.state;
   });
@@ -1375,9 +1378,9 @@ function toastRejected(op: Op, message: string) {
   });
 }
 
-/** Re-sends everything the server rejected (e.g. after a server fix). */
+/** Re-sends everything the server rejected (e.g. after a server fix); an outdated build's refused change strength only. */
 export function retryFailed() {
-  mutate(retryFailedCore);
+  mutate((s) => retryFailedCore(s, BUILD_LEVEL, withDocBase));
   publish();
   kick();
 }

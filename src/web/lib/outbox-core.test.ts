@@ -29,7 +29,9 @@ import {
   retryFailed,
   retryOutdated,
   savedAlready,
+  strengthOnly,
   validateOp,
+  type Op,
   type OutboxState,
   type OverlayCache,
 } from "./outbox-core";
@@ -885,5 +887,71 @@ describe("changes refused as from an outdated build (SPEC §8)", () => {
     // Refused again (a window on the outdated build still sending): not put back a second time.
     const again = failEntry(r.state, a, UPGRADE_REQUIRED_MESSAGE);
     expect(retryOutdated(again, 1, new Set(r.seqs))).toEqual({ state: again, seqs: [] });
+  });
+
+  describe("go back strength only: an outdated build never removes or alters rehab, not even re-sent", () => {
+    const rehab = { id: "rh", kind: "rehab", rehab: "knee", exercises: [{ exerciseId: 9, sets: [{ id: "r1", done: true }] }] };
+    const withRehab = (s: Session) => ({ ...s, blocks: [...s.blocks, rehab] }) as unknown as Session;
+    const base = withRehab(session(D, 1));
+    /** One entry, refused as from a build before levels. */
+    const refused = (op: Op) => {
+      const s = addOp(emptyOutbox(), op, null);
+      return failEntry(s, s.entries[0]!.seq, UPGRADE_REQUIRED_MESSAGE);
+    };
+
+    it("a save without the base's rehab block gets it back; a delete of a workout holding rehab keeps it", () => {
+      expect(strengthOnly({ kind: "session", date: D, doc: session(D, 1, "mine"), baseRev: "r1", base })).toEqual({
+        kind: "session",
+        date: D,
+        doc: withRehab(session(D, 1, "mine")),
+        baseRev: "r1",
+        base,
+      });
+      expect(strengthOnly({ kind: "session", date: D, doc: null, baseRev: "r1", base })).toEqual({
+        kind: "session",
+        date: D,
+        doc: { ...base, blocks: [rehab] },
+        baseRev: "r1",
+        base,
+      });
+      // Nothing about rehab in it: unchanged.
+      const plain: Op = { kind: "session", date: D, doc: null, baseRev: "r1", base: session(D, 1) };
+      expect(strengthOnly(plain)).toBe(plain);
+      const day: Op = { kind: "day", date: D, patch: { steps: 1 } };
+      expect(strengthOnly(day)).toBe(day);
+    });
+
+    it("settings carry the base's rehab blocks (none: no key)", () => {
+      const knee = { programs: [{ id: "knee" }] } as unknown as Settings["rehab"];
+      const op = (rehabHere: Settings["rehab"], rehabThere: Settings["rehab"]): Op => ({
+        kind: "settings",
+        settings: { ...settings, targets: { ...settings.targets, steps: 1 }, rehab: rehabHere },
+        baseRev: "s1",
+        base: { ...settings, rehab: rehabThere },
+      });
+      expect(strengthOnly(op({ programs: [] }, knee))).toMatchObject({ settings: { targets: { steps: 1 }, rehab: knee } });
+      const none = strengthOnly(op(knee, undefined)) as Op & { kind: "settings" };
+      expect(none.settings.targets.steps).toBe(1);
+      expect(none.settings).not.toHaveProperty("rehab");
+    });
+
+    it("with no base (and none filled in) it can't be made so: it stays failed, Retry included", () => {
+      const s = refused({ kind: "session", date: D, doc: null });
+      expect(strengthOnly(s.entries[0]!.op)).toBeNull();
+      expect(retryOutdated(s, 1, new Set())).toEqual({ state: s, seqs: [] });
+      expect(retryFailed(s, 1).entries[0]!.state).toBe("failed");
+      // The device's copy as its base (sync's `withDocBase`): sent, keeping its rehab.
+      const fill = (o: Op): Op => ({ ...o, baseRev: "r1", base }) as Op;
+      expect(retryOutdated(s, 1, new Set(), fill).state.entries[0]).toMatchObject({ state: "pending", op: { doc: { blocks: [rehab] } } });
+      expect(retryFailed(s, 1, fill).entries[0]).toMatchObject({ state: "pending", op: { doc: { blocks: [rehab] } } });
+    });
+
+    it("Retry on the build that was refused itself sends it as it is", () => {
+      const op: Op = { kind: "session", date: D, doc: null, baseRev: "r1", base };
+      const s = addOp(emptyOutbox(), op, null);
+      const atOne = failEntry(s, s.entries[0]!.seq, UPGRADE_REQUIRED_MESSAGE, 1);
+      expect(retryFailed(atOne, 1).entries[0]).toMatchObject({ state: "pending", op });
+      expect(retryFailed(atOne, 2).entries[0]).toMatchObject({ state: "pending", op: { doc: { blocks: [rehab] } } });
+    });
   });
 });
