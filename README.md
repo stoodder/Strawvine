@@ -89,6 +89,16 @@ Rolling back past migration 0008 (Zone 2 machine kcal) works the same way: an ol
 `zone2Kcal` (a combined `{zone2Minutes, zone2Kcal}` with it) and a version 5 export; the migration only adds a
 nullable column and need not be reverted.
 
+Rolling back past migration 0009 (day sections: the Zone 2 machine, Not today on metcon / Zone 2) works the same way
+again: an older server refuses a day patch naming `zone2Machine`, `metconSkipped` or `zone2Skipped` (and whatever was
+combined with it) and a version 6 export; the migration only adds a nullable column and two booleans with a default,
+and need not be reverted. A session saved with `section` (Core, written only with the `trainDay` flag on) is stored by
+an older server without it — the block stays an accessory block with all its sets. So the release that brings 0009 can
+be rolled back. From the release that writes rehab (`kind: "rehab"` blocks, `settings.rehab`) onward it can't: an
+older server refuses (400) every save of a day holding a rehab block, its settings save drops the rehab blocks
+(`settings.rehab`) as a key it doesn't know, and an older build's merge can pair a rehab block with an accessory block
+and save it as one. Those releases are roll forward only: fix forward, or restore a backup taken before them.
+
 Avoid long table rewrites and locks: a booting dyno waits at most 30 s for the migration lock (Heroku kills a dyno that
 doesn't bind its port within 60 s) and the release phase at most 15 minutes.
 
@@ -257,7 +267,7 @@ The app-level export (below) is a second, database-independent copy.
 ## Data
 
 Settings → **Export JSON** (`GET /api/export`) downloads everything: settings, every day log, exercise, max entry,
-session and seen achievement, with their ids (format `strawvine-export`, version 5). Nothing derived is stored; the
+session and seen achievement, with their ids (format `strawvine-export`, version 6). Nothing derived is stored; the
 export is the complete source of truth.
 
 To restore an export into a database:
