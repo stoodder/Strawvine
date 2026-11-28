@@ -1,6 +1,6 @@
 /** Feature flags: off by default, opted into per device through localStorage, never throwing. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyFlagParam, feature, features, FLAGS_KEY, parseFlags, setFeatures } from "./features";
+import { applyFlagParam, feature, features, flagNotice, FLAGS_KEY, parseFlagChanges, parseFlags, setFeatures } from "./features";
 
 class MemoryStorage {
   map = new Map<string, string>();
@@ -82,13 +82,56 @@ describe("features", () => {
     expect(features()).toEqual({ trainDay: false, rehab: false });
   });
 
-  it("can be set from a ?flags= query, which is then dropped from the query", () => {
+  it("?flags= merges into this device's flags — a name on, -name off, empty changes nothing — and is dropped from the query", () => {
     expect(applyFlagParam("?tab=x")).toBeNull();
-    expect(applyFlagParam("?flags=trainDay,rehab&tab=x")).toBe("?tab=x");
+    expect(applyFlagParam("?flags=trainDay,rehab&tab=x")).toEqual({
+      rest: "?tab=x",
+      changed: { trainDay: true, rehab: true },
+      saved: true,
+    });
     expect(features()).toEqual({ trainDay: true, rehab: true });
-    expect(applyFlagParam("?flags=rehab")).toBe("");
+    // Merged, not replaced: rehab alone keeps trainDay.
+    expect(applyFlagParam("?flags=rehab")).toEqual({ rest: "", changed: { rehab: true }, saved: true });
+    expect(features()).toEqual({ trainDay: true, rehab: true });
+    expect(applyFlagParam("?flags=-trainDay")).toEqual({ rest: "", changed: { trainDay: false }, saved: true });
     expect(features()).toEqual({ trainDay: false, rehab: true });
-    expect(applyFlagParam("?flags=")).toBe("");
+    // Empty (or nothing known): no change at all.
+    expect(applyFlagParam("?flags=")).toEqual({ rest: "", changed: {}, saved: true });
+    expect(applyFlagParam("?flags=nonsense")).toEqual({ rest: "", changed: {}, saved: true });
+    expect(features()).toEqual({ trainDay: false, rehab: true });
+    // "+rehab" in a URL reads as " rehab"; "+" spelt out works too.
+    expect(applyFlagParam("?flags=%2BtrainDay,-rehab")!.changed).toEqual({ trainDay: true, rehab: false });
+    expect(applyFlagParam("?flags=+rehab")!.changed).toEqual({ rehab: true });
+    expect(store.getItem(FLAGS_KEY)).toBe("trainDay,rehab");
+    expect(applyFlagParam("?flags=-trainDay,-rehab")!.changed).toEqual({ trainDay: false, rehab: false });
     expect(store.getItem(FLAGS_KEY)).toBeNull();
+  });
+
+  it("?flags= says when storage refused it", () => {
+    vi.stubGlobal("window", {
+      localStorage: {
+        getItem: () => null,
+        setItem: () => {
+          throw new Error("QuotaExceededError");
+        },
+        removeItem: () => {},
+      },
+    });
+    expect(applyFlagParam("?flags=rehab")).toEqual({ rest: "", changed: { rehab: true }, saved: false });
+  });
+
+  it("parse ?flags= changes: names, -names, unknown ones ignored", () => {
+    expect(parseFlagChanges("rehab, -trainDay x -y")).toEqual({ rehab: true, trainDay: false });
+    expect(parseFlagChanges("")).toEqual({});
+    expect(parseFlagChanges(null)).toEqual({});
+  });
+
+  it("say what changed, for this device — or that storage refused it", () => {
+    expect(flagNotice({ rehab: true }, true)).toBe("Rehab preview on for this device");
+    expect(flagNotice({ trainDay: false }, true)).toBe("New Train preview off for this device");
+    expect(flagNotice({ trainDay: true, rehab: true }, true)).toBe("New Train and Rehab previews on for this device");
+    expect(flagNotice({ rehab: true, trainDay: false }, true)).toBe("Rehab preview on, New Train preview off for this device");
+    expect(flagNotice({ rehab: true }, false)).toBe("Couldn't change the Rehab preview: this device didn't let Strawvine save it");
+    expect(flagNotice({}, true)).toBeNull();
   });
 });

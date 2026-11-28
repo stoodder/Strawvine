@@ -1162,16 +1162,9 @@ describe("Settings", () => {
     expect(h1.previousElementSibling!.textContent).toBe("Preferences");
     expect(screen.queryByText("The rules")).toBeNull();
     expect(screen.getByRole("link", { name: "Back to Today" }).getAttribute("href")).toBe("/");
-    expect(sectionHeadings()).toEqual(["Training", "Nutrition", "Display", "Sync", "Data"]);
-    for (const name of [
-      "Protein",
-      "Fat",
-      "Maintenance estimate",
-      "Calories per lb",
-      "Max loss",
-      "Max gain",
-      "Minimum calories",
-    ])
+    // Previews (this device's opt-in to unlaunched UI) at the foot, until launch.
+    expect(sectionHeadings()).toEqual(["Training", "Nutrition", "Display", "Sync", "Data", "Previews"]);
+    for (const name of ["Protein", "Fat", "Maintenance estimate", "Calories per lb", "Max loss", "Max gain", "Minimum calories"])
       expect(screen.getByRole("textbox", { name })).toBeTruthy();
     // The daily targets and training days are the plan's: they live on Program (SPEC §6.4).
     expect(screen.queryByRole("textbox", { name: "Steps" })).toBeNull();
@@ -1534,7 +1527,12 @@ describe("Program: the next cycle (SPEC §6.4, §6.6)", () => {
     const saved = lastSaved();
     expect(saved.program.cycleStartDate).toBe("2026-12-07");
     expect(saved.program.earlierPlans).toHaveLength(1);
-    expect(saved.program.earlierPlans![0]).toMatchObject({ id: "first", start: "2026-11-02", end: "2026-12-07", days: base().program.days });
+    expect(saved.program.earlierPlans![0]).toMatchObject({
+      id: "first",
+      start: "2026-11-02",
+      end: "2026-12-07",
+      days: base().program.days,
+    });
     expect(lastToast().message).toBe("New plan set up from Mon Dec 7");
     expect(where()).toBe("/program#layout");
     // Now says what comes next; one switch, on the next cycle (it was opened to review it), and each plan section says so.
@@ -1678,7 +1676,10 @@ describe("Program: the next cycle (SPEC §6.4, §6.6)", () => {
     const made = scheduled();
     show();
     // Arrived from another device, not rendered yet: this cycle's steps target.
-    const theirs = { ...made, program: { ...made.program, earlierPlans: [{ ...made.program.earlierPlans![0]!, targets: { steps: 11_111, zone2Minutes: 30 } }] } };
+    const theirs = {
+      ...made,
+      program: { ...made.program, earlierPlans: [{ ...made.program.earlierPlans![0]!, targets: { steps: 11_111, zone2Minutes: 30 } }] },
+    };
     store.arrive(theirs);
     await user.click(delay());
     expect(lastSaved().program.earlierPlans![0]).toMatchObject({ start: "2026-11-09", targets: { steps: 11_111 } });
@@ -1689,7 +1690,9 @@ describe("Program: the next cycle (SPEC §6.4, §6.6)", () => {
     // Cycle 1 runs Nov 2 – Dec 6; the next plan starts Dec 7.
     const s = startNewCycle(base(), [{ date: "2026-11-03", plannedFor: null } as never], "2026-11-04", "p2")!.settings;
     // In the last week, skipping ahead brings the next plan into this week.
-    expect(shiftEffect(s.program, -1, "2026-12-02")).toBe("This week becomes Week 1 (cycle 2), on the next cycle's plan; next Monday is Week 2 · Push.");
+    expect(shiftEffect(s.program, -1, "2026-12-02")).toBe(
+      "This week becomes Week 1 (cycle 2), on the next cycle's plan; next Monday is Week 2 · Push.",
+    );
     // In the next plan's first week, a delay leaves this week a pause: the plan before doesn't run on.
     expect(shiftEffect(s.program, 1, "2026-12-09")).toBe(
       "Starts Mon Dec 14 instead of Dec 7: this week is a pause before cycle 2; next Monday is Week 1 · Push.",

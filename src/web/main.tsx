@@ -1,24 +1,41 @@
 // First: configures zod before anything can parse with it (no eval probe → no CSP violation reports).
 import "./lib/zod-setup";
-import { StrictMode } from "react";
+import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "motion/react";
 import { App, applyContrast, CONTRAST_KEY } from "./App";
 import { DockProvider } from "./components/Dock";
-import { ToastProvider } from "./components/Toast";
+import { ToastProvider, useToast } from "./components/Toast";
 import { startServiceWorker, watchForNewBuild } from "./lib/build";
-import { applyFlagParam } from "./lib/features";
+import { applyFlagParam, flagNotice } from "./lib/features";
 import { initSync, queryClient } from "./lib/sync";
 import "./styles.css";
 
-// `?flags=trainDay,rehab` opts this device in to UI not launched yet (`?flags=` opts out; see
-// lib/features.ts), and leaves the address bar without it.
+// `?flags=rehab` opts this device in to UI not launched yet (`-rehab` opts out; merged into what this device has: see
+// lib/features.ts), and leaves the address bar without it. What changed is said in a toast once the app is up
+// (`FlagNotice`). Goes at launch, with the flags.
+let flagMessage: string | null = null;
 try {
-  const rest = applyFlagParam(window.location.search);
-  if (rest !== null) window.history.replaceState(window.history.state, "", `${window.location.pathname}${rest}${window.location.hash}`);
+  const r = applyFlagParam(window.location.search);
+  if (r) {
+    flagMessage = flagNotice(r.changed, r.saved);
+    window.history.replaceState(window.history.state, "", `${window.location.pathname}${r.rest}${window.location.hash}`);
+  }
 } catch {
   /* storage or history unavailable: the flags stay as they were */
+}
+
+/** Says once, in a dock toast, what `?flags=` changed ("Rehab preview on for this device"). */
+function FlagNotice() {
+  const toast = useToast();
+  useEffect(() => {
+    if (!flagMessage) return;
+    const message = flagMessage;
+    flagMessage = null; // once (StrictMode runs effects twice)
+    toast.show({ message, tone: message.startsWith("Couldn't") ? "warn" : "default" });
+  }, [toast]);
+  return null;
 }
 
 // High contrast is a per-account setting; until the data loads (and on the sign-in screen) use
@@ -40,6 +57,7 @@ void initSync().finally(() => {
           <DockProvider>
             <ToastProvider>
               <App />
+              <FlagNotice />
             </ToastProvider>
           </DockProvider>
         </MotionConfig>

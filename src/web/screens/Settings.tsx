@@ -13,7 +13,7 @@ import { useToast } from "../components/Toast";
 import { useFocusAfter } from "../components/useFocusAfter";
 import { Field, Section, Toggle } from "../components/ui";
 import { useTitle } from "../components/useTitle";
-import { feature } from "../lib/features";
+import { feature, FEATURE_LABELS, FEATURES, features, flagNotice, setFeatures, type Feature } from "../lib/features";
 import { forgetDevice, signOut, useSyncInfo } from "../lib/store";
 import { noteOfflineSignOut } from "./Login";
 
@@ -41,6 +41,8 @@ export function SettingsScreen() {
 function SettingsBody() {
   const { settings: s, error, save } = useSettingsEditor();
   const display = displayPrefs(s);
+  // A preview turned on or off (Previews) changes what this screen offers (the Rehab row): read the flags again.
+  const [, setFlagsSeen] = useState(0);
   useTitle("Settings");
   useJumpToHash();
 
@@ -198,11 +200,44 @@ function SettingsBody() {
         </div>
         <ForgetDevice />
       </Section>
+
+      <Previews onChange={() => setFlagsSeen((n) => n + 1)} />
       {/* decor: a sign-off, not information (aria-hidden; mute so it still clears 4.5:1 for anyone reading it) */}
       <p aria-hidden className="mt-12 text-center text-[0.6875rem] text-mute">
         Strawvine · built for pushing boundaries
       </p>
     </div>
+  );
+}
+
+/**
+ * Previews (lib/features.ts): this device's opt-in to UI built but not launched yet — the only way
+ * for the app installed on the Home Screen, whose storage is its own (apart from Safari's, where a
+ * `?flags=` link would land) and which has no address bar. Quiet, at the foot of the page, out of
+ * the jump list. Each toggle says what changed in a toast, or that the device's storage refused it
+ * (the toggle then shows what is stored). Self-contained: it goes at launch, with the flags.
+ */
+function Previews({ onChange }: { onChange: () => void }) {
+  const toast = useToast();
+  const [on, setOn] = useState(features);
+  const set = (f: Feature, v: boolean) => {
+    const saved = setFeatures({ [f]: v });
+    const now = features();
+    setOn(now);
+    onChange();
+    const message = flagNotice({ [f]: v }, saved && now[f] === v);
+    if (message) toast.show({ message, tone: message.startsWith("Couldn't") ? "warn" : "default" });
+  };
+  return (
+    <Section label="Previews" id="previews">
+      <div className="divide-y divide-white/[0.04]" data-previews="">
+        {FEATURES.map((f) => (
+          <Field key={f} label={`${FEATURE_LABELS[f]} (preview)`} hint="Only on this device · still being built">
+            <Toggle label={`${FEATURE_LABELS[f]} (preview)`} on={on[f]} onChange={(v) => set(f, v)} />
+          </Field>
+        ))}
+      </div>
+    </Section>
   );
 }
 
