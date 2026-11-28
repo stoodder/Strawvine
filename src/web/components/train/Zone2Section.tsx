@@ -53,7 +53,7 @@ export function Zone2Section(props: Zone2SectionProps) {
         })
       }
       meta={meta}
-      skippedLine="Stays open on the checklist"
+      skippedLine="Open on the checklist"
     >
       <Zone2Body key={date} day={log} patch={patch} last={offer.last} machines={offer.machines} />
     </LogSection>

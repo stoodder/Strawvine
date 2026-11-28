@@ -35,7 +35,7 @@ export function MetconSection(props: MetconSectionProps) {
       skipField="metconSkipped"
       onCheck={() => patch({ metconDone: !log.metconDone })}
       meta={meta}
-      skippedLine="Stays open on the checklist"
+      skippedLine="Open on the checklist"
     >
       <MetconBody key={log.date} day={log} patch={patch} />
     </LogSection>

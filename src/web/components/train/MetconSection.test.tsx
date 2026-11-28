@@ -167,7 +167,7 @@ describe("MetconSection", () => {
     expect(section().dataset.state).toBe("skipped");
     expect(notes()).toBeNull();
     expect(screen.queryByRole("button", { name: "Metcon complete" })).toBeNull();
-    expect(within(section()).getByText("Stays open on the checklist")).toBeTruthy();
+    expect(within(section()).getByText("Open on the checklist")).toBeTruthy();
     await vi.waitFor(() => expect(document.activeElement).toBe(bringBack()));
     expect(live()).toContain("Metcon: not today");
 

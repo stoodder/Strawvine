@@ -49,9 +49,12 @@ export function metconSummary(log: DayLog, days: ReadonlyArray<DayLog>): ReactNo
   return dotted(parts);
 }
 
-/** A Zone 2's summary: the activity of its machine, then the minutes and the machine's reading logged ("Rowing · 35 min · 320 kcal"). */
+/**
+ * A Zone 2's summary: the activity of its machine, then the minutes and the machine's reading logged ("Rowing · 35 min ·
+ * 320 kcal"). Only the name gives way to a narrow line (a long name of the owner's own), never the numbers.
+ */
 export function zone2Summary(log: DayLog, machine: string): ReactNode {
-  const parts: ReactNode[] = [zone2Activity(machine)];
+  const parts: ReactNode[] = [];
   if (log.zone2Minutes != null)
     parts.push(
       <>
@@ -65,7 +68,13 @@ export function zone2Summary(log: DayLog, machine: string): ReactNode {
         <Num>{fmt(log.zone2Kcal)}</Num> kcal
       </>,
     );
-  return dotted(parts);
+  if (!parts.length) return zone2Activity(machine);
+  return (
+    <span className="flex min-w-0">
+      <span className="min-w-0 truncate">{zone2Activity(machine)}</span>
+      <span className="shrink-0 whitespace-pre"> · {dotted(parts)}</span>
+    </span>
+  );
 }
 
 /** A Zone 2's plan: "30 min planned". */
