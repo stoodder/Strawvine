@@ -49,6 +49,14 @@ import {
   type LoginLimiterOptions,
   type SessionConfig,
 } from "./auth";
+import {
+  BUILD_LEVEL_HEADER,
+  buildLevelOf,
+  MIN_REHAB_BUILD_LEVEL,
+  rehabSettingsChange,
+  sessionHoldsRehab,
+  upgradeRequiredBody,
+} from "../shared/buildLevel";
 import { localToday } from "../shared/dates";
 import { emptyDayLog } from "../shared/empty";
 import { exercisePatchRefusal, serverLockDate } from "../shared/exerciseEdit";
@@ -73,6 +81,11 @@ export interface AppOptions {
   staticDir?: string;
   /** Sent as `x-strawvine-build` on API responses so the client can spot a newer deploy. */
   buildId?: string;
+  /**
+   * The lowest build level (`x-strawvine-build-level`, src/shared/buildLevel.ts) that may write documents involving
+   * rehab; default `MIN_REHAB_BUILD_LEVEL`. See "outdated builds" in createApp.
+   */
+  minRehabBuildLevel?: number;
   /** Overrides for tests. */
   epochs?: EpochStore;
   loginLimits?: LoginLimiterOptions;
@@ -354,8 +367,8 @@ class PatchRefused extends Error {}
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export const CSP_REPORT_PATH = "/api/csp-report";
 
-/** Per-request values of the authenticated API: the data set's version as of a write. */
-type ApiEnv = { Variables: { dataset?: DatasetVersion; datasetMs?: number } };
+/** Per-request values of the authenticated API: the data set's version as of a write, the sender's build level. */
+type ApiEnv = { Variables: { dataset?: DatasetVersion; datasetMs?: number; buildLevel: number } };
 
 /**
  * CSRF guard for the JSON API. Any request whose fetch metadata says another site sent it is
@@ -546,6 +559,25 @@ export function createApp(opts: AppOptions) {
   const api = new Hono<ApiEnv>();
   api.use("*", requireAuth(session));
 
+  // ---- outdated builds (SPEC §8) ------------------------------------------------
+  // Every request's build level: its `x-strawvine-build-level` header, 0 without one (every build before the gate).
+  // A build below `minRehab` may not write a document involving rehab (a workout holding a rehab block, stored or
+  // sent; settings that would change `settings.rehab`): its merge can pair a rehab block with an accessory block and
+  // save them as one. Such a write is answered 409 `upgrade-required` with no document (`outdated`): not a version
+  // conflict, so no build merges it or re-sends it on its own; every build keeps the change as not saved
+  // (Retry / Discard), and the updated build re-sends it. Everything else it writes is accepted as before.
+  const minRehab = opts.minRehabBuildLevel ?? MIN_REHAB_BUILD_LEVEL;
+  api.use("*", async (c, next) => {
+    c.set("buildLevel", buildLevelOf(c.req.header(BUILD_LEVEL_HEADER)));
+    return next();
+  });
+  /** The sender's build may not write rehab. */
+  const belowRehab = (c: Context<ApiEnv>) => c.get("buildLevel") < minRehab;
+  const outdated = (c: Context<ApiEnv>) => {
+    log("Outdated build refused", { method: c.req.method, route: routePath(c), level: c.get("buildLevel"), min: minRehab });
+    return c.json(upgradeRequiredBody(minRehab), 409);
+  };
+
   // ---- dataset version on writes ------------------------------------------------
   // Every successful write answers with the dataset's version after it (`x-dataset-etag`, the
   // ETag /bootstrap gives once it's committed) and just before it (`x-dataset-etag-prev`). Both
@@ -676,16 +708,26 @@ export function createApp(opts: AppOptions) {
         .where(eq(settings.id, 1))
         .for("update");
       if (cur && conflicts(pre, cur.rev)) return { conflict: cur };
+      // An outdated build never changes the rehab blocks (it doesn't know them): a document without the key keeps the
+      // stored ones, one carrying a different copy is refused. After the version check: a stale copy is a conflict
+      // first, and every build's settings merge keeps the server's rehab blocks when its own are unchanged.
+      let data: Settings = parsed.data;
+      if (belowRehab(c)) {
+        const change = rehabSettingsChange(cur?.data as Partial<Settings> | undefined, parsed.data);
+        if (change.kind === "changed") return { outdated: true as const };
+        if (change.kind === "keep" && change.stored !== undefined) data = { ...parsed.data, rehab: change.stored };
+      }
       const [row] = await tx
         .update(settings)
-        .set({ data: parsed.data, updatedAt: new Date() })
+        .set({ data, updatedAt: new Date() })
         .where(eq(settings.id, 1))
         .returning({ rev: xmin(settings) });
-      return { rev: row?.rev ?? null };
+      return { rev: row?.rev ?? null, data };
     });
+    if ("outdated" in out) return outdated(c);
     if (out.conflict) return c.json({ error: "conflict", current: out.conflict.data, rev: out.conflict.rev }, 409);
     if (out.rev) c.header("ETag", `"${out.rev}"`);
-    return c.json(parsed.data);
+    return c.json(out.data);
   });
 
   // ---- exercises & maxes ----------------------------------------------------
@@ -805,8 +847,13 @@ export function createApp(opts: AppOptions) {
     const doc = normalizeMainLift(parsed.data);
     if (doc.blocks.length > MAX_BLOCKS)
       return c.json({ error: "invalid", issues: [{ path: "blocks", message: `A workout can have at most ${MAX_BLOCKS} blocks` }] }, 400);
-    type Out = { conflict: { data: Session; rev: string } } | { rev: string | null; conflict?: undefined };
+    type Out = { conflict: { data: Session; rev: string } } | { rev: string | null; conflict?: undefined } | { outdated: true };
     const out = await write(c, async (tx): Promise<Out> => {
+      // An outdated build may not write a workout involving rehab: one it sends with a rehab block, or one stored with
+      // one (its copy may have lost the block, or turned it into an accessory block). Before the version check, so it
+      // is never handed a stored copy holding rehab to merge (a 409 conflict's document).
+      if (belowRehab(c) && (sessionHoldsRehab(doc) || sessionHoldsRehab((await currentSessionDoc(tx, doc.date, true))[0]?.data)))
+        return { outdated: true };
       if (!pre) {
         const [row] = await tx
           .insert(sessions)
@@ -841,6 +888,7 @@ export function createApp(opts: AppOptions) {
         if (attempt >= 2) throw new Error("session row kept changing"); // created and deleted again, three times over
       }
     });
+    if ("outdated" in out) return outdated(c);
     if (out.conflict) return c.json({ error: "conflict", current: out.conflict.data, rev: out.conflict.rev }, 409);
     if (out.rev) c.header("ETag", `"${out.rev}"`);
     return c.json(doc);
@@ -853,13 +901,16 @@ export function createApp(opts: AppOptions) {
     if (!date.success) return c.json(badRequest(date.error), 400);
     const pre = precondition(c);
     const conflict = await write(c, async (tx) => {
-      if (pre) {
+      // Nor delete one stored with a rehab block (its screen may not have shown that block).
+      if (pre || belowRehab(c)) {
         const [cur] = await currentSessionDoc(tx, date.data, true);
-        if (cur && conflicts(pre, cur.rev)) return cur;
+        if (cur && belowRehab(c) && sessionHoldsRehab(cur.data)) return "outdated" as const;
+        if (pre && cur && conflicts(pre, cur.rev)) return cur;
       }
       await tx.delete(sessions).where(eq(sessions.date, date.data));
       return null;
     });
+    if (conflict === "outdated") return outdated(c);
     if (conflict) return c.json({ error: "conflict", current: conflict.data, rev: conflict.rev }, 409);
     return c.json({ ok: true });
   });

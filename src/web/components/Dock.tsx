@@ -38,7 +38,7 @@ import { createPortal } from "react-dom";
 import { anySheetOpen, isEditable, subscribeSheets } from "./ui";
 
 /** Suggested priorities (higher = closer to the nav). */
-export const DOCK_PRIORITY = { sync: 10, rest: 20, toast: 30 } as const;
+export const DOCK_PRIORITY = { sync: 10, rest: 20, toast: 30, update: 40 } as const;
 
 interface Entry {
   id: string;

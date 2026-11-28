@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { serve } from "@hono/node-server";
+import { BUILD_LEVEL } from "../shared/buildLevel";
 import { createApp } from "./app";
 import { loadConfig, type ServerConfig } from "./config";
 import { createDb, createWebDb } from "./db/client";
@@ -41,11 +42,14 @@ const app = createApp({
   trustProxy: config.trustProxy,
   forceHttps: config.production,
   buildId: config.buildId,
+  minRehabBuildLevel: config.minRehabBuildLevel,
   staticDir: existsSync(staticDir) ? staticDir : undefined,
 });
 
 const server = serve({ fetch: app.fetch, port: config.port }, () =>
-  console.log(`Strawvine listening on :${config.port}${config.buildId ? ` (build ${config.buildId})` : ""}`),
+  console.log(
+    `Strawvine listening on :${config.port} (${config.buildId ? `build ${config.buildId}, ` : ""}level ${BUILD_LEVEL}; rehab writes from level ${config.minRehabBuildLevel})`,
+  ),
 );
 
 // Graceful shutdown: Heroku sends SIGTERM and allows 30 s before SIGKILL. Stop accepting

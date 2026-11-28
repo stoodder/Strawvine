@@ -17,6 +17,7 @@ import path from "node:path";
 import type { Browser, Page, Route } from "@playwright/test";
 import type { DayLog, Session, Settings } from "../src/shared/schemas";
 import {
+  APP_HEADERS,
   dismissCelebrations,
   expect,
   expectSynced,
@@ -215,7 +216,7 @@ test("(d) the Zone 2 machine, Not today, rehab and Core survive an export and a 
   await onboardedOn(page, MONDAY);
   const before = await serverData(page);
   const api = async (url: string, data: unknown) => {
-    const res = await page.request.put(url, { data });
+    const res = await page.request.put(url, { data, headers: APP_HEADERS });
     expect(res.ok(), `PUT ${url} → ${res.status()} ${await res.text()}`).toBe(true);
   };
   // Days: a Zone 2 on the rower (Sunday), metcon and Zone 2 not today (Monday).

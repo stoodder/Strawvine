@@ -10,6 +10,7 @@
  * until retried or discarded). Acked entries keep the server's response until the base that
  * includes it has been written to disk, so a crash between the two can't lose it.
  */
+import { UPGRADE_REQUIRED_MESSAGE } from "../../shared/buildLevel";
 import { formatShortDate } from "../../shared/dates";
 import { emptyDayLog } from "../../shared/empty";
 import { hasIllFormedText } from "../../shared/text";
@@ -93,6 +94,12 @@ export interface Entry {
   state: "pending" | "failed" | "acked";
   /** Readable reason for a `failed` entry. */
   error?: string;
+  /**
+   * Of a `failed` entry the server refused as sent by an outdated build (409 `upgrade-required`, SPEC §8): the build
+   * level of the window that sent it. Builds before levels mark such an entry with the server's message alone
+   * (`UPGRADE_REQUIRED_MESSAGE`), which reads as level 0 (`outdatedLevelOf`).
+   */
+  outdatedLevel?: number;
   /** Server response of an `acked` entry. */
   result?: unknown;
   /** Order in which entries were acked (results must be re-applied in that order). */
@@ -753,7 +760,12 @@ function replaceOp(s: OutboxState, seq: number, op: Op): OutboxState {
  * "refused" from "refused this time" (e.g. keeping the entry's document as the ancestor of
  * what follows); not done here.
  */
-export function failOrSupersede(s: OutboxState, seq: number, error: string): { state: OutboxState; supersededBy: number | null } {
+export function failOrSupersede(
+  s: OutboxState,
+  seq: number,
+  error: string,
+  outdatedLevel?: number,
+): { state: OutboxState; supersededBy: number | null } {
   const at = s.entries.findIndex((x) => x.seq === seq);
   const e = s.entries[at];
   if (!e) return { state: s, supersededBy: null };
@@ -764,19 +776,50 @@ export function failOrSupersede(s: OutboxState, seq: number, error: string): { s
       if (x.state !== "acked" && opKey(x.op) === key) return { state: removeEntries(s, [seq]), supersededBy: x.seq };
     }
   }
-  return { state: failEntry(s, seq, error), supersededBy: null };
+  return { state: failEntry(s, seq, error, outdatedLevel), supersededBy: null };
 }
 
-export function failEntry(s: OutboxState, seq: number, error: string): OutboxState {
-  return { ...s, entries: s.entries.map((e) => (e.seq === seq ? { ...e, state: "failed" as const, error, rev: bump(e) } : e)) };
+/** Marks an entry failed with `error` (and, refused as from an outdated build, the level that sent it). */
+export function failEntry(s: OutboxState, seq: number, error: string, outdatedLevel?: number): OutboxState {
+  return {
+    ...s,
+    entries: s.entries.map((e) => (e.seq === seq ? { ...e, state: "failed" as const, error, outdatedLevel, rev: bump(e) } : e)),
+  };
 }
 
 export function retryFailed(s: OutboxState): OutboxState {
   if (!s.entries.some((e) => e.state === "failed")) return s;
-  return {
-    ...s,
-    entries: s.entries.map((e) => (e.state === "failed" ? { ...e, state: "pending" as const, error: undefined, rev: bump(e) } : e)),
-  };
+  return { ...s, entries: s.entries.map((e) => (e.state === "failed" ? requeued(e) : e)) };
+}
+
+/** A failed entry back in the queue, as if never sent. */
+const requeued = (e: Entry): Entry => ({ ...e, state: "pending", error: undefined, outdatedLevel: undefined, rev: bump(e) });
+
+/**
+ * The build level a failed entry was refused at as outdated (409 `upgrade-required`, SPEC §8): its `outdatedLevel`,
+ * else 0 when its reason is the server's message (stored so by a build before levels). Null: not refused so.
+ */
+export function outdatedLevelOf(e: Entry): number | null {
+  if (e.state !== "failed") return null;
+  if (e.outdatedLevel !== undefined) return e.outdatedLevel;
+  return e.error === UPGRADE_REQUIRED_MESSAGE ? 0 : null;
+}
+
+/**
+ * Puts back in the queue the entries refused as from an outdated build that a build below `level` (this window's)
+ * sent: the updated app re-sends on its own what the outdated one couldn't save — version-checked as any save, so a
+ * workout or settings changed since is merged by this build. Never one this level was refused at itself. `skip`: the
+ * entries this window has put back before; each is put back once, so with a window on an outdated build still
+ * sending (and refused again), it stays not saved instead of going back and forth.
+ */
+export function retryOutdated(s: OutboxState, level: number, skip: ReadonlySet<number>): { state: OutboxState; seqs: number[] } {
+  const seqs = s.entries.flatMap((e) => {
+    const at = outdatedLevelOf(e);
+    return at !== null && at < level && !skip.has(e.seq) ? [e.seq] : [];
+  });
+  if (!seqs.length) return { state: s, seqs };
+  const set = new Set(seqs);
+  return { state: { ...s, entries: s.entries.map((e) => (set.has(e.seq) ? requeued(e) : e)) }, seqs };
 }
 
 /**

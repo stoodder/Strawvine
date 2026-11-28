@@ -4,6 +4,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { BUILD_LEVEL, MIN_REHAB_BUILD_LEVEL } from "../shared/buildLevel";
 
 /** Values that ship in .env.example / docker-compose.yml / the docs — never acceptable in production. */
 export const PLACEHOLDER_SECRETS = new Set([
@@ -84,6 +85,23 @@ export function readBuildId(distDir = path.resolve(process.cwd(), "dist")): stri
   return /^[\w.-]{1,64}$/.test(raw) ? raw : undefined;
 }
 
+/**
+ * MIN_REHAB_BUILD_LEVEL: the lowest build level (src/shared/buildLevel.ts) that may write documents involving rehab
+ * (SPEC §8, "Outdated builds"). Unset: the default, the level of the build that brought the gate. It can be raised
+ * (to shut out a build found unsafe later) up to this build's own level — never above it, which would refuse this
+ * very build's app — and never below 1, which would let builds that send no level through.
+ */
+export function minRehabBuildLevelFrom(env: NodeJS.ProcessEnv, problems: string[]): number {
+  const raw = env.MIN_REHAB_BUILD_LEVEL?.trim();
+  if (!raw) return MIN_REHAB_BUILD_LEVEL;
+  const n = /^\d{1,9}$/.test(raw) ? Number(raw) : NaN;
+  if (!(n >= 1 && n <= BUILD_LEVEL)) {
+    problems.push(`MIN_REHAB_BUILD_LEVEL must be a whole number from 1 to ${BUILD_LEVEL} (this build's level), not "${raw.slice(0, 20)}".`);
+    return MIN_REHAB_BUILD_LEVEL;
+  }
+  return n;
+}
+
 export interface ServerConfig {
   production: boolean;
   databaseUrl: string;
@@ -92,6 +110,7 @@ export interface ServerConfig {
   port: number;
   trustProxy: boolean;
   buildId: string | undefined;
+  minRehabBuildLevel: number;
 }
 
 /** Reads and validates the environment; throws with every problem listed. */
@@ -107,6 +126,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const password = required("APP_PASSWORD");
   const sessionSecret = required("SESSION_SECRET");
   if (password && sessionSecret) problems.push(...secretProblems({ production, sessionSecret, password }));
+  const minRehabBuildLevel = minRehabBuildLevelFrom(env, problems);
   if (problems.length) throw new Error(`Refusing to start:\n  - ${problems.join("\n  - ")}`);
   return {
     production,
@@ -116,5 +136,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: Number(env.PORT ?? 3000),
     trustProxy: trustProxyFrom(env),
     buildId: readBuildId(),
+    minRehabBuildLevel,
   };
 }

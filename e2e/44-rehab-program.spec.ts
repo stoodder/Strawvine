@@ -9,7 +9,18 @@
  * its flags, said in a toast), `?flags=-rehab` off.
  */
 import type { Page } from "@playwright/test";
-import { expect, expectSynced, MONDAY, MONDAY_ISO, notifications, onboardedOn, serverData, test, toastMessage } from "./helpers";
+import {
+  APP_HEADERS,
+  expect,
+  expectSynced,
+  MONDAY,
+  MONDAY_ISO,
+  notifications,
+  onboardedOn,
+  serverData,
+  test,
+  toastMessage,
+} from "./helpers";
 
 const FLAGS_KEY = "strawvine:flags";
 const MWF = [false, true, false, true, false, true, false];
@@ -26,7 +37,11 @@ const programs = async (page: Page) => (await serverData(page)).settings.rehab?.
 const foreground = (page: Page) => page.evaluate(() => void document.dispatchEvent(new Event("visibilitychange")));
 
 async function api(page: Page, method: string, path: string, data?: unknown) {
-  const res = await page.request.fetch(path, { method, headers: { "cache-control": "no-cache" }, ...(data !== undefined ? { data } : {}) });
+  const res = await page.request.fetch(path, {
+    method,
+    headers: { "cache-control": "no-cache", ...APP_HEADERS },
+    ...(data !== undefined ? { data } : {}),
+  });
   expect(res.ok(), `${method} ${path} → ${res.status()}`).toBe(true);
   return res.status() === 204 ? null : res.json();
 }
@@ -58,7 +73,7 @@ async function logKneeOct19(page: Page) {
 /** Saves `programs` as the rehab blocks on the server, as another device would, and opens Program. */
 async function seedRehab(page: Page, programs: unknown[]) {
   const { settings } = await serverData(page);
-  const res = await page.request.put("/api/settings", { data: { ...settings, rehab: { programs } } });
+  const res = await page.request.put("/api/settings", { data: { ...settings, rehab: { programs } }, headers: APP_HEADERS });
   expect(res.ok(), `PUT /api/settings → ${res.status()}`).toBe(true);
   await page.goto("/program");
   await expect(rehab(page).getByRole("heading", { level: 2, name: "Rehab" })).toBeVisible();
@@ -226,7 +241,7 @@ test.describe("with the rehab flag", () => {
       nutrition: { ...settings.nutrition, kcalPerLb: 3600 },
       rehab: { programs: [{ ...settings.rehab!.programs[0]!, name: "Left knee rehab" }] },
     };
-    const res = await page.request.put("/api/settings", { data: other });
+    const res = await page.request.put("/api/settings", { data: other, headers: APP_HEADERS });
     expect(res.ok()).toBe(true);
     // This device catches up on a return to the foreground (at most every 5 s).
     await page.clock.fastForward(6000);

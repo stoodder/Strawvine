@@ -8,6 +8,7 @@
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BUILD_LEVEL, buildLevelOf, UPGRADE_REQUIRED_MESSAGE, upgradeRequiredBody } from "../../shared/buildLevel";
 import { defaultSettings } from "../../shared/defaults";
 import { sessionSchema, settingsSchema, type Bootstrap, type Session, type SetEntry, type Settings } from "../../shared/schemas";
 import { blankSet } from "../../shared/session";
@@ -67,6 +68,8 @@ class FakeServer {
   canned: Reply[] = [];
   /** How many of the next writes are handled but never answered (the connection drops first). */
   loseAnswers = 0;
+  /** Workout and settings writes from a build level below this are refused as outdated (409 upgrade-required). */
+  minLevel = 0;
   private gates: Array<{ match: (c: Call) => boolean; wait: Promise<void> }> = [];
 
   constructor() {
@@ -165,6 +168,9 @@ class FakeServer {
     }
     if (c.method !== "GET") this.beforeWrite?.(c);
     const m = /^\/sessions\/(.+)$/.exec(c.path);
+    // The server's rehab gate, simplified: every workout and settings write from a build below `minLevel`.
+    if ((m || c.path === "/settings") && c.method !== "GET" && buildLevelOf(c.headers["x-strawvine-build-level"]) < this.minLevel)
+      return { status: 409, body: upgradeRequiredBody(this.minLevel) };
     if (m && c.method === "PUT") {
       const parsed = sessionSchema.safeParse(c.body);
       if (!parsed.success) return { status: 400, body: { error: "invalid", issues: [{ message: parsed.error.issues[0]!.message }] } };
@@ -994,5 +1000,86 @@ describe("forget this device", () => {
     sync.enqueue({ kind: "day", date: "2026-11-03", patch: { steps: 2 } });
     const res = await sync.forgetDevice({ patienceMs: 300 });
     expect(res).toEqual({ pendingDropped: 2 });
+  });
+});
+
+describe("a change refused as from an outdated build (SPEC §8)", () => {
+  /** A window on a build of `level` (this code otherwise): what it sends in `x-strawvine-build-level`. */
+  async function deviceAt(level: number): Promise<Sync> {
+    vi.doMock("../../shared/buildLevel", async (actual) => ({
+      ...(await actual<typeof import("../../shared/buildLevel")>()),
+      BUILD_LEVEL: level,
+    }));
+    try {
+      return await device();
+    } finally {
+      vi.doUnmock("../../shared/buildLevel");
+    }
+  }
+  const sessionWrites = () => server.writes().filter((w) => w.path === `/sessions/${D}`);
+
+  it("stays not saved on the device — never merged or re-sent on its own — and the app asks to be updated", async () => {
+    server.minLevel = BUILD_LEVEL;
+    const sync = await deviceAt(BUILD_LEVEL - 1);
+    const mine = logAt(shown(sync)!, 0);
+    sync.enqueue({ kind: "session", date: D, doc: mine });
+    sync.enqueue({ kind: "day", date: D, patch: { steps: 9000 } });
+    await vi.waitFor(() => expect(sync.getSyncInfo()).toMatchObject({ pending: 0, failed: 1 }));
+    expect(sync.getSyncState()).toMatchObject({ failed: 1, outdated: true, failedMessage: UPGRADE_REQUIRED_MESSAGE });
+    expect(sync.getSyncInfo().items).toEqual([expect.objectContaining({ failed: true, error: UPGRADE_REQUIRED_MESSAGE })]);
+    // Sent once, with its level; what came after it (not gated) was saved.
+    expect(server.writes().map((w) => [w.method, w.path, w.headers["x-strawvine-build-level"]])).toEqual([
+      ["PUT", `/sessions/${D}`, String(BUILD_LEVEL - 1)],
+      ["PUT", `/days/${D}`, String(BUILD_LEVEL - 1)],
+    ]);
+    // Kept on screen, nothing changed on the server, and no "Couldn't save" toast: the update prompt says it.
+    expect(shown(sync)).toEqual(mine);
+    expect(doneOf(server.session())).toEqual([false, false, false]);
+    expect(toasts).toEqual([]);
+    // Another pass, a return to the app, or reopening it on the same build don't send it again.
+    sync.kick();
+    document.dispatchEvent(new Event("visibilitychange"));
+    await new Promise((r) => setTimeout(r, 50));
+    sync.stopSync();
+    const reopened = await deviceAt(BUILD_LEVEL - 1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sessionWrites()).toHaveLength(1);
+    expect(reopened.getSyncInfo().failed).toBe(1);
+    expect(shown(reopened)).toEqual(mine);
+    // Retry by hand sends it (once) and is refused again: still kept.
+    reopened.retryFailed();
+    await vi.waitFor(() => expect(sessionWrites()).toHaveLength(2));
+    await vi.waitFor(() => expect(reopened.getSyncState()).toMatchObject({ failed: 1, outdated: true }));
+    expect(sessionWrites()).toHaveLength(2);
+  });
+
+  it.each([
+    ["marked with its level", false],
+    ["from a build before levels (only the server's message)", true],
+  ])("is sent by the updated app on its own, merged with what changed since (%s)", async (_, beforeLevels) => {
+    server.minLevel = BUILD_LEVEL;
+    const old = await deviceAt(BUILD_LEVEL - 1);
+    old.enqueue({ kind: "session", date: D, doc: logAt(shown(old)!, 0) });
+    await vi.waitFor(() => expect(old.getSyncState().outdated).toBe(true));
+    old.stopSync();
+    if (beforeLevels) {
+      const stored = JSON.parse(localStorage.getItem("strawvine:outbox")!) as { entries: Array<Record<string, unknown>> };
+      for (const e of stored.entries) delete e.outdatedLevel;
+      localStorage.setItem("strawvine:outbox", JSON.stringify(stored));
+    }
+    // Meanwhile another device logs set b.
+    server.otherDevice(D, logAt(server.session()!, 1));
+    const updated = await device();
+    await settled(updated);
+    expect(doneOf(server.session())).toEqual([true, true, false]);
+    expect(shown(updated)).toEqual(server.session());
+    expect(updated.getSyncState()).toMatchObject({ failed: 0, outdated: false });
+    expect(toasts.map((t) => t.message)).toEqual(["Merged changes from another device"]);
+    // The refused attempt, the updated build's (a conflict), and the merged save.
+    expect(sessionWrites().map((w) => w.headers["x-strawvine-build-level"])).toEqual([
+      String(BUILD_LEVEL - 1),
+      String(BUILD_LEVEL),
+      String(BUILD_LEVEL),
+    ]);
   });
 });

@@ -37,6 +37,7 @@
  *   the "before" version, it takes the "after" one, so the next revalidation is a 304.
  */
 import { onlineManager, QueryClient, replaceEqualDeep } from "@tanstack/react-query";
+import { BUILD_LEVEL, isUpgradeRequired } from "../../shared/buildLevel";
 import { formatShortDate } from "../../shared/dates";
 import type { Bootstrap, ConflictBody, Session, Settings } from "../../shared/schemas";
 import { showToast } from "../components/Toast";
@@ -68,6 +69,7 @@ import {
   request,
   resolveConflict,
   retryFailed as retryFailedCore,
+  retryOutdated,
   savedAlready,
   TAB_SPACE,
   unsynced,
@@ -644,6 +646,11 @@ export interface SyncState {
   authPaused: boolean;
   /** Still reading this device's copy at start-up. */
   restoring: boolean;
+  /**
+   * The server refused a change from this window as sent by an outdated build (SPEC §8): kept as not saved, and the
+   * app has to be updated (reloaded into the new version) to save it. Stays set until the page reloads.
+   */
+  outdated: boolean;
 }
 
 let syncState: SyncState = {
@@ -655,6 +662,7 @@ let syncState: SyncState = {
   retrying: false,
   authPaused: false,
   restoring: false,
+  outdated: false,
 };
 const listeners = new Set<() => void>();
 let retrying = false;
@@ -763,6 +771,7 @@ function emit() {
     retrying,
     authPaused,
     restoring,
+    outdated: outdatedBuild,
   };
   if (!(Object.keys(next) as (keyof SyncState)[]).every((k) => next[k] === syncState[k])) {
     syncState = next;
@@ -1023,6 +1032,7 @@ async function replay() {
     for (;;) {
       if (authPaused || !onlineManager.isOnline()) break;
       refresh();
+      requeueOutdated();
       const e = nextSendable(ob.entries);
       if (!e) break;
       if (isNoopDelete(e.op)) {
@@ -1056,6 +1066,11 @@ async function replay() {
         });
       } catch (err) {
         inflight = null;
+        if (err instanceof ApiError && err.status === 409 && isUpgradeRequired(err.body)) {
+          // Not a version conflict (no document to merge): this build may not make this change (SPEC §8).
+          onOutdated(e.seq, err.message);
+          continue;
+        }
         const conflict = err instanceof ApiError && err.status === 409 ? conflictOf(err.body) : null;
         if (conflict && savedAlready(e.op, conflict)) {
           // An earlier attempt was applied and its answer lost: this is that answer.
@@ -1306,6 +1321,49 @@ function onRejected(seq: number, op: Op, message: string) {
   reconcileOwed = true;
   publish();
   toastRejected(op, message);
+}
+
+// ---- outdated builds (SPEC §8) ------------------------------------------------
+
+/** Set once the server refused a change from this window as sent by an outdated build (`SyncState.outdated`). */
+let outdatedBuild = false;
+/** Entries this window put back in the queue after an outdated build's refusal (each once: `retryOutdated`). */
+const retriedOutdated = new Set<number>();
+
+/**
+ * The server refused entry `seq` as sent by an outdated build (409 `upgrade-required`): like any refused change it
+ * stays, not saved (Retry / Discard) — or a later edit of the same document, made on top of it, takes its place —
+ * marked with this build's level, and the app asks to be updated (`UpdatePrompt`) instead of a "Couldn't save" toast.
+ * The build that opens after the update sends it (`requeueOutdated`).
+ */
+function onOutdated(seq: number, message: string) {
+  mergedOnce.delete(seq);
+  outdatedBuild = true;
+  let supersededBy: number | null = null;
+  mutate((s) => {
+    const r = failOrSupersede(s, seq, message, BUILD_LEVEL);
+    supersededBy = r.supersededBy;
+    return { ...r.state, inflight: s.inflight?.seq === seq ? null : r.state.inflight };
+  });
+  const later = supersededBy as number | null;
+  const carried = merges.get(seq);
+  if (later !== null && carried) merges.set(later, [...new Set([...(merges.get(later) ?? []), ...carried])]);
+  merges.delete(seq);
+  if (later === null) reconcileOwed = true;
+  publish();
+}
+
+/** Queues again what a window on an older build was refused as outdated (`retryOutdated`): this build sends it. */
+function requeueOutdated() {
+  let seqs: number[] = [];
+  mutate((s) => {
+    const r = retryOutdated(s, BUILD_LEVEL, retriedOutdated);
+    seqs = r.seqs;
+    return r.state;
+  });
+  if (!seqs.length) return;
+  for (const seq of seqs) retriedOutdated.add(seq);
+  publish();
 }
 
 function toastRejected(op: Op, message: string) {

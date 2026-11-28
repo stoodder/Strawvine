@@ -1,9 +1,15 @@
 import { test as base, expect, type BrowserContext, type Locator, type Page } from "@playwright/test";
+import { BUILD_LEVEL, BUILD_LEVEL_HEADER } from "../src/shared/buildLevel";
 import type { Bootstrap } from "../src/shared/schemas";
 import { seedHistory as seedHistoryVia } from "../scripts/lib/seed-history.mjs";
 
 export { expect };
 export const PASSWORD = process.env.E2E_PASSWORD ?? "e2e-password-not-secret";
+/**
+ * What the app sends with every API call: this build's level (src/shared/buildLevel.ts). A test writing a workout or
+ * settings involving rehab "as another device would" sends it too, or the server refuses it as an outdated build's.
+ */
+export const APP_HEADERS = { [BUILD_LEVEL_HEADER]: String(BUILD_LEVEL) };
 
 /**
  * Playwright's clock (`page.clock.install`) fakes `performance.now()` and the timestamps given to

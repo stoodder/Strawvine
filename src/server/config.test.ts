@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { BUILD_LEVEL, MIN_REHAB_BUILD_LEVEL } from "../shared/buildLevel";
 import { loadConfig, looksRandomEnough, readBuildId, secretProblems, trustProxyFrom } from "./config";
 
 const HEX = "3f9a0c4be1d27786a5f0e93c1b6d4a2e8c7b5f1d0e9a3c6b2f4d8e1a7c5b9d0f";
@@ -84,5 +85,16 @@ describe("environment helpers", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("takes the lowest build level that may write rehab from MIN_REHAB_BUILD_LEVEL: 1 to this build's, default the gate's", () => {
+    const env = { DATABASE_URL: "postgres://x", APP_PASSWORD: "pw", SESSION_SECRET: "s".repeat(40) };
+    expect(loadConfig(env).minRehabBuildLevel).toBe(MIN_REHAB_BUILD_LEVEL);
+    expect(MIN_REHAB_BUILD_LEVEL).toBe(1);
+    expect(loadConfig({ ...env, MIN_REHAB_BUILD_LEVEL: ` ${BUILD_LEVEL} ` }).minRehabBuildLevel).toBe(BUILD_LEVEL);
+    expect(loadConfig({ ...env, MIN_REHAB_BUILD_LEVEL: "" }).minRehabBuildLevel).toBe(MIN_REHAB_BUILD_LEVEL);
+    // Not 0 (builds that send no level would pass), not above this build (its own app would be refused), whole only.
+    for (const bad of ["0", String(BUILD_LEVEL + 1), "-1", "1.5", "one", "1e3"])
+      expect(() => loadConfig({ ...env, MIN_REHAB_BUILD_LEVEL: bad }), bad).toThrow(/Refusing to start:[\s\S]*MIN_REHAB_BUILD_LEVEL/);
   });
 });

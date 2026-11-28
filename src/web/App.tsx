@@ -15,6 +15,7 @@ import {
   syncNow,
 } from "./lib/sync";
 import { SyncStatus } from "./components/SyncStatus";
+import { UpdatePrompt } from "./components/UpdatePrompt";
 import { BottomNav } from "./components/BottomNav";
 import { Celebrations } from "./components/Celebrations";
 import { Logo } from "./components/Logo";
@@ -102,6 +103,7 @@ function Shell() {
         </Lazy>
       </main>
       <SyncStatus />
+      <UpdatePrompt />
       <BottomNav />
       <Celebrations />
       <ScrollRestoration />

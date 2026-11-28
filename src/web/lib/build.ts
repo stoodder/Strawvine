@@ -47,14 +47,21 @@ async function workerReady(id: string, ms: number): Promise<void> {
   }
 }
 
+/**
+ * Reloads into the newest build the server has reported: its worker is registered and given up to 8 s to take over
+ * first, so the reload opens that build rather than this one's cached shell.
+ */
+export function updateApp(): Promise<void> {
+  return workerReady(serverBuild ?? BUILD_ID, 8000).finally(() => window.location.reload());
+}
+
 function announce() {
   if (announced || !serverBuild || serverBuild === BUILD_ID || BUILD_ID === "dev") return;
   if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
   announced = true;
-  const target = serverBuild;
   showToast({
     message: "New version ready",
-    action: { label: "Reload", onAction: () => void workerReady(target, 8000).finally(() => window.location.reload()) },
+    action: { label: "Reload", onAction: () => void updateApp() },
     duration: 15_000,
   });
 }

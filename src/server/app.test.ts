@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BUILD_LEVEL, BUILD_LEVEL_HEADER, UPGRADE_REQUIRED, UPGRADE_REQUIRED_MESSAGE } from "../shared/buildLevel";
 import type { Bootstrap, DayLog, Session, Settings } from "../shared/schemas";
 import { blankSet, buildSession, buildSessionFrom } from "../shared/session";
 import { savedAlready } from "../web/lib/outbox-core";
@@ -23,10 +24,37 @@ const secret = "x".repeat(40);
 const app = createApp({ db, password: "hunter2", sessionSecret: secret, secureCookies: false, buildId: "test-build" });
 let cookie = "";
 
+/** A request from this build (its build level), signed in. */
 const req = (path: string, init: RequestInit = {}) =>
   app.request(path, {
     ...init,
-    headers: { "content-type": "application/json", cookie, ...(init.headers as Record<string, string>) },
+    headers: {
+      "content-type": "application/json",
+      cookie,
+      [BUILD_LEVEL_HEADER]: String(BUILD_LEVEL),
+      ...(init.headers as Record<string, string>),
+    },
+  });
+/** What the server logged for `reqFrom` requests (refusals of outdated builds). */
+const gateLog: string[] = [];
+const gateApp = createApp({
+  db,
+  password: "hunter2",
+  sessionSecret: secret,
+  secureCookies: false,
+  buildId: "test-build",
+  log: (m) => gateLog.push(m),
+});
+/** The same from a build before levels (no `x-strawvine-build-level`), or of the given level. */
+const reqFrom = (level: string | null, path: string, init: RequestInit = {}) =>
+  gateApp.request(path, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      cookie,
+      ...(level === null ? {} : { [BUILD_LEVEL_HEADER]: level }),
+      ...(init.headers as Record<string, string>),
+    },
   });
 const json = (method: string, body: unknown) => ({ method, body: JSON.stringify(body) });
 /** The cookie-signing key for this database's current salt. */
@@ -588,6 +616,205 @@ describe("sections, rehab and skips", () => {
     expect(after.settings).not.toHaveProperty("rehab");
     // Left in place for the export tests.
     expect((await req("/api/settings", json("PUT", withRehab))).status).toBe(200);
+  });
+});
+
+describe("outdated builds and rehab (SPEC §8)", () => {
+  const knee = {
+    id: "knee",
+    name: "Knee rehab",
+    start: "2026-10-19",
+    weeks: 6,
+    days: [false, true, false, true, false, true, false],
+    carry: "last",
+  };
+  const bootstrap = async () => (await (await req("/api/bootstrap")).json()) as Bootstrap;
+  const revOf = (res: Response) => res.headers.get("etag")!.replace(/"/g, "");
+  /** Writes refused as from an outdated build: 409 with the code and the minimum, no document to merge. */
+  const expectUpgrade = async (res: Response, what: string) => {
+    expect(res.status, what).toBe(409);
+    const body = await res.json();
+    expect(body, what).toEqual({ error: UPGRADE_REQUIRED_MESSAGE, code: UPGRADE_REQUIRED, minBuildLevel: 1 });
+    expect(res.headers.get("etag"), what).toBeNull();
+    expect(res.headers.get("x-dataset-etag"), what).toBeNull();
+  };
+  /** A workout on `date` with a rehab block (a logged set) after the plan's blocks. */
+  const withRehab = (b: Bootstrap, date: string): Session => {
+    const built = buildSession(date, b);
+    const ex = b.exercises.find((e) => !e.tracksMax)!;
+    return {
+      ...built,
+      blocks: [
+        ...built.blocks,
+        {
+          id: "rehab-1",
+          kind: "rehab",
+          rehab: "knee",
+          exercises: [{ exerciseId: ex.id, measure: ex.measure, sets: [blankSet({ id: "r1", targetReps: 15, done: true, reps: 15 })] }],
+        },
+      ],
+    };
+  };
+  const OUTDATED = [null, "0", "", "abc", "-1", "0.5", "1e3", " "];
+
+  it("accepts an outdated build's writes that don't involve rehab, as before", async () => {
+    const b = await bootstrap();
+    for (const level of [null, "0"]) {
+      expect((await reqFrom(level, "/api/days/2026-12-01", json("PUT", { weightLb: 200.5, proteinG: 180 }))).status).toBe(200);
+      const plain = buildSession("2026-12-01", b);
+      let res = await reqFrom(level, "/api/sessions/2026-12-01", json("PUT", plain));
+      expect(res.status).toBe(200);
+      // Version-checked, a conflict included: the stored copy holds no rehab, so it is handed over to merge.
+      res = await reqFrom(level, "/api/sessions/2026-12-01", {
+        ...json("PUT", { ...plain, notes: "ok" }),
+        headers: { "if-match": '"stale"' },
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "conflict", current: plain });
+      expect((await reqFrom(level, "/api/sessions/2026-12-01", { method: "DELETE" })).status).toBe(200);
+      const ex = b.exercises.find((e) => !e.tracksMax)!;
+      expect((await reqFrom(level, `/api/exercises/${ex.id}`, json("PATCH", { name: ex.name }))).status).toBe(200);
+      expect((await reqFrom(level, "/api/achievements/seen", json("POST", { keys: [] }))).status).toBe(200);
+    }
+    expect((await bootstrap()).days.find((d) => d.date === "2026-12-01")).toMatchObject({ weightLb: 200.5, proteinG: 180 });
+  });
+
+  it("refuses a workout involving rehab from an outdated or missing build — sent or stored, before the version check — writing nothing", async () => {
+    const b = await bootstrap();
+    const stored = withRehab(b, "2026-12-02");
+    let res = await req("/api/sessions/2026-12-02", json("PUT", stored));
+    expect(res.status).toBe(200);
+    const rev = revOf(res);
+    const before = await req("/api/bootstrap");
+    const tag = before.headers.get("etag")!;
+    const snapshot = (await before.json()) as Bootstrap;
+    const dropped = { ...stored, blocks: stored.blocks.filter((x) => x.kind !== "rehab") };
+    const asAccessory = {
+      ...stored,
+      blocks: stored.blocks.map(({ rehab: _, ...x }) => (x.kind === "rehab" ? { ...x, kind: "accessory" } : x)),
+    };
+    for (const level of OUTDATED) {
+      const as = `level ${JSON.stringify(level)}`;
+      // The stored copy as it is, with the rehab block dropped, or turned into an accessory block (what an older
+      // build's merge does), each on the current revision, a stale one, none, or as new.
+      for (const doc of [stored, dropped, asAccessory])
+        for (const headers of [{ "if-match": `"${rev}"` }, { "if-match": '"stale"' }, {}, { "if-none-match": "*" }] as Record<
+          string,
+          string
+        >[])
+          await expectUpgrade(
+            await reqFrom(level, "/api/sessions/2026-12-02", { ...json("PUT", doc), headers }),
+            `${as} ${JSON.stringify(headers)}`,
+          );
+      // Deleting it.
+      await expectUpgrade(await reqFrom(level, "/api/sessions/2026-12-02", { method: "DELETE" }), `${as} delete`);
+      await expectUpgrade(
+        await reqFrom(level, "/api/sessions/2026-12-02", { method: "DELETE", headers: { "if-match": `"${rev}"` } }),
+        `${as} delete`,
+      );
+      // A rehab block where nothing is stored.
+      await expectUpgrade(await reqFrom(level, "/api/sessions/2026-12-03", json("PUT", withRehab(b, "2026-12-03"))), `${as} new`);
+    }
+    // Nothing changed: the data set's version (its ETag), and the documents with their revisions.
+    const after = await req("/api/bootstrap", { headers: { "if-none-match": tag } });
+    expect(after.status).toBe(304);
+    expect(await bootstrap()).toEqual(snapshot);
+    expect(snapshot.sessions.find((s) => s.date === "2026-12-02")).toEqual(JSON.parse(JSON.stringify(stored)));
+    expect(snapshot.sessions.some((s) => s.date === "2026-12-03")).toBe(false);
+    // This build (and a later one) writes it as before.
+    for (const level of [String(BUILD_LEVEL), String(BUILD_LEVEL + 1), "007"]) {
+      res = await reqFrom(level, "/api/sessions/2026-12-02", json("PUT", { ...stored, notes: `from ${level}` }));
+      expect(res.status, level).toBe(200);
+    }
+    expect((await req("/api/sessions/2026-12-02", { method: "DELETE" })).status).toBe(200);
+  });
+
+  it("keeps the rehab blocks when an outdated build saves settings without them, and refuses one that would change them", async () => {
+    const b = await bootstrap();
+    const programs = b.settings.rehab!.programs;
+    expect(programs.map((p) => p.id)).toEqual(["hip", "knee"]); // left by "sections, rehab and skips"
+    const { rehab: _, ...withoutRehab } = b.settings;
+    for (const level of [null, "0"]) {
+      const as = `level ${JSON.stringify(level)}`;
+      // Without the key (a build that doesn't know it): saved, the stored blocks kept, and answered with them.
+      const changed: Settings = { ...withoutRehab, display: { highContrast: level === null } };
+      let res = await reqFrom(level, "/api/settings", json("PUT", changed));
+      expect(res.status, as).toBe(200);
+      expect(await res.json(), as).toEqual({ ...changed, rehab: { programs } });
+      let after = await bootstrap();
+      expect(after.settings, as).toEqual({ ...changed, rehab: { programs } });
+      const rev = revOf(res);
+      // Carrying exactly the stored ones (whatever the key order): saved.
+      const shuffled = { programs: programs.map((p) => Object.fromEntries(Object.entries(p).reverse())) };
+      res = await reqFrom(level, "/api/settings", {
+        ...json("PUT", { ...after.settings, rehab: shuffled }),
+        headers: { "if-match": `"${rev}"` },
+      });
+      expect(res.status, as).toBe(200);
+      // A stale revision is a version conflict first, with the server's copy (rehab blocks and all) to merge.
+      res = await reqFrom(level, "/api/settings", { ...json("PUT", changed), headers: { "if-match": `"${rev}"` } });
+      expect(res.status, as).toBe(409);
+      expect((await res.json()).current.rehab, as).toEqual({ programs });
+      // Dropping, emptying, altering or adding one: refused, nothing written.
+      const tag = (await req("/api/bootstrap")).headers.get("etag")!;
+      for (const rehab of [
+        { programs: [programs[1]] },
+        { programs: [] },
+        { programs: [programs[0], { ...programs[1]!, weeks: 8 }] },
+        { programs: [...programs, { ...knee, id: "ankle" }] },
+      ])
+        await expectUpgrade(
+          await reqFrom(level, "/api/settings", json("PUT", { ...after.settings, rehab })),
+          `${as} ${JSON.stringify(rehab).slice(0, 60)}`,
+        );
+      expect((await req("/api/bootstrap", { headers: { "if-none-match": tag } })).status, as).toBe(304);
+      after = await bootstrap();
+      expect(after.settings.rehab, as).toEqual({ programs });
+    }
+    // With none stored: an outdated build's settings stay without them, and can't bring one back.
+    expect((await req("/api/settings", json("PUT", withoutRehab))).status).toBe(200); // this build removes them
+    expect((await bootstrap()).settings).not.toHaveProperty("rehab");
+    expect((await reqFrom(null, "/api/settings", json("PUT", withoutRehab))).status).toBe(200);
+    expect((await bootstrap()).settings).not.toHaveProperty("rehab");
+    await expectUpgrade(
+      await reqFrom(null, "/api/settings", json("PUT", { ...withoutRehab, rehab: { programs: [knee] } })),
+      "brought back",
+    );
+    expect((await reqFrom(null, "/api/settings", json("PUT", { ...withoutRehab, rehab: { programs: [] } }))).status).toBe(200);
+    // Back as the export tests expect.
+    expect((await req("/api/settings", json("PUT", b.settings))).status).toBe(200);
+    expect((await bootstrap()).settings).toEqual(b.settings);
+  });
+
+  it("takes its minimum from the options, and logs a refusal without any data", async () => {
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    const strict = createApp({
+      db,
+      password: "hunter2",
+      sessionSecret: secret,
+      secureCookies: false,
+      minRehabBuildLevel: BUILD_LEVEL + 1,
+      log: (m, d) => logs.push([m, d]),
+    });
+    const b = await bootstrap();
+    const doc = withRehab(b, "2026-12-04");
+    const put = (level: string) =>
+      strict.request("/api/sessions/2026-12-04", {
+        method: "PUT",
+        headers: { "content-type": "application/json", cookie, [BUILD_LEVEL_HEADER]: level },
+        body: JSON.stringify(doc),
+      });
+    const res = await put(String(BUILD_LEVEL));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: UPGRADE_REQUIRED, minBuildLevel: BUILD_LEVEL + 1 });
+    expect(logs).toEqual([
+      ["Outdated build refused", { method: "PUT", route: "/api/sessions/:date", level: BUILD_LEVEL, min: BUILD_LEVEL + 1 }],
+    ]);
+    expect((await put(String(BUILD_LEVEL + 1))).status).toBe(200);
+    expect((await req("/api/sessions/2026-12-04", { method: "DELETE" })).status).toBe(200);
+    // Every refusal above was logged as one (and nothing else went wrong).
+    expect(gateLog.length).toBeGreaterThan(0);
+    expect(new Set(gateLog)).toEqual(new Set(["Outdated build refused"]));
   });
 });
 

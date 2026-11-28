@@ -25,7 +25,7 @@
  * kept in RESTORE_CHECK_OUT (default: a temp dir) for inspection.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -40,6 +40,8 @@ const outDir = process.env.RESTORE_CHECK_OUT ?? mkdtempSync(path.join(tmpdir(), 
 const PASSWORD = "restore-check-password";
 const SESSION_SECRET = "restore-check-session-secret-0123456789abcdef0123";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
+/** This code's build level (src/shared/buildLevel.ts): sent as the app does, or its rehab writes would be refused. */
+const BUILD_LEVEL = /export const BUILD_LEVEL = (\d+);/.exec(readFileSync(path.join(root, "src/shared/buildLevel.ts"), "utf8"))?.[1] ?? "0";
 
 /** URLs of the two databases, after checking they are safe to drop. */
 function databases() {
@@ -129,6 +131,7 @@ async function client(base) {
       headers: {
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
         cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; "),
+        "x-strawvine-build-level": BUILD_LEVEL,
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });

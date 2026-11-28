@@ -1,3 +1,4 @@
+import { BUILD_LEVEL, BUILD_LEVEL_HEADER } from "../../shared/buildLevel";
 import { noteServerBuild } from "./build";
 
 export class ApiError extends Error {
@@ -79,7 +80,12 @@ async function send<T>(path: string, init: ApiInit, conditional: boolean): Promi
     const res = await fetch(`/api${path}`, {
       method,
       credentials: "same-origin",
-      headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...init.headers },
+      // The build level on every call: the server refuses writes involving rehab from an outdated build (SPEC §8).
+      headers: {
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        [BUILD_LEVEL_HEADER]: String(BUILD_LEVEL),
+        ...init.headers,
+      },
       body,
       signal: ctrl.signal,
       ...(conditional ? { cache: "no-store" as const } : {}),

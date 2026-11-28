@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { UPGRADE_REQUIRED_MESSAGE } from "../../shared/buildLevel";
 import { defaultSettings } from "../../shared/defaults";
 import type { Bootstrap, Session, Settings } from "../../shared/schemas";
 import {
@@ -18,6 +19,7 @@ import {
   mergeOutbox,
   nextSendable,
   opLabel,
+  outdatedLevelOf,
   overlay,
   pendingDates,
   pruneAcked,
@@ -25,6 +27,7 @@ import {
   request,
   resolveConflict,
   retryFailed,
+  retryOutdated,
   savedAlready,
   validateOp,
   type OutboxState,
@@ -822,5 +825,65 @@ describe("text the database can't store", () => {
     expect(validateOp({ kind: "session", date: D, doc: doc({ notes: "ok" }), baseRev: "r1", base: doc({ notes: half }) })).toBeNull();
     expect(validateOp({ kind: "session", date: D, doc: null, baseRev: "r1", base: doc({ notes: half }) })).toBeNull();
     expect(validateOp({ kind: "seen", keys: [`bench-${half}-${D}`] })).toBeNull();
+  });
+});
+
+describe("changes refused as from an outdated build (SPEC §8)", () => {
+  const D = "2026-11-02";
+  const queued = () => {
+    let s: OutboxState = emptyOutbox();
+    s = addOp(s, { kind: "session", date: D, doc: session(D, 1, "mine"), baseRev: "r1", base: session(D, 1) }, null);
+    s = addOp(s, { kind: "day", date: D, patch: { steps: 1 } }, null);
+    return s;
+  };
+
+  it("stay failed, marked with the level that sent them; a later edit of the same document takes their place", () => {
+    let s = queued();
+    const seq = s.entries[0]!.seq;
+    const r = failOrSupersede(s, seq, UPGRADE_REQUIRED_MESSAGE, 3);
+    expect(r.supersededBy).toBeNull();
+    expect(r.state.entries[0]).toMatchObject({ seq, state: "failed", error: UPGRADE_REQUIRED_MESSAGE, outdatedLevel: 3 });
+    expect(outdatedLevelOf(r.state.entries[0]!)).toBe(3);
+    // Retry puts it back as if never sent.
+    s = retryFailed(r.state);
+    expect(s.entries[0]!.state).toBe("pending");
+    expect(JSON.parse(JSON.stringify(s.entries[0]))).not.toHaveProperty("outdatedLevel");
+    expect(outdatedLevelOf(s.entries[0]!)).toBeNull();
+    // A later edit of the workout queued while it was out (made on top of it) carries it.
+    s = queued();
+    s = addOp(markSending(s, s.entries[0]!.seq, 1), { kind: "session", date: D, doc: session(D, 1, "later") }, null);
+    expect(s.entries.filter((e) => e.op.kind === "session")).toHaveLength(2);
+    const sup = failOrSupersede(s, s.entries[0]!.seq, UPGRADE_REQUIRED_MESSAGE, 3);
+    expect(sup.supersededBy).toBe(s.entries.at(-1)!.seq);
+  });
+
+  it("a build before levels (the server's message alone) reads as level 0; other refusals as none", () => {
+    const s = queued();
+    const seq = s.entries[0]!.seq;
+    expect(outdatedLevelOf(failEntry(s, seq, UPGRADE_REQUIRED_MESSAGE).entries[0]!)).toBe(0);
+    expect(outdatedLevelOf(failEntry(s, seq, "Forbidden").entries[0]!)).toBeNull();
+    expect(outdatedLevelOf(s.entries[0]!)).toBeNull(); // pending
+  });
+
+  it("go back in the queue for a later build only — each once per window — and nothing else does", () => {
+    let s = queued();
+    const [a, b] = s.entries.map((e) => e.seq) as [number, number];
+    s = failEntry(failEntry(s, a, UPGRADE_REQUIRED_MESSAGE), b, "Forbidden");
+    // The level that was refused (or a lower one) doesn't send it again.
+    expect(retryOutdated(s, 0, new Set()).seqs).toEqual([]);
+    const at1 = failEntry(s, a, UPGRADE_REQUIRED_MESSAGE, 1);
+    expect(retryOutdated(at1, 1, new Set()).seqs).toEqual([]);
+    expect(retryOutdated(at1, 2, new Set()).seqs).toEqual([a]);
+    // A later build sends it; the other refusal stays.
+    const r = retryOutdated(s, 1, new Set());
+    expect(r.seqs).toEqual([a]);
+    expect(r.state.entries.map((e) => [e.seq, e.state])).toEqual([
+      [a, "pending"],
+      [b, "failed"],
+    ]);
+    expect(r.state.entries[0]!.rev).toBeGreaterThan(s.entries[0]!.rev ?? 0); // wins the cross-window merge
+    // Refused again (a window on the outdated build still sending): not put back a second time.
+    const again = failEntry(r.state, a, UPGRADE_REQUIRED_MESSAGE);
+    expect(retryOutdated(again, 1, new Set(r.seqs))).toEqual({ state: again, seqs: [] });
   });
 });
