@@ -29,7 +29,8 @@ export const UPGRADE_REQUIRED = "upgrade-required";
 /**
  * Its `error`: what an outdated build shows in "Couldn't save …: <error>" (cut at 90 characters) and in Settings ›
  * Sync, so it says what to do. It keeps the change as not saved; the build that opens after the update re-sends it
- * on its own (`retryOutdated`, outbox-core).
+ * on its own (`retryOutdated`, outbox-core). Never reword it: a build before levels stores it as the refused
+ * change's only mark, and later builds recognise the change by it (`outdatedLevelOf`).
  */
 export const UPGRADE_REQUIRED_MESSAGE = "This version of the app is out of date. Reopen the app to update; the change is kept.";
 
