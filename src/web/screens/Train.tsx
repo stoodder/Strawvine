@@ -1,24 +1,6 @@
-import clsx from "clsx";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router";
-import {
-  ArrowLeftRight,
-  ArrowUpDown,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Link2,
-  CalendarCheck,
-  ListChecks,
-  MoreHorizontal,
-  Pencil,
-  Plus,
-  RefreshCw,
-  SkipForward,
-  Trash2,
-  Unlink2,
-  X,
-} from "lucide-react";
+import { Check, Link2, ListChecks, Pencil, Plus, SkipForward, Trash2, Unlink2 } from "lucide-react";
 import { addDays, isISODate, WEEKDAY_SHORT, weekdayName } from "../../shared/dates";
 import { trainingPrefs } from "../../shared/defaults";
 import { amrapPrs } from "../../shared/gamify";
@@ -41,13 +23,11 @@ import {
   newId,
   nextSetAfter,
   planChanged,
-  savedAfterEdit,
   sessionCounts,
   sessionDoneEarly,
   sessionVolume,
   setsForAddedExercise,
   shownLoad,
-  targetsMetPhrase,
   templateSource,
 } from "../../shared/session";
 import {
@@ -63,27 +43,36 @@ import {
   supersetLetters,
   type ExPlace,
 } from "../../shared/sessionStructure";
-import { addBlocked, removeMainLift, swapBlocked, swapChoices, swapMainLift, swapSuggestion, undoSwap, type SwapRefusal } from "../../shared/swap";
+import {
+  addBlocked,
+  removeMainLift,
+  swapBlocked,
+  swapChoices,
+  swapMainLift,
+  swapSuggestion,
+  undoSwap,
+  type SwapRefusal,
+} from "../../shared/swap";
 import { useDockHeight, useDockTop } from "../components/Dock";
 import { Empty, Section, Sheet } from "../components/ui";
 import { useToast } from "../components/Toast";
-import { DateJump } from "../components/today/DateJump";
 import { addStandings, rejoinSuperset } from "../../shared/sessionStructureUndo";
 import { AddExerciseSheet, type ExerciseMark } from "../components/train/AddExerciseSheet";
 import { EditExerciseSheet } from "../components/train/EditExerciseSheet";
-import { exerciseSummary } from "../components/train/exerciseSummary";
+import { exKey, hintApplies, lb, loggable, type BlockActions, type BlockListContext } from "../components/train/ExerciseBlockList";
 import { FinishPanel } from "../components/train/FinishPanel";
-import { Foldable, FoldedBlock, FoldToggle, type FoldedItem } from "../components/train/FoldedBlock";
 import { useFolds } from "../components/train/folds";
 import { RestTimer, useRestTimer } from "../components/train/RestTimer";
 import { SupersetSheet, WorkoutOrderSheet } from "../components/train/SupersetSheets";
 import { SwapLiftSheet } from "../components/train/SwapLiftSheet";
 import { useDismissedHints } from "../components/train/hintDismiss";
 import { afterLayout, useRevealAboveDock, whenReady } from "../components/train/reveal";
-import { AccessorySetRow, MainSetRow } from "../components/train/SetControls";
-import { AmrapSheet, measureUnit, Plates, SetEditSheet, type AmrapRepPr } from "../components/train/SetSheets";
-import { mainLiftNotice, programLinkLabel, programStartSentence } from "../components/train/programLink";
-import { CycleEndNote } from "../components/program/CycleEndNote";
+import { AmrapSheet, measureUnit, SetEditSheet, type AmrapRepPr } from "../components/train/SetSheets";
+import { mainLiftNotice, programLinkLabel } from "../components/train/programLink";
+import type { TrainDay } from "../components/train/sectionProps";
+import { plural, StrengthSection } from "../components/train/StrengthSection";
+import { TrainHeader } from "../components/train/TrainHeader";
+import { useSessionCommit, type UndoHandle } from "../components/train/useSessionCommit";
 import { useCycleChoice } from "../components/program/useCycleChoice";
 import {
   checkAction,
@@ -96,7 +85,6 @@ import {
   nextOpenSet,
   planSignature,
   replaceSetAndPropagate,
-  repScheme,
   resolveExRef,
   resolveSetRef,
   type ExRef,
@@ -125,45 +113,8 @@ import { useTitle } from "../components/useTitle";
 /** How far ahead the planned sessions can be previewed (read-only). */
 const PREVIEW_DAYS = 14;
 
-/** A set still to do that "log as planned" may fill in (an AMRAP needs its real rep count). */
-const loggable = (s: SetEntry) => !s.done && !s.amrap;
 /** Mark a set done at its targets (an unweighted exercise's without a load). */
 const logAsPlanned = (s: SetEntry, weighted: boolean): SetEntry => (loggable(s) ? logAtTargets(s, weighted) : s);
-const lb = (v: number) => fmt(v, v % 1 ? 1 : 0);
-/**
- * A finished session stays consistent with its sets: once nothing is logged in it any more (an
- * Undo or unlog after Finish), it's open again — unless the main lift was skipped, which may
- * finish with nothing logged.
- */
-const settled = (s: Session): Session =>
-  s.completedAt && sessionCounts(s).done === 0 && !s.blocks.some((b) => b.kind === "primary" && b.skipped)
-    ? { ...s, completedAt: null }
-    : s;
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-/**
- * A stable React key for an exercise in its block: its first set travels with it through any move
- * or reorder. One with no sets is keyed by its block and place (two such copies never collide).
- */
-const exKey = (e: BlockExercise, i: number, blockId: string) => e.sets[0]?.id ?? `e${blockId}-${e.exerciseId}-${i}`;
-
-/** An edit's Undo (see `commit`): apply it now, or offer it in a toast. */
-interface UndoHandle {
-  run: () => void;
-  offer: () => void;
-}
-
-type Hint = NonNullable<ReturnType<typeof accessoryHint>>;
-/**
- * Whether a progression hint still says something: a "hold" while there are sets to do; an
- * increase while a pending set isn't at the suggestion yet.
- */
-function hintApplies(hint: Hint, sets: ReadonlyArray<SetEntry>): boolean {
-  if (hint.kind === "hold") return sets.some(loggable);
-  const up = hint.suggestedWeight >= hint.lastWeight;
-  return sets.some(
-    (s) => loggable(s) && (s.targetWeight === null || (up ? s.targetWeight < hint.suggestedWeight : s.targetWeight > hint.suggestedWeight)),
-  );
-}
 
 export function TrainScreen() {
   const params = useParams();
@@ -188,7 +139,6 @@ export function TrainScreen() {
   const markSeen = useMarkSeen();
   const toast = useToast();
   const rest = useRestTimer();
-  const hintId = useId();
   const dockHeight = useDockHeight();
   const revealAboveDock = useRevealAboveDock();
   const focusAfter = useFocusAfter();
@@ -247,7 +197,6 @@ export function TrainScreen() {
    */
   const earlyDone = sessionDoneEarly(date, data.sessions);
   const shownEarly = saved ? null : earlyDone;
-  const trainPath = (d: string) => (d === today ? "/train" : `/train/${d}`);
 
   // What the open sheets hold, re-located in the latest session on every render: a merge with
   // another device's edit (or a revalidation) can move or remove what a sheet points at. A ref
@@ -298,23 +247,11 @@ export function TrainScreen() {
   /** Whether a block's exercise logs a load: the main lift always does. */
   const loadedIn = (block: Pick<Block, "kind">, exerciseId: number) => block.kind === "primary" || exWeighted(exerciseId);
 
-  // --- Undo toasts --------------------------------------------------------------------------
-  const lastToast = useRef<number | null>(null);
-  const offerUndo = (message: string, onUndo: () => void, duration = 7000) => {
-    if (lastToast.current !== null) toast.dismiss(lastToast.current);
-    lastToast.current = toast.show({ message, duration, action: { label: "Undo", onAction: onUndo } });
-    return lastToast.current;
-  };
-
+  // --- Saving, Undo toasts (components/train/useSessionCommit) ------------------------------
   // A sheet makes the app (and its toasts) inert and the toast would sit over the sheet's
-  // buttons: retire the last undo offer when one opens.
+  // buttons: the hook retires the last undo offer when one opens.
   const sheetOpen = !!(editing || amrap || adding || actions || maxFor || editingExercise || managed || ordering || swapOpen);
-  useEffect(() => {
-    if (sheetOpen && lastToast.current !== null) {
-      toast.dismiss(lastToast.current);
-      lastToast.current = null;
-    }
-  }, [sheetOpen, toast]);
+  const { commit, offerUndo, retireUndo } = useSessionCommit({ date, isPreview, saved, stored, session, sheetOpen });
 
   // --- Finished blocks fold to a summary row (view state only: components/train/folds) -------
   // A block is done by the counts Finish goes by (`blockComplete`); a preview shows the plan.
@@ -332,85 +269,6 @@ export function TrainScreen() {
     folds.setFolded(blockId, fold);
     setFoldedByHandAt(performance.now());
     if (hadFocus) focusAfter(() => document.querySelector<HTMLElement>(`[data-fold-toggle="${blockId}"]`));
-  };
-
-  /**
-   * Save a change (the first one persists a draft). With `undo`, offer to revert it: just the
-   * touched exercise (or block) when `scope` is given (later edits elsewhere survive), else the
-   * whole session. Undoing the only change to a draft drops it back to the live plan.
-   * A preview never saves. Returns the undo (it applies once): `run` applies it from elsewhere (an
-   * open sheet's own Undo; the toast goes), `offer` shows the toast later (with `toast: false`).
-   */
-  const commit = (
-    edited: Session,
-    undo?: {
-      message: string;
-      scope?: ExRef | { blockId: string };
-      /**
-       * Custom revert on top of the latest saved session (instead of `scope`); `saved` is what
-       * this edit saved. A string instead says why it can't be undone any more (shown as a toast).
-       */
-      revert?: (cur: Session, saved: Session) => Session | string;
-      duration?: number;
-      /** After the Undo is applied: where focus should go (the toast's button is gone). */
-      onUndone?: () => void;
-      /** false: no toast now (an open sheet offers the undo itself; `offer` shows it later). */
-      toast?: boolean;
-    },
-  ): UndoHandle | undefined => {
-    if (isPreview) return;
-    const before = stored;
-    const wasDraft = !saved;
-    // Exercises the edit didn't touch are saved as stored: they keep following their exercise.
-    const next = settled(savedAfterEdit(edited, session, stored));
-    saveSession(next);
-    if (!undo) return;
-    let used = false;
-    let toastId: number | null = null;
-    const apply = () => {
-      if (used) return;
-      used = true;
-      const cur = cachedSession(date) ?? next;
-      let restored = before;
-      const scope = undo.scope;
-      if (undo.revert) {
-        const r = undo.revert(cur, next);
-        if (typeof r === "string") {
-          toast.show({ message: r, tone: "warn" });
-          return;
-        }
-        restored = r;
-      } else if (scope) {
-        const prevBlock = before.blocks.find((b) => b.id === scope.blockId);
-        const curBlock = cur.blocks.find((b) => b.id === scope.blockId);
-        const same = (i: number) => {
-          const p = prevBlock?.exercises[i];
-          return p && curBlock?.exercises[i]?.exerciseId === p.exerciseId ? p : null;
-        };
-        if ("exIdx" in scope) {
-          const prevEx = same(scope.exIdx);
-          if (prevEx) restored = mapExercise(cur, scope, () => prevEx);
-        } else if (prevBlock && curBlock)
-          restored = mapBlock(cur, scope.blockId, (b) => ({ ...b, exercises: b.exercises.map((e, i) => same(i) ?? e) }));
-      }
-      if (wasDraft && JSON.stringify(restored) === JSON.stringify(before)) deleteSession(date);
-      else saveSession(settled(restored));
-      undo.onUndone?.();
-    };
-    const offer = () => {
-      if (!used) toastId = offerUndo(undo.message, apply, undo.duration);
-    };
-    if (undo.toast !== false) offer();
-    return {
-      run: () => {
-        if (toastId !== null) {
-          toast.dismiss(toastId);
-          if (lastToast.current === toastId) lastToast.current = null;
-        }
-        apply();
-      },
-      offer,
-    };
   };
 
   const setLabel = (ref: SetRef) => {
@@ -491,7 +349,9 @@ export function TrainScreen() {
   const primaryDone = !isPreview && !!primaryBlock && blockComplete(primaryBlock);
   /** Sets the program prescribed for this session's week; any beyond are added back-off sets. */
   const plannedCount =
-    session.week !== null ? (planAt(program, session.plannedFor ?? date).weeks[session.week - 1]?.reps.length ?? primaryEx?.sets.length ?? 0) : (primaryEx?.sets.length ?? 0);
+    session.week !== null
+      ? (planAt(program, session.plannedFor ?? date).weeks[session.week - 1]?.reps.length ?? primaryEx?.sets.length ?? 0)
+      : (primaryEx?.sets.length ?? 0);
   /** Prescribed sets the main lift no longer holds ("Skip rest"): its folded row must not read as everything logged. */
   const skippedMain = primaryEx ? Math.max(0, plannedCount - primaryEx.sets.length) : 0;
   /**
@@ -774,12 +634,6 @@ export function TrainScreen() {
   const todaySaved = data.sessions.find((s) => s.date === today) ?? null;
   /** Today already holds logged work (or is finished): a previewed day can't replace it. */
   const todayBusy = !!todaySaved && (isSessionStarted(todaySaved) || !!todaySaved.completedAt);
-  const [confirmMove, setConfirmMove] = useState(false);
-  const [confirmFor, setConfirmFor] = useState(date);
-  if (confirmFor !== date) {
-    setConfirmFor(date);
-    setConfirmMove(false);
-  }
 
   /**
    * Save the previewed day's plan under today (travel, a moved rest day) and go there. Notes
@@ -790,7 +644,6 @@ export function TrainScreen() {
     const before = todaySaved;
     const moved = buildSessionFrom(date, today, data);
     saveSession(before?.notes ? { ...moved, notes: before.notes } : moved);
-    setConfirmMove(false);
     tick();
     navigate("/train");
     offerUndo(`${weekdayName(date, true)}'s ${session.label} moved to today`, () => {
@@ -825,7 +678,10 @@ export function TrainScreen() {
     if (adding?.mode === "pair") return addToSuperset(adding.blockId, ex);
     // Pre-filled from the last time it was done, as this session's own pre-fill would carry it.
     const sets = setsForAddedExercise(ex, session, data);
-    commit({ ...session, blocks: [...session.blocks, { id: newId(), kind: "accessory", exercises: [{ exerciseId: ex.id, measure: ex.measure, sets }] }] });
+    commit({
+      ...session,
+      blocks: [...session.blocks, { id: newId(), kind: "accessory", exercises: [{ exerciseId: ex.id, measure: ex.measure, sets }] }],
+    });
     tick();
     setAdding(null);
   };
@@ -975,7 +831,8 @@ export function TrainScreen() {
     const letter = letters.get(blockId);
     const out = new Map<number, ExerciseMark>();
     for (const [id, st] of addStandings(session, blockId)) {
-      if (st.kind === "member") out.set(id, { note: letter ? `Already in Superset ${letter}` : "Already in this superset", disabled: true });
+      if (st.kind === "member")
+        out.set(id, { note: letter ? `Already in Superset ${letter}` : "Already in this superset", disabled: true });
       else if (st.kind === "main") out.set(id, { note: "Main lift · stays on its own", disabled: true });
       else {
         const from = letters.get(st.place.blockId);
@@ -1074,16 +931,6 @@ export function TrainScreen() {
   const exControl = (ref: ExRef, which: "unskip" | "options") => () =>
     document.querySelector<HTMLElement>(`[data-ex="${ref.blockId}:${ref.exIdx}"][data-control="${which}"]`);
 
-  /** A finished block's exercises as its folded row lists them: each with what its logged sets came to. */
-  const foldedItems = (b: Block): FoldedItem[] =>
-    b.exercises.map((e, i) => ({
-      key: exKey(e, i, b.id),
-      name: exName(e.exerciseId),
-      tag: b.exercises.length > 1 ? `${letters.get(b.id) ?? ""}${i + 1}` : undefined,
-      summary: exerciseSummary(e, b.kind, loadedIn(b, e.exerciseId)),
-      skipped: !!e.skipped,
-    }));
-
   /** Move the open sets of an accessory to the suggested load (never automatic). */
   const applyHint = (ref: ExRef, weight: number, name: string) => {
     tick();
@@ -1153,222 +1000,89 @@ export function TrainScreen() {
 
   const go = (d: string) => navigate(d === today ? "/train" : `/train/${d}`);
 
+  /** The day every part of the page reads. */
+  const day: TrainDay = { date, today, isToday, isPreview, isRecord, weekday };
+  /** What every block list on the page reads (superset letters run through the page). */
+  const list: BlockListContext = { isPreview, isRecord, letters, exName, exWeighted, folded: folds.folded };
+  /** What a block list's controls do: the same for every list on the page. */
+  const blockActions: BlockActions = {
+    onFold: setFolded,
+    onCheck: toggleDone,
+    onEditSet: (ref) => setEditing(ref),
+    onOptions: (ref) => setActions(ref),
+    onUnskip: (ref) => {
+      setSkipped(ref, false);
+      focusWhenReady(exControl(ref, "options"));
+    },
+    onAddSet: (ref) => {
+      addAccessorySet(ref);
+      tick();
+    },
+    onManage: (blockId) => openManage(blockId),
+    onApplyHint: (ref, weight, name) => {
+      applyHint(ref, weight, name);
+      // The hint row goes once the sets are at the suggestion.
+      focusWhenReady(exControl(ref, "options"));
+    },
+    onDismissHint: (ref, exerciseId) => {
+      dismissHint(exerciseId);
+      focusAfter(exControl(ref, "options"));
+    },
+  };
+  /** An accessory's progression hint, while it still says something and isn't dismissed for the day. */
+  const hintFor = (e: BlockExercise) => {
+    const hint =
+      isPreview || session.deload || session.completedAt
+        ? null
+        : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, {
+            weighted: exWeighted(e.exerciseId),
+            // Only performances in the measure this block is shown and logged in:
+            // the exercise's current one, or the one its logged sets were done in.
+            measure: e.measure,
+          });
+    return !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId) ? hint : null;
+  };
+
   return (
     <div>
-      {/* The program link stays beside the dates down to 320 px (below 360 it shows its short form,
-          a size smaller); when even that has no room it drops to a line of its own, still at the right. */}
-      <header className="flex flex-wrap items-center justify-between gap-x-2 pt-2 max-[359px]:gap-x-0">
-        {/* Below 360 px the link may reach 8 px into the empty side of the next-day button
-            ("Cycle 2 · Week 3" then still fits on this row at 320). */}
-        <div className="flex min-w-0 items-center max-[359px]:-mr-2">
-          <button
-            type="button"
-            aria-label="Previous day"
-            onClick={() => go(addDays(date, -1))}
-            className="tap -ml-3 grid h-11 w-11 place-items-center text-mute"
-          >
-            <ChevronLeft size={18} />
-          </button>
-          {/* Jump to any day, up to the last previewable one. */}
-          <DateJump date={date} today={today} max={lastPreview} pending={pending} onPick={go} />
-          <button
-            type="button"
-            aria-label="Next day"
-            disabled={date >= lastPreview}
-            onClick={() => go(addDays(date, 1))}
-            className="tap grid h-11 w-11 place-items-center text-mute disabled:opacity-20"
-          >
-            <ChevronRight size={18} />
-          </button>
-        </div>
-        {/* Where this session sits in the program, in plain words — or, before the first cycle,
-            when it starts. Always here: the program itself is a tap away from any day. */}
-        <Link
-          to="/program"
-          state={toProgram}
-          aria-label={programLink.name}
-          data-program-link=""
-          // Plain small text rather than the wide mono label: "Cycle 2 · Week 1 of 5" still fits beside the dates on a 375 px phone.
-          className={clsx(
-            "tap -mr-2 ml-auto inline-flex min-h-11 items-center gap-1 px-2 text-xs whitespace-nowrap",
-            "max-[359px]:gap-0.5 max-[359px]:pl-0 max-[359px]:text-[0.6875rem]",
-            programLink.deload ? "text-fg-2" : "text-mute",
-          )}
-        >
-          {programLink.short === programLink.text ? (
-            programLink.text
-          ) : (
-            <>
-              {/* Below 360 px the short form ("Week 1", "Deload", "Cycle 2 · Week 1") keeps the link beside the dates. */}
-              <span className="max-[359px]:hidden">{programLink.text}</span>
-              <span className="min-[360px]:hidden">{programLink.short}</span>
-            </>
-          )}
-          <ChevronRight size={12} aria-hidden className="opacity-60" />
-        </Link>
-      </header>
-      {/* A cycle's last week: repeat it, or set up a new one (SPEC §7). Today only. */}
-      {isToday && cycleChoice.card && (
-        <div className="mt-4">
-          <CycleEndNote choice={cycleChoice} reviewFrom={location.pathname} />
-        </div>
-      )}
-
-      <div className="mt-6">
-        <h1 data-train-title tabIndex={-1} className="text-[clamp(1.75rem,11vw,2.75rem)] leading-none font-light tracking-tight">
-          {session.label}
-        </h1>
-        <p className="mt-3 text-sm text-mute">
-          {shownEarly ? (
-            <>
-              Done {weekdayName(shownEarly.date, true)} · <span className="text-fg-2">{shownEarly.label}</span> —{" "}
-              <Link
-                to={trainPath(shownEarly.date)}
-                aria-label={`View ${weekdayName(shownEarly.date)}'s ${shownEarly.label} session`}
-                className="-mx-1 -my-3 inline-block px-1 py-3 text-accent"
-              >
-                view
-              </Link>
-            </>
-          ) : isPreview ? (
-            <>
-              <span className="label mr-2 rounded-full bg-white/[0.05] px-2 py-1 text-fg-2">Preview</span>
-              {totalSets ? (
-                <>
-                  <span className="num text-fg-2">{totalSets}</span> sets planned
-                </>
-              ) : isPlannedDay ? (
-                "Nothing planned yet"
-              ) : (
-                "Rest day"
-              )}
-            </>
-          ) : totalSets ? (
-            <>
-              <span className="num text-fg-2">{doneSets}</span>/{totalSets} sets
-              {volume > 0 && (
-                <>
-                  {" "}
-                  · <span className="num text-fg-2">{fmt(volume)}</span> lb moved
-                </>
-              )}
-            </>
-          ) : isPlannedDay ? (
-            isToday ? (
-              "Build today's work below."
-            ) : (
-              `Build ${weekday}'s work below.`
-            )
-          ) : (
-            "Rest day."
-          )}
-        </p>
-        {suggestion && !shownEarly && (
-          // Swapping between days: this day's lift was done earlier this week in another day's place.
-          <p data-swap-suggestion className="mt-1 text-sm text-mute">
-            {exName(suggestion.done)} was done {weekdayName(suggestion.doneOn, true)}.
-            {!isPreview && (
-              <>
-                {" "}
-                {suggestionLive ? (
-                  <button
-                    type="button"
-                    className="-mx-1 -my-3 inline px-1 py-3 text-left text-accent"
-                    onClick={() => swapTo(suggestion.suggest, () => document.querySelector<HTMLElement>("[data-train-title]"))}
-                  >
-                    Do {exName(suggestion.suggest)} {isToday ? "today" : "instead"}?
-                  </button>
-                ) : (
-                  // Held while a field has focus (the day saved meanwhile): the same words, nothing to tap.
-                  <span data-swap-suggestion-held className="-mx-1 px-1">
-                    Do {exName(suggestion.suggest)} {isToday ? "today" : "instead"}?
-                  </span>
-                )}
-              </>
-            )}
-          </p>
-        )}
-        {plannedFor && (
-          <div className="mt-1 flex flex-wrap items-center gap-x-3">
-            <span className="text-sm text-mute">
-              Planned for <span className="text-fg-2">{weekdayName(plannedFor, true)}</span>
-            </span>
-            {canRevert && (
-              <button type="button" className="tap label -mx-2 min-h-11 px-2 text-left text-accent" onClick={revertToTodaysPlan}>
-                {isToday ? "Revert to today's plan" : `Revert to ${weekday}'s plan`}
-              </button>
-            )}
-          </div>
-        )}
-        {earlyDone && saved && (
-          <p className="mt-1 text-sm text-mute">
-            Plan done {weekdayName(earlyDone.date, true)} ·{" "}
-            <Link
-              to={trainPath(earlyDone.date)}
-              aria-label={`View ${weekdayName(earlyDone.date)}'s ${earlyDone.label} session`}
-              className="-mx-1 -my-3 inline-block px-1 py-3 text-accent"
-            >
-              view
-            </Link>
-          </p>
-        )}
-        {(!isToday || offerRecalc) && (
-          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
-            {!isToday && (
-              <Link to="/train" className="label inline-flex min-h-11 items-center text-accent">
-                ← Today
-              </Link>
-            )}
-            {canMove &&
-              (confirmMove ? (
-                <div role="group" aria-labelledby={`${hintId}-move`} className="flex w-full flex-wrap items-center gap-x-3 gap-y-1">
-                  <span id={`${hintId}-move`} className="text-sm text-fg-2">
-                    {todaySaved?.notes ? "Replace today's saved session? Its notes come along." : "Replace today's saved session?"}
-                  </span>
-                  <span className="inline-flex items-center gap-2">
-                    <button
-                      type="button"
-                      data-move-cancel
-                      className="chip min-h-9 bg-white/[0.05] text-fg-2"
-                      onClick={() => {
-                        setConfirmMove(false);
-                        focusAfter(() => document.querySelector<HTMLElement>("[data-move-start]"));
-                      }}
-                    >
-                      Cancel
-                    </button>
-                    <button type="button" data-move-confirm className="chip min-h-9 bg-accent/10 text-accent" onClick={doThisToday}>
-                      Replace
-                    </button>
-                  </span>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  data-move-start
-                  className="chip min-h-9 bg-accent/10 text-accent"
-                  onClick={() => {
-                    if (todaySaved) {
-                      setConfirmMove(true);
-                      // The safe choice first: a stray second tap doesn't replace anything.
-                      focusAfter(() => document.querySelector<HTMLElement>("[data-move-cancel]"));
-                    } else doThisToday();
-                  }}
-                >
-                  <CalendarCheck size={12} className="mr-1.5" />
-                  Do this session today
-                </button>
-              ))}
-            {offerRecalc && (
-              <button type="button" onClick={recalcPrimary} className="chip min-h-9 bg-accent/10 text-accent">
-                <RefreshCw size={12} className="mr-1.5" />
-                {/* planMatches also compares loads, so a new max reads as its own reason. */}
-                {maxChanged && !missingPrimary ? `Recalculate from new max (${fmt(primaryMax!.valueLb)})` : "Plan changed — recalculate"}
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+      <TrainHeader
+        day={day}
+        lastPreview={lastPreview}
+        pending={pending}
+        onGo={go}
+        programLink={programLink}
+        from={location.pathname}
+        cycleChoice={cycleChoice}
+        title={session.label}
+        shownEarly={shownEarly}
+        planDoneEarly={saved ? earlyDone : null}
+        doneSets={doneSets}
+        totalSets={totalSets}
+        volume={volume}
+        isPlannedDay={isPlannedDay}
+        suggestion={suggestion}
+        suggestionLive={suggestionLive}
+        onSuggestion={() => suggestion && swapTo(suggestion.suggest, () => document.querySelector<HTMLElement>("[data-train-title]"))}
+        exName={exName}
+        plannedFor={plannedFor}
+        canRevert={canRevert}
+        onRevert={revertToTodaysPlan}
+        canMove={canMove}
+        todayHasSession={!!todaySaved}
+        todayNotes={!!todaySaved?.notes}
+        onDoThisToday={doThisToday}
+        recalc={
+          offerRecalc
+            ? {
+                // planMatches also compares loads, so a new max reads as its own reason.
+                label:
+                  maxChanged && !missingPrimary ? `Recalculate from new max (${fmt(primaryMax!.valueLb)})` : "Plan changed — recalculate",
+                onRecalc: recalcPrimary,
+              }
+            : null
+        }
+        focusAfter={focusAfter}
+      />
 
       {shownEarly ? (
         <div className="mt-10">
@@ -1410,564 +1124,54 @@ export function TrainScreen() {
         </div>
       ) : (
         <>
-          {/* Main lift */}
-          {primaryBlock && primaryEx && primaryExId != null && (
-            <Section
-              label="Main lift"
-              right={
-                isPreview ? (
-                  <span className="label text-mute">
-                    max <span className="num text-fg-2">{fmt(primaryMax?.valueLb ?? session.primaryMaxLb, 0)}</span>
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    aria-haspopup="dialog"
-                    className="label -mx-2 -my-3.5 px-2 py-3.5 text-mute"
-                    onClick={() => setMaxFor(exById(primaryExId) ?? null)}
-                  >
-                    max <span className="num text-fg-2">{fmt(primaryMax?.valueLb ?? session.primaryMaxLb, 0)}</span>
-                  </button>
-                )
-              }
-            >
-              {primarySkipped ? (
-                // Skipped today: one dimmed row; its sets count toward nothing until it's unskipped.
-                <div className="flex min-h-11 flex-wrap items-center justify-between gap-x-3">
-                  <div className="min-w-0 truncate text-[0.9375rem] text-mute">{primaryName}</div>
-                  <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end">
-                    <span className="label">
-                      Skipped<span className="max-[16rem]:hidden"> today</span>
-                    </span>
-                    {!isPreview && (
-                      <>
-                        <span className="label px-1.5" aria-hidden>
-                          ·
-                        </span>
-                        <button
-                          type="button"
-                          aria-label={`Unskip ${primaryName}`}
-                          data-main-control="unskip"
-                          className="tap label -mr-2 min-h-11 px-2 text-accent"
-                          onClick={() => setPrimarySkipped(false)}
-                        >
-                          Unskip
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                // Done (every set it still holds is logged), the main lift can show as one row: its sets in a
-                // line, the AMRAP with its tag. Keyed by the block: another day's main lift is another one.
-                <Foldable
-                  key={primaryBlock.id}
-                  id={primaryBlock.id}
-                  done={primaryDone}
-                  folded={folds.folded(primaryBlock.id)}
-                  summary={
-                    <FoldedBlock
-                      blockId={primaryBlock.id}
-                      items={foldedItems(primaryBlock)}
-                      size="main"
-                      // Gold as on the AMRAP's own row: it beat its target.
-                      tone={foldedItems(primaryBlock).some((it) => it.summary.parts.some((p) => p.tag?.tone === "gold")) ? "gold" : "accent"}
-                      // Sets skipped ("Skip rest") aren't logged: the row says so in place of "all sets logged".
-                      status={skippedMain ? `${plural(skippedMain, "set")} skipped` : undefined}
-                      record={isRecord}
-                      onOpen={() => setFolded(primaryBlock.id, false)}
-                    />
-                  }
-                >
-                  {/* The name gives way (truncated; its full name stays in the accessible name and the set rows) so
-                      "swap" and "skip" / "skip rest" keep one line beside it at 320 px with a long name. */}
-                  <div className="mb-4 flex items-center justify-between gap-x-3">
-                    <div className="flex min-w-0 flex-wrap items-baseline gap-x-3">
-                      {primaryDone ? (
-                        // The name folds it again (the toggle's 44 px reach past the line is cancelled, so the header keeps its height).
-                        <FoldToggle
-                          blockId={primaryBlock.id}
-                          size="main"
-                          className="-my-1.5 max-w-full min-w-0"
-                          status={skippedMain ? `${plural(skippedMain, "set")} skipped` : undefined}
-                          onFold={() => setFolded(primaryBlock.id, true)}
-                        >
-                          <span className="block min-w-0 truncate text-2xl font-light">{primaryName}</span>
-                        </FoldToggle>
-                      ) : (
-                        <div data-main-name className="max-w-full min-w-0 truncate text-2xl font-light">
-                          {primaryName}
-                        </div>
-                      )}
-                      {session.deload && (
-                        <span className="label whitespace-nowrap text-fg-2">
-                          deload · {repScheme(primaryEx.sets.slice(0, plannedCount).map((s) => s.targetReps))}
-                        </span>
-                      )}
-                    </div>
-                    {!isPreview && !session.completedAt && (
-                      <span className="-my-2 -mr-2 ml-auto flex shrink-0 items-center">
-                        {/* Another lift for this session only (equipment, timing): the day keeps its accessories.
-                            Always reachable while the session is open; once a set is logged the sheet says why not. */}
-                        <button
-                          type="button"
-                          onClick={() => setSwapOpen(true)}
-                          aria-haspopup="dialog"
-                          aria-label={`Swap ${primaryName} for another lift`}
-                          data-main-control="swap"
-                          className="tap label inline-flex min-h-11 items-center justify-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                        >
-                          <ArrowLeftRight size={12} aria-hidden className="max-[399px]:hidden" />
-                          swap
-                        </button>
-                        {/* A main lift added for this session (the day's plan has none) comes out again, nothing logged in it. */}
-                        {added !== null && !primaryStarted && (
-                          <button
-                            type="button"
-                            onClick={removeAddedMain}
-                            aria-label={`Remove ${primaryName} from this session`}
-                            data-main-control="remove"
-                            className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                          >
-                            <X size={12} aria-hidden className="max-[399px]:hidden" /> remove
-                          </button>
-                        )}
-                        {/* Injury or fatigue: skip the main lift for today (nothing logged in it yet), or
-                            the rest of it once some sets are in (those still count). */}
-                        {added === null && !primaryStarted && (
-                          <button
-                            type="button"
-                            onClick={() => setPrimarySkipped(true)}
-                            aria-label={`Skip ${primaryName} today`}
-                            data-main-control="skip"
-                            className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                          >
-                            <SkipForward size={12} aria-hidden className="max-[399px]:hidden" /> skip
-                          </button>
-                        )}
-                        {primaryStarted && openMain > 0 && (
-                          <button
-                            type="button"
-                            onClick={skipRestOfMain}
-                            aria-label={`Skip rest of ${primaryName} today`}
-                            data-main-control="skip-rest"
-                            className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                          >
-                            <SkipForward size={12} aria-hidden className="max-[399px]:hidden" /> skip rest
-                          </button>
-                        )}
-                      </span>
-                    )}
-                  </div>
-                  {/* Swapped for this session: which lift the plan had (the plan itself doesn't change). */}
-                  {swap && (
-                    <p data-swapped className="-mt-3 mb-4 text-xs text-mute">
-                      In place of <span className="text-fg-2">{exName(swap.from)}</span> · this session only
-                    </p>
-                  )}
-                  {/* Added for this session: the day's plan has no main lift (the plan itself doesn't change). */}
-                  {added !== null && (
-                    <p data-added className="-mt-3 mb-4 text-xs text-mute">
-                      Added for this session
-                    </p>
-                  )}
-                  <ul aria-label={`${primaryName} sets`}>
-                    {primaryEx.sets.map((s, i) => {
-                      const ref = { blockId: primaryBlock.id, exIdx: 0, setId: s.id };
-                      return (
-                        <MainSetRow
-                          key={s.id}
-                          dataSet={s.id}
-                          exerciseName={primaryName}
-                          index={i}
-                          set={s}
-                          extra={i >= plannedCount}
-                          preview={isPreview}
-                          record={isRecord}
-                          onCheck={() => toggleDone(ref)}
-                          // An AMRAP is edited where it's counted (reps, load, the max bump).
-                          onEdit={() => (s.amrap ? setAmrap(ref) : setEditing(ref))}
-                        />
-                      );
-                    })}
-                  </ul>
-                  <div className="mt-1 flex min-h-11 flex-wrap items-center justify-between gap-x-4 gap-y-1">
-                    {/* What to load for the next open set — named, so it's clear which row the plates are for.
-                        The plates give way (down to 9rem, wrapping among themselves) before "+ set"
-                        is pushed onto a line of its own. */}
-                    <Plates
-                      className="min-w-0 flex-1 basis-36"
-                      weight={nextMain?.targetWeight ?? null}
-                      label={nextMain && !isPreview ? `Set ${primaryEx.sets.indexOf(nextMain) + 1} · per side` : undefined}
-                    />
-                    {!isPreview && (
-                      <div className="-mr-2 ml-auto flex items-center">
-                        {missingMain.length > 0 && (
-                          <span className="flex items-center">
-                            <span className="label">{plural(missingMain.length, "set")} skipped</span>
-                            <span className="label px-1.5" aria-hidden>
-                              ·
-                            </span>
-                            <button
-                              type="button"
-                              aria-label={`Restore ${plural(missingMain.length, "skipped set")} of ${primaryName}`}
-                              data-main-control="restore"
-                              className="tap label min-h-11 px-2 text-accent"
-                              onClick={restoreMain}
-                            >
-                              Restore
-                            </button>
-                          </span>
-                        )}
-                        {primaryEx.sets.length < MAX_SETS && (
-                          <button
-                            type="button"
-                            onClick={addMainSet}
-                            aria-label={`Add a back-off set of ${primaryName}`}
-                            className="tap label inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                          >
-                            <Plus size={12} /> set
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </Foldable>
-              )}
-            </Section>
-          )}
-
-          {canAddMain && (
-            // A lifting day whose plan has no main lift (Friday's carries): one can be added for this session.
-            <Section label="Main lift">
-              <p className="-mt-1 text-sm text-mute">
-                None planned for {session.label}.{" "}
-                <button
-                  type="button"
-                  aria-haspopup="dialog"
-                  data-main-control="add"
-                  className="-mx-1 -my-3 inline px-1 py-3 text-left text-accent"
-                  onClick={() => setSwapOpen(true)}
-                >
-                  Add one for this session
-                </button>
-              </p>
-            </Section>
-          )}
-
-          {mainNotice && (
-            <Section label="Main lift">
-              <Empty>
-                {mainNotice.kind === "not-started" ? (
-                  // Before the first cycle nothing is calculated, whatever maxes exist: say when it starts.
-                  <>
-                    {programStartSentence(mainNotice.start, today, mainNotice.cycle)}{" "}
-                    <Link to="/program" state={toProgram} className="-mx-1 -my-3 inline-block px-1 py-3 whitespace-nowrap text-accent">
-                      Open the program →
-                    </Link>
-                  </>
-                ) : (
-                  <>
-                    Set a max for {exById(mainNotice.exerciseId)?.name ?? "this lift"} and the working sets calculate themselves.{" "}
-                    {!isPreview && exById(mainNotice.exerciseId) && (
-                      <button
-                        type="button"
-                        aria-haspopup="dialog"
-                        className="-mx-1 -my-3 px-1 py-3 whitespace-nowrap text-accent"
-                        onClick={() => setMaxFor(exById(mainNotice.exerciseId) ?? null)}
-                      >
-                        Set max →
-                      </button>
-                    )}
-                  </>
-                )}
-              </Empty>
-            </Section>
-          )}
-
-          {/* Accessories */}
-          <Section
-            label="Accessories"
-            right={
-              !isPreview && accessories.length > 1 ? (
-                <button
-                  type="button"
-                  aria-haspopup="dialog"
-                  aria-label="Reorder workout"
-                  data-reorder
-                  className="tap label -my-3 -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 text-mute"
-                  onClick={() => {
-                    setStructureStatus("");
-                    setOrdering(true);
-                  }}
-                >
-                  <ArrowUpDown size={12} aria-hidden /> Reorder
-                </button>
-              ) : undefined
-            }
-          >
-            {newProgramDay && (
-              <p className="mb-4 text-sm text-mute" data-new-day-hint="">
-                New in this plan: no earlier session to carry accessories from. Add them below.
-              </p>
-            )}
-            {accessories.map((b) => {
-              const superset = b.exercises.length > 1;
-              const letter = letters.get(b.id) ?? "";
-              /** Every set of the block is logged (a superset as a whole): it folds, and an open one can be folded again. */
-              const done = !isPreview && blockComplete(b);
-              return (
-                // Each exercise ends in its "+ set" row (or, in a preview, nothing): that 44 px row is
-                // the whole gap to the next exercise — a control where the separation would be anyway.
-                // A done block can show as one row (`Foldable`): the next block follows it directly.
-                <div key={b.id} data-block={b.id} className={clsx(isPreview && "mb-8")}>
-                  <Foldable
-                    id={b.id}
-                    done={done}
-                    folded={folds.folded(b.id)}
-                    summary={
-                      <FoldedBlock
-                        blockId={b.id}
-                        items={foldedItems(b)}
-                        superset={superset ? letter : undefined}
-                        record={isRecord}
-                        onOpen={() => setFolded(b.id, false)}
-                      />
-                    }
-                  >
-                    {superset &&
-                      (isPreview ? (
-                        <div className="mb-2 flex items-center gap-2 text-glow">
-                          <Link2 size={12} />
-                          <span className="label text-glow">Superset {letter}</span>
-                        </div>
-                      ) : (
-                        <div className="-mt-1.5 mb-0.5 flex items-center justify-between">
-                          {/* The superset's own sheet: its order, taking one out, adding one. */}
-                          <button
-                            type="button"
-                            aria-haspopup="dialog"
-                            aria-label={`Manage Superset ${letter}`}
-                            data-manage={b.id}
-                            className="tap -ml-2 inline-flex min-h-11 items-center gap-2 px-2 text-glow"
-                            onClick={() => openManage(b.id)}
-                          >
-                            <Link2 size={12} aria-hidden />
-                            <span className="label text-glow">Superset {letter}</span>
-                            <ChevronRight size={12} aria-hidden className="opacity-60" />
-                          </button>
-                          {/* Done, a superset folds as one — from here, where each exercise has its options. */}
-                          {done && <FoldToggle blockId={b.id} label={`Superset ${letter}`} onFold={() => setFolded(b.id, true)} />}
-                        </div>
-                      ))}
-                    <div className={clsx(superset && "border-l border-glow/25 pl-4")}>
-                      {b.exercises.map((e, exIdx) => {
-                        const name = exName(e.exerciseId);
-                        const ref = { blockId: b.id, exIdx };
-                        const tagLabel = superset && <span className="label mr-2 text-glow">{`${letter}${exIdx + 1}`}</span>;
-                        if (e.skipped)
-                          return (
-                            <div
-                              key={exKey(e, exIdx, b.id)}
-                              // No "+ set" row ends a skipped exercise: its own margin is the gap to the next one.
-                              className="mb-3 flex min-h-11 flex-wrap items-center justify-between gap-x-3"
-                            >
-                              <div className="min-w-0 truncate text-[0.9375rem] text-mute">
-                                {tagLabel}
-                                {name}
-                              </div>
-                              <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end">
-                                <span className="label">
-                                  Skipped<span className="max-[16rem]:hidden"> today</span>
-                                </span>
-                                {!isPreview && (
-                                  <>
-                                    <span className="label px-1.5" aria-hidden>
-                                      ·
-                                    </span>
-                                    <button
-                                      type="button"
-                                      aria-label={`Unskip ${name}`}
-                                      data-ex={`${b.id}:${exIdx}`}
-                                      data-control="unskip"
-                                      className="tap label -mr-2 min-h-11 px-2 text-accent"
-                                      onClick={() => {
-                                        setSkipped(ref, false);
-                                        focusWhenReady(exControl(ref, "options"));
-                                      }}
-                                    >
-                                      Unskip
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        const weighted = exWeighted(e.exerciseId);
-                        const hint =
-                          isPreview || session.deload || session.completedAt
-                            ? null
-                            : accessoryHint(e.exerciseId, date, data.sessions, prefs.accessoryIncrementLb, {
-                                weighted,
-                                // Only performances in the measure this block is shown and logged in:
-                                // the exercise's current one, or the one its logged sets were done in.
-                                measure: e.measure,
-                              });
-                        const showHint = !!hint && hintApplies(hint, e.sets) && !hintDismissed(e.exerciseId);
-                        return (
-                          <div key={exKey(e, exIdx, b.id)} className={clsx(exIdx > 0 && isPreview && "mt-5")}>
-                            <div className={clsx("flex items-center justify-between", isPreview && "min-h-11")}>
-                              {done && !superset ? (
-                                // Done and open: the name folds it again (a superset folds from its own header).
-                                <FoldToggle blockId={b.id} className="flex-1" onFold={() => setFolded(b.id, true)}>
-                                  <span className="min-w-0 text-[0.9375rem] wrap-anywhere">{name}</span>
-                                </FoldToggle>
-                              ) : (
-                                <div className="min-w-0 text-[0.9375rem] wrap-anywhere">
-                                  {tagLabel}
-                                  {name}
-                                </div>
-                              )}
-                              {!isPreview && (
-                                <button
-                                  type="button"
-                                  aria-label={`${name} options`}
-                                  aria-haspopup="dialog"
-                                  data-ex={`${b.id}:${exIdx}`}
-                                  data-control="options"
-                                  className="tap -mr-3 grid h-11 w-11 shrink-0 place-items-center text-mute"
-                                  onClick={() => setActions({ ...ref, exerciseId: e.exerciseId })}
-                                >
-                                  <MoreHorizontal size={16} />
-                                </button>
-                              )}
-                            </div>
-                            {showHint && hint && (
-                              <div className="-mt-1 mb-1 flex flex-wrap items-center gap-x-2 text-xs text-mute">
-                                {hint.kind === "hold" ? (
-                                  // Calmer than an increase: nothing to apply, just "stay here" — with
-                                  // when it was missed ("Missed reps at 60 lb on Nov 2 · hold").
-                                  <span>{hint.reason.replace(" — ", " · ")}</span>
-                                ) : (
-                                  <>
-                                    <span title={hint.reason}>
-                                      Last time <span className="num text-fg-2">{lb(hint.lastWeight)}</span> lb
-                                      <span className="max-[359px]:hidden"> · {targetsMetPhrase(hint.measure)}</span> → try{" "}
-                                      <span className="num text-accent">{lb(hint.suggestedWeight)}</span>
-                                    </span>
-                                    <button
-                                      type="button"
-                                      aria-label={`Apply ${lb(hint.suggestedWeight)} lb to the open ${name} sets`}
-                                      className="tap label -my-2 min-h-11 px-1.5 text-accent"
-                                      onClick={() => {
-                                        applyHint(ref, hint.suggestedWeight, name);
-                                        // The hint row goes once the sets are at the suggestion.
-                                        focusWhenReady(exControl(ref, "options"));
-                                      }}
-                                    >
-                                      Apply
-                                    </button>
-                                  </>
-                                )}
-                                <button
-                                  type="button"
-                                  aria-label={`Dismiss the ${name} hint for today`}
-                                  className="tap -my-2 -ml-2 grid min-h-11 w-11 place-items-center text-mute"
-                                  onClick={() => {
-                                    dismissHint(e.exerciseId);
-                                    focusAfter(exControl(ref, "options"));
-                                  }}
-                                >
-                                  <X size={12} />
-                                </button>
-                              </div>
-                            )}
-                            {/* The same rows as the main lift, compact: values open the editor, the check logs. */}
-                            <ul aria-label={`${name} sets`}>
-                              {e.sets.map((s, si) => {
-                                const setRef = { ...ref, setId: s.id };
-                                return (
-                                  <AccessorySetRow
-                                    key={s.id}
-                                    dataSet={s.id}
-                                    exerciseName={name}
-                                    index={si}
-                                    set={s}
-                                    measure={e.measure}
-                                    weighted={weighted}
-                                    needsLoad={checkAction(s, "accessory", weighted) === "load"}
-                                    preview={isPreview}
-                                    record={isRecord}
-                                    onCheck={() => toggleDone(setRef)}
-                                    onEdit={() => setEditing(setRef)}
-                                  />
-                                );
-                              })}
-                            </ul>
-                            {!isPreview && (
-                              // The row stays (empty) for an exercise that is full: it's the gap to the next one.
-                              <div className="flex min-h-11 justify-end">
-                                {e.sets.length < MAX_SETS && (
-                                  <button
-                                    type="button"
-                                    aria-label={`Add ${name} set`}
-                                    className="tap label -mr-2 inline-flex min-h-11 items-center gap-1.5 px-2 whitespace-nowrap text-mute"
-                                    onClick={() => {
-                                      addAccessorySet(ref);
-                                      tick();
-                                    }}
-                                  >
-                                    <Plus size={12} aria-hidden /> set
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </Foldable>
-                </div>
-              );
-            })}
-            {/* Where the exercises end: everything after it moves as one when blocks fold (folds.ts `foldInPlace`). */}
-            <div data-fold-end="" />
-            {!accessories.length && (
-              <p className="mb-6 text-sm text-mute">
-                {isPreview
-                  ? `Nothing to carry over yet — the accessories you log on a ${weekday} show up here.`
-                  : `Add the accessories and core work for ${isToday ? "today" : weekday} — next ${weekday} they'll be here waiting.`}
-              </p>
-            )}
-            {isPreview ? (
-              // Only what's true of this preview: nothing claims a carry-over when nothing was carried.
-              (accessories.length > 0 || primaryBlock) && (
-                <p className="text-xs leading-relaxed text-mute">
-                  {accessories.length > 0
-                    ? `Carried over from your last ${weekday}${primaryBlock ? "; main-lift loads use today's max and move with any AMRAP before then" : ""}.`
-                    : "Main-lift loads use today's max and move with any AMRAP before then."}
-                </p>
-              )
-            ) : (
-              // The last exercise's "+ set" row already is the gap above.
-              <div className={clsx("flex flex-wrap items-center gap-x-4 gap-y-2", accessories.length > 0 && "mt-2")}>
-                <button
-                  type="button"
-                  className="btn-ghost"
-                  disabled={blocksFull}
-                  aria-describedby={blocksFull ? `${hintId}-full` : undefined}
-                  onClick={() => setAdding({ mode: "new" })}
-                >
-                  <Plus size={16} /> Exercise
-                </button>
-                {blocksFull && (
-                  <span id={`${hintId}-full`} className="text-xs text-mute">
-                    A session holds up to {MAX_BLOCKS} blocks
-                  </span>
-                )}
-              </div>
-            )}
-          </Section>
+          <StrengthSection
+            day={day}
+            session={session}
+            exById={exById}
+            toProgram={toProgram}
+            main={{
+              block: primaryBlock,
+              ex: primaryEx,
+              exId: primaryExId,
+              name: primaryName,
+              max: primaryMax,
+              started: primaryStarted,
+              skipped: primarySkipped,
+              done: primaryDone,
+              plannedCount,
+              skippedMain,
+              openMain,
+              nextMain,
+              missingMain,
+              swap,
+              added,
+              canAdd: canAddMain,
+              notice: mainNotice,
+            }}
+            mainActions={{
+              onSetMax: (exerciseId) => setMaxFor(exById(exerciseId) ?? null),
+              onSwap: () => setSwapOpen(true),
+              onRemoveAdded: removeAddedMain,
+              onSkip: (skip) => setPrimarySkipped(skip),
+              onSkipRest: skipRestOfMain,
+              onRestore: restoreMain,
+              onAddSet: addMainSet,
+              onAmrap: (ref) => setAmrap(ref),
+            }}
+            accessories={{
+              blocks: accessories,
+              newProgramDay,
+              blocksFull,
+              onAdd: () => setAdding({ mode: "new" }),
+              onReorder: () => {
+                setStructureStatus("");
+                setOrdering(true);
+              },
+            }}
+            list={list}
+            blockActions={blockActions}
+            hintFor={hintFor}
+          />
 
           {!isPreview && (
             <>
@@ -1995,10 +1199,7 @@ export function TrainScreen() {
                   onFinish={() => {
                     success();
                     // A leftover Undo (a set logged a moment ago) would undo into a finished session.
-                    if (lastToast.current !== null) {
-                      toast.dismiss(lastToast.current);
-                      lastToast.current = null;
-                    }
+                    retireUndo();
                     commit({ ...session, completedAt: new Date().toISOString() });
                     rest.stop();
                   }}
@@ -2057,7 +1258,9 @@ export function TrainScreen() {
             mapExercise(session, editing, (e) => replaceSetAndPropagate(e, prev, s)),
             // A save that changed a value has no other undo. One that only did what the row's
             // check does (logged the set as it stood) — or changed nothing — needs none.
-            change === "values" ? { message: `${setLabel(editing)} ${logged ? "logged" : "updated"}`, scope: editing, duration: 4000 } : undefined,
+            change === "values"
+              ? { message: `${setLabel(editing)} ${logged ? "logged" : "updated"}`, scope: editing, duration: 4000 }
+              : undefined,
           );
           if (logged) {
             rest.start(restFor(editingFound.block.kind), editing.setId);
@@ -2140,7 +1343,11 @@ export function TrainScreen() {
           setAdding(null);
         }}
         title={
-          adding?.mode === "pair" ? (letters.get(adding.blockId) ? `Add to Superset ${letters.get(adding.blockId)}` : "Add to superset") : "Add exercise"
+          adding?.mode === "pair"
+            ? letters.get(adding.blockId)
+              ? `Add to Superset ${letters.get(adding.blockId)}`
+              : "Add to superset"
+            : "Add exercise"
         }
         exercises={data.exercises}
         recentIds={recentIds}
@@ -2460,7 +1667,9 @@ export function TrainScreen() {
         exercise={maxFor}
         open={!!maxFor}
         // Opened from the swap sheet for a lift with no max: saving one makes the swap (see swapAfterMax).
-        submitLabel={swapAfterMax !== null && maxFor?.id === swapAfterMax ? (primaryBlock ? "Set max and swap" : "Set max and add") : undefined}
+        submitLabel={
+          swapAfterMax !== null && maxFor?.id === swapAfterMax ? (primaryBlock ? "Set max and swap" : "Set max and add") : undefined
+        }
         onSaved={() => {
           if (swapAfterMax !== null && maxFor?.id === swapAfterMax) setMaxFor(null);
         }}
