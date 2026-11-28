@@ -1378,7 +1378,7 @@ describe("mergeSession: rehab blocks and Core", () => {
   };
   const shape = (s: Session) => s.blocks.map((b) => `${b.id}:${b.kind}${b.section ? `/${b.section}` : ""}${b.rehab ? `@${b.rehab}` : ""}`);
 
-  it("built on two devices (no ancestor): rehab pairs with rehab, Core with Core, accessories with accessories — never across", () => {
+  it("built on two devices (no ancestor): rehab pairs with rehab, accessory blocks with accessory blocks — never across", () => {
     // The same lift (10) in all three places, built with fresh ids on each device.
     const local = sess([
       primary([set("p1")], "P1"),
@@ -1395,16 +1395,97 @@ describe("mergeSession: rehab blocks and Core", () => {
     const m = mergeSession(null, local, server);
     expect(shape(m)).toEqual(["P1:primary", "A1:accessory", "C1:accessory/core", "R1:rehab@knee"]);
     expect(m.blocks.map((b) => b.exercises[0]!.sets[0]!.reps)).toEqual([null, 8, 9, 12]);
-    // A Core block and an accessory block of the same lift don't pair up: both are kept.
-    const m2 = mergeSession(null, sess([acc("A1", ex(10, [logged("a1")]))]), sess([core("C2", ex(10, [logged("c2")]))]));
-    // (In the merge's order; the reader groups blocks by section, SPEC §6.7.)
-    expect(shape(m2).sort()).toEqual(["A1:accessory", "C2:accessory/core"]);
+    // A Core block and an accessory block of the same exercises pair up: they are the same block of
+    // the day pre-filled twice — by a Train without subsections (no `section`) and by the new one
+    // (`section: "core"`). Keyed apart, both copies would stay and the day would hold its core
+    // couplet twice; paired, `section` merges as a field (kept from the side that has it), and
+    // their sets pair in order as any two pre-fills of the same block always have.
+    const a1 = sess([acc("A1", ex(10, [logged("a1"), set("a2")]))]);
+    const c2 = sess([core("C2", ex(10, [set("c1"), logged("c2")]))]);
+    const m2 = mergeSession(null, a1, c2);
+    expect(shape(m2)).toEqual(["A1:accessory/core"]);
+    expect(m2.blocks[0]!.exercises[0]!.sets.map((x) => x.done)).toEqual([true, true]);
+    expect(shape(mergeSession(null, c2, a1))).toEqual(["C2:accessory/core"]);
     // Rehab blocks of two different rehab programmes don't either.
     const other = { ...rehab("R2", ex(10, [logged("r2")])), rehab: "shoulder" };
     expect(shape(mergeSession(null, sess([rehab("R1", ex(10, [logged("r1")]))]), sess([other]))).sort()).toEqual([
       "R1:rehab@knee",
       "R2:rehab@shoulder",
     ]);
+  });
+
+  it("the same day pre-filled by a Train without subsections and by the new one, each logging the core couplet: one couplet", () => {
+    const lib = [
+      {
+        id: 1,
+        name: "Bench press",
+        category: "primary" as const,
+        tracksMax: true,
+        measure: "reps" as const,
+        weighted: true,
+        archived: false,
+      },
+      { id: 10, name: "Fly", category: "accessory" as const, tracksMax: false, measure: "reps" as const, weighted: true, archived: false },
+      { id: 12, name: "Row", category: "accessory" as const, tracksMax: false, measure: "reps" as const, weighted: true, archived: false },
+      {
+        id: 11,
+        name: "Hollow hold",
+        category: "core" as const,
+        tracksMax: false,
+        measure: "reps" as const,
+        weighted: false,
+        archived: false,
+      },
+      {
+        id: 13,
+        name: "Knee raise",
+        category: "core" as const,
+        tracksMax: false,
+        measure: "reps" as const,
+        weighted: false,
+        archived: false,
+      },
+    ];
+    const last = {
+      ...sess([
+        primary([logged("m")]),
+        acc("a", ex(10, [logged("a1")])),
+        acc("c", ex(11, [logged("h1")]), ex(13, [logged("k1")])),
+        acc("b", ex(12, [logged("b1")])),
+      ]),
+      date: "2026-11-23",
+      completedAt: "2026-11-23T18:00:00Z",
+    };
+    const ctx = { settings: { ...settings, onboarded: true }, exercises: lib, maxEntries: [], sessions: [last] };
+    const isCouplet = (b: Session["blocks"][number]) => b.exercises.length === 2 && b.exercises[0]!.exerciseId === 11;
+    const logFirst = (s: Session): Session => ({
+      ...s,
+      blocks: s.blocks.map((b) =>
+        isCouplet(b)
+          ? { ...b, exercises: b.exercises.map((e, i) => (i ? e : { ...e, sets: [{ ...e.sets[0]!, done: true, reps: 30 }] })) }
+          : b,
+      ),
+    });
+    const newBuild = logFirst(buildSession("2026-12-07", ctx, { core: true }));
+    const oldBuild = logFirst(buildSession("2026-12-07", ctx));
+    expect(newBuild.blocks.find(isCouplet)!.section).toBe("core");
+    expect(oldBuild.blocks.find(isCouplet)!.section).toBeUndefined();
+    for (const m of [mergeSession(null, newBuild, oldBuild), mergeSession(null, oldBuild, newBuild)]) {
+      expect(m.blocks.filter(isCouplet)).toHaveLength(1);
+      expect(m.blocks.find(isCouplet)!.section).toBe("core");
+      expect(m.blocks.filter((b) => b.kind === "accessory")).toHaveLength(3);
+      expect(m.blocks.find(isCouplet)!.exercises[0]!.sets[0]!.done).toBe(true);
+    }
+  });
+
+  it('moved to Accessories on one device, logged on the other: `section: "accessories"` and the set both survive', () => {
+    const anc = sess([core("c", ex(11, [set("c1")]))]);
+    const local = sess([{ ...acc("c", ex(11, [set("c1")])), section: "accessories" as const }]);
+    const server = sess([core("c", ex(11, [logged("c1")]))]);
+    for (const m of [mergeSession(anc, local, server), mergeSession(anc, server, local)]) {
+      expect(m.blocks[0]!.section).toBe("accessories");
+      expect(m.blocks[0]!.exercises[0]!.sets[0]!.done).toBe(true);
+    }
   });
 
   it("a rehab block holding the main lift's exercise never pairs with the main lift (the swap's primary:<lift> key holds)", () => {

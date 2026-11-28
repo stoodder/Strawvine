@@ -4,9 +4,11 @@
  * insights, pre-fill, added exercises, hints, the plan-changed check, swap, structure edits and
  * Recalculate. See compute.ts: the expected answers were computed by the code before (b60f4e3,
  * generate.ts) over (1) the arguments of every call the existing suites made, recorded there, and
- * (2) seeded random worlds; the only intended difference, pre-fill's Core rule, is applied to the
- * old answers by `legacyCore`, so the new code must produce it on its own. Never regenerate
- * `expected.json.gz` from the current code.
+ * (2) seeded random worlds; the only intended difference, pre-fill's Core rule — asked for by the
+ * new Train only (`{ core: true }`, flag `trainDay`) — is applied to the old answers by
+ * `legacyCore`, so the new code must produce it on its own; without the option (the flag off)
+ * pre-fill must give the old answers untouched (`recordedOff`, the `…FlagOff` cases). Never
+ * regenerate `expected.json.gz` from the current code.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -29,14 +31,30 @@ import {
 import { normalizeSectionOrder } from "../sessionStructure";
 import { recalculateMainLift } from "../swap";
 import { addDays } from "../dates";
-import { argsOf, hash, normalize, randomWorld, recordedSessions, run, worldCases, WORLD_START, WORLDS, type Pack } from "./compute";
+import {
+  argsOf,
+  hash,
+  normalize,
+  PREFILL_OFF,
+  randomWorld,
+  recordedSessions,
+  run,
+  worldCases,
+  WORLD_START,
+  WORLDS,
+  type Pack,
+} from "./compute";
 
 const dir = fileURLToPath(new URL(".", import.meta.url));
 const read = <T>(name: string) => JSON.parse(gunzipSync(readFileSync(`${dir}/${name}`)).toString()) as T;
 const pack = read<Pack>("inputs.json.gz");
-const expected = read<{ recorded: unknown[]; recalc: Array<unknown | null>; random: Record<string, string>; cases: number }>(
-  "expected.json.gz",
-);
+const expected = read<{
+  recorded: unknown[];
+  recordedOff: Array<unknown | null>;
+  recalc: Array<unknown | null>;
+  random: Record<string, string>;
+  cases: number;
+}>("expected.json.gz");
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 describe("golden: sessions without rehab or Core read as before", () => {
@@ -49,6 +67,19 @@ describe("golden: sessions without rehab or Core read as before", () => {
       if (!same(got, expected.recorded[i])) wrong.push(`#${i} ${fn}`);
     });
     expect(wrong).toEqual([]);
+  }, 60_000);
+
+  it("with the flag off, every recorded pre-fill is the old one exactly (no Core rule, no section, the template's order)", () => {
+    let n = 0;
+    const wrong: string[] = [];
+    pack.calls.forEach(([fn, ref], i) => {
+      const off = PREFILL_OFF[fn];
+      if (!off) return;
+      n++;
+      if (!same(run(off, argsOf(pack, ref), "new"), expected.recordedOff[i])) wrong.push(`#${i} ${fn}`);
+    });
+    expect(wrong).toEqual([]);
+    expect(n).toBeGreaterThan(300);
   }, 60_000);
 
   it("Recalculate keeps Train's recalculation (recorded sessions)", () => {
@@ -87,10 +118,13 @@ describe("golden: sessions without rehab or Core read as before", () => {
     expect(cases).toBe(expected.cases);
     // Pre-fill's Core rule is exercised there: all-core blocks of the (legacy) templates land in Core.
     const w = randomWorld(1);
-    const core = Array.from({ length: 63 }, (_, i) => buildSession(addDays(WORLD_START, i), w)).flatMap((s) =>
+    const core = Array.from({ length: 63 }, (_, i) => buildSession(addDays(WORLD_START, i), w, { core: true })).flatMap((s) =>
       s.blocks.filter((b) => b.section === "core"),
     );
     expect(core.length).toBeGreaterThan(0);
+    // …and only there: the flag off writes no section at all.
+    const off = Array.from({ length: 63 }, (_, i) => buildSession(addDays(WORLD_START, i), w)).flatMap((s) => s.blocks);
+    expect(off.some((b) => "section" in b)).toBe(false);
   }, 120_000);
 
   it("the new strength-only readings equal the old whole-session ones, and nothing is reordered or drafted", () => {

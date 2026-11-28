@@ -11,9 +11,15 @@
  * - **random**: seeded random worlds (settings, exercises incl. core-category ones, maxes, day logs
  *   and sessions without rehab or Core), every reading computed over them (stored as hashes).
  *
- * The one intended change for legacy data is pre-fill's Core rule (SPEC §6.5): `legacyCore` is
- * that rule as a pure transform, applied to the *old* output only, so the new code has to
- * produce it by itself.
+ * The one intended change for legacy data is pre-fill's Core rule (SPEC §6.5), and only where the
+ * new Train asks for it (`{ core: true }`, flag `trainDay`): `legacyCore` is that rule as a pure
+ * transform, applied to the *old* output only, so the new code has to produce it by itself. Without
+ * the option (every Train with the flag off), pre-fill must give exactly the old output: the
+ * `…FlagOff` cases compare it with the old answer untouched.
+ *
+ * Outputs the new code adds and the old one never had (`zone2Activities` of the weekly check-in,
+ * the Zone 2 machine) are left out of the new side's answer (`ADDED_KEYS`): an addition, not a
+ * change of what was there.
  */
 import { createHash } from "node:crypto";
 import { addDays, type ISODate } from "../dates";
@@ -34,6 +40,8 @@ type Fn = (...a: any[]) => unknown;
 export const FNS: Record<string, Fn> = {
   buildSession: session.buildSession,
   buildSessionFrom: session.buildSessionFrom,
+  buildSessionFlagOff: session.buildSession,
+  buildSessionFromFlagOff: session.buildSessionFrom,
   templateSource: session.templateSource,
   setsForAddedExercise: session.setsForAddedExercise,
   mainLiftBlock: session.mainLiftBlock,
@@ -77,8 +85,32 @@ export const FNS: Record<string, Fn> = {
   rejoinSuperset: structureUndo.rejoinSuperset,
 };
 
-/** Calls whose output is a pre-filled session: the Core rule applies to the old output. */
+/**
+ * Calls whose output is a pre-filled session for the new Train: the Core rule applies to the old
+ * output, and the new code is asked for it (`{ core: true }`).
+ */
 export const PREFILL = new Set(["buildSession", "buildSessionFrom"]);
+/** The same pre-fills without the option (the flag off): the old output as it was. */
+export const PREFILL_OFF: Record<string, string> = { buildSession: "buildSessionFlagOff", buildSessionFrom: "buildSessionFromFlagOff" };
+
+/** Keys of outputs only the new code has (see the module comment), dropped from the new side's answer of these calls. */
+const ADDED_KEYS = new Set(["zone2Activities"]);
+const ADDED_IN = new Set(["buildModel", "weeklyCheckin"]);
+const dropAdded = (v: unknown): unknown =>
+  Array.isArray(v)
+    ? v.map(dropAdded)
+    : v && typeof v === "object" && !(v instanceof Map) && !(v instanceof Set)
+      ? Object.fromEntries(
+          Object.entries(v)
+            .filter(([k]) => !ADDED_KEYS.has(k))
+            .map(([k, x]) => [k, dropAdded(x)]),
+        )
+      : v;
+
+/** The arguments of a new-side pre-fill call with the new Train's option. */
+function withCore(fn: string, args: unknown[]): unknown[] {
+  return fn === "buildSession" ? [args[0], args[1], { core: true }] : [args[0], args[1], args[2], args[3] ?? null, { core: true }];
+}
 
 // ---------------------------------------------------------------------------
 // Inputs
@@ -170,7 +202,7 @@ export function legacyCore(s: unknown, exercises: ReadonlyArray<Pick<Exercise, "
 
 /** The exercises a pre-fill call was given (its context). */
 function exercisesOf(fn: string, args: unknown[]): Exercise[] {
-  const ctx = (fn === "buildSessionFrom" ? args[2] : args[1]) as { exercises?: Exercise[] } | undefined;
+  const ctx = (fn.startsWith("buildSessionFrom") ? args[2] : args[1]) as { exercises?: Exercise[] } | undefined;
   return ctx?.exercises ?? [];
 }
 
@@ -178,11 +210,12 @@ function exercisesOf(fn: string, args: unknown[]): Exercise[] {
 export function run(fn: string, args: unknown[], side: "old" | "new"): unknown {
   let out: unknown;
   try {
-    out = FNS[fn]!(...args);
+    out = FNS[fn]!(...(side === "new" && PREFILL.has(fn) ? withCore(fn, args) : args));
   } catch (e) {
     return { threw: String(e) };
   }
   if (side === "old" && PREFILL.has(fn)) out = legacyCore(out, exercisesOf(fn, args));
+  if (side === "new" && ADDED_IN.has(fn)) out = dropAdded(out);
   return normalize(out, args);
 }
 
@@ -498,7 +531,10 @@ export function worldCases(seed: number, side: "old" | "new"): Array<{ name: str
   for (let i = -3; i < 63; i++) {
     const d = addDays(WORLD_START, i);
     call(d, "buildSession", d, ctx);
-    call(d, "buildSessionFrom", d, addDays(d, -r.int(0, 2)), ctx);
+    call(d, "buildSessionFlagOff", d, ctx);
+    const target = addDays(d, -r.int(0, 2));
+    call(d, "buildSessionFrom", d, target, ctx);
+    call(d, "buildSessionFromFlagOff", d, target, ctx);
     derived(`${d}/templateSource`, () => session.templateSource(d, ctx)?.date ?? null, []);
     call(d, "mainLiftBlock", d, ctx);
     call(d, "planSignature", d, ctx);
@@ -527,7 +563,8 @@ export function worldCases(seed: number, side: "old" | "new"): Array<{ name: str
     "all/buildModel",
     () => {
       const m = insights.buildModel(data, end);
-      return { checkin: m.checkin, insights: m.insights, targets: m.targets };
+      const model = { checkin: m.checkin, insights: m.insights, targets: m.targets };
+      return side === "new" ? dropAdded(model) : model;
     },
     [data],
   );

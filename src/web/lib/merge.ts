@@ -635,13 +635,16 @@ function mergeExercise(a: BlockExercise | undefined, l: BlockExercise, s: BlockE
  * How blocks built independently on each device pair up: a main lift with the main lift of the same
  * lift — two different main lifts (one device swapped it, SPEC §6.5) stay two blocks for
  * `oneMainLift` to choose between, never one block holding both — and other blocks by their kind,
- * subsection, rehab block and exercises: a rehab block never pairs with an accessory block, nor Core
- * with Accessories, even holding the same exercises.
+ * rehab block and exercises: a rehab block never pairs with an accessory block, even holding the
+ * same exercises. The subsection (`section`) is not part of it: an older build (or this one without
+ * the subsections) pre-fills the old core couplet without `section`, the new Train with
+ * `section: "core"`, and the two copies of the same day must pair, not both be kept; `section` then
+ * merges as a field of the block (`mergeFields`: kept from whichever side has it).
  */
 const blockFallback = (b: Block) =>
   b.kind === "primary"
     ? `primary:${b.exercises[0]?.exerciseId ?? ""}`
-    : `${b.kind}:${b.section ?? ""}:${b.rehab ?? ""}:${b.exercises.map((e) => e.exerciseId).join(",")}`;
+    : `${b.kind}:${b.rehab ?? ""}:${b.exercises.map((e) => e.exerciseId).join(",")}`;
 
 function blockMerger(ids: Idents) {
   return (a: Block | undefined, l: Block, s: Block): Block => {

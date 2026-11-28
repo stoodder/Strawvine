@@ -418,7 +418,11 @@ describe("sections, rehab and skips", () => {
     expect(await res.json()).toMatchObject({ zone2Skipped: false, zone2Machine: null });
     res = await req("/api/days/2026-11-05", json("PUT", { zone2Skipped: true, zone2Machine: "row" }));
     const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
-    expect(b.days.find((d) => d.date === "2026-11-04")).toMatchObject({ zone2Machine: "Assault bike", metconSkipped: true, zone2Skipped: false });
+    expect(b.days.find((d) => d.date === "2026-11-04")).toMatchObject({
+      zone2Machine: "Assault bike",
+      metconSkipped: true,
+      zone2Skipped: false,
+    });
     expect(b.days.find((d) => d.date === "2026-11-05")).toMatchObject({ zone2Machine: "row", zone2Skipped: true, metconSkipped: false });
     // A day that never had them reads as not recorded / not skipped.
     expect(b.days.find((d) => d.date === "2026-11-02")).toMatchObject({ zone2Machine: null, zone2Skipped: false, metconSkipped: false });
@@ -453,7 +457,19 @@ describe("sections, rehab and skips", () => {
       ...plain,
       blocks: [
         ...plain.blocks,
-        { id: "core-1", kind: "accessory", section: "core", exercises: [{ exerciseId: core.id, measure: core.measure, sets: [blankSet({ id: "cs1", targetReps: 45 })] }] },
+        {
+          id: "core-1",
+          kind: "accessory",
+          section: "core",
+          exercises: [{ exerciseId: core.id, measure: core.measure, sets: [blankSet({ id: "cs1", targetReps: 45 })] }],
+        },
+        // Moved out of Core by hand: "accessories" is stored as such (absent reads the same).
+        {
+          id: "acc-1",
+          kind: "accessory",
+          section: "accessories",
+          exercises: [{ exerciseId: core.id, measure: core.measure, sets: [blankSet({ id: "as1", targetReps: 40 })] }],
+        },
         {
           id: "rehab-1",
           kind: "rehab",
@@ -471,8 +487,9 @@ describe("sections, rehab and skips", () => {
     after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
     const stored = after.sessions.find((s) => s.date === "2026-11-18")!;
     expect(stored).toEqual(JSON.parse(JSON.stringify(withSections)));
-    expect(stored.blocks.slice(-2).map((x) => [x.kind, x.section, x.rehab])).toEqual([
+    expect(stored.blocks.slice(-3).map((x) => [x.kind, x.section, x.rehab])).toEqual([
       ["accessory", "core", undefined],
+      ["accessory", "accessories", undefined],
       ["rehab", undefined, "knee"],
     ]);
   });
@@ -489,7 +506,8 @@ describe("sections, rehab and skips", () => {
       { kind: "Rehab" },
       { kind: null },
       { section: "rehab" },
-      { section: "accessories" },
+      { section: "Accessories" },
+      { section: "main" },
       { section: null },
       { kind: "rehab", rehab: "" },
       { kind: "rehab", rehab: "x".repeat(41) },
@@ -506,7 +524,11 @@ describe("sections, rehab and skips", () => {
       ...doc,
       blocks: [
         doc.blocks[0]!,
-        ...Array.from({ length: 30 }, (_, i) => ({ id: `r${i}`, kind: "rehab", exercises: [{ exerciseId: 1, measure: "reps", sets: [] }] })),
+        ...Array.from({ length: 30 }, (_, i) => ({
+          id: `r${i}`,
+          kind: "rehab",
+          exercises: [{ exerciseId: 1, measure: "reps", sets: [] }],
+        })),
       ],
     };
     expect((await req("/api/sessions/2026-11-18", json("PUT", full))).status).toBe(400);
@@ -898,7 +920,9 @@ describe("a saved document comes back exactly as the app sent it", () => {
           id: "rehab-1",
           kind: "rehab",
           rehab: "knee-\ud83e\uddb5",
-          exercises: [{ exerciseId: b.exercises[1]!.id, measure: "reps", sets: [blankSet({ targetReps: 15, reps: 15, weight: 12.5, done: true })] }],
+          exercises: [
+            { exerciseId: b.exercises[1]!.id, measure: "reps", sets: [blankSet({ targetReps: 15, reps: 15, weight: 12.5, done: true })] },
+          ],
         },
       ],
     };
@@ -966,8 +990,23 @@ describe("a saved document comes back exactly as the app sent it", () => {
         ...s0,
         rehab: {
           programs: [
-            { id: "hip", name: "Hip", start: "2026-08-03", weeks: 4, days: [false, true, false, false, true, false, false], carry: "weekday", end: "2026-08-20" },
-            { id: "knee", name: "Knee rehab \ud83e\uddb5", start: "2026-10-19", weeks: 6, days: [false, true, false, true, false, true, false], carry: "last" },
+            {
+              id: "hip",
+              name: "Hip",
+              start: "2026-08-03",
+              weeks: 4,
+              days: [false, true, false, false, true, false, false],
+              carry: "weekday",
+              end: "2026-08-20",
+            },
+            {
+              id: "knee",
+              name: "Knee rehab \ud83e\uddb5",
+              start: "2026-10-19",
+              weeks: 6,
+              days: [false, true, false, true, false, true, false],
+              carry: "last",
+            },
           ],
         },
       },
@@ -1339,12 +1378,16 @@ describe("export & restore", () => {
       zone2Skipped: false,
       metconSkipped: false,
     });
-    expect(exported.days.find((d: { date: string }) => d.date === "2026-11-04")).toMatchObject({ zone2Machine: "Assault bike", metconSkipped: true });
+    expect(exported.days.find((d: { date: string }) => d.date === "2026-11-04")).toMatchObject({
+      zone2Machine: "Assault bike",
+      metconSkipped: true,
+    });
     expect(exported.days.find((d: { date: string }) => d.date === "2026-11-05")).toMatchObject({ zone2Machine: "row", zone2Skipped: true });
     expect(exported.settings.rehab.programs.map((p: { id: string }) => p.id)).toEqual(["hip", "knee"]);
     const day = exported.sessions.find((x: Session) => x.date === "2026-11-18") as Session;
-    expect(day.blocks.map((x) => [x.kind, x.section ?? null, x.rehab ?? null]).slice(-2)).toEqual([
+    expect(day.blocks.map((x) => [x.kind, x.section ?? null, x.rehab ?? null]).slice(-3)).toEqual([
       ["accessory", "core", null],
+      ["accessory", "accessories", null],
       ["rehab", null, "knee"],
     ]);
     expect(exported.seenAchievements.map((s: { key: string }) => s.key)).toEqual(["calib-1", "etag-test", "streak-3"]);
@@ -1407,7 +1450,15 @@ describe("export & restore", () => {
         planId: "plan-test",
         days: { ...days, "1": { label: "Legs", primaryExerciseId: front.id, progression: true } },
         earlierPlans: [
-          { id: "first", start: s.program.cycleStartDate, name: s.program.name, weeks: s.program.weeks, days: s.program.days, targets: s.targets, schedule: s.schedule },
+          {
+            id: "first",
+            start: s.program.cycleStartDate,
+            name: s.program.name,
+            weeks: s.program.weeks,
+            days: s.program.days,
+            targets: s.targets,
+            schedule: s.schedule,
+          },
         ],
       },
     };
@@ -1549,11 +1600,15 @@ describe("export & restore", () => {
       ["metconSkipped", "yes"],
     ] as const) {
       const bad = { ...current, days: current.days.map((d) => (d.date === "2026-11-04" ? { ...d, [field]: value } : d)) };
-      await expect(restoreExport(db, bad, { force: true }), `${field}=${JSON.stringify(value)}`).rejects.toThrow(new RegExp(`days\\.\\d+\\.${field}`));
+      await expect(restoreExport(db, bad, { force: true }), `${field}=${JSON.stringify(value)}`).rejects.toThrow(
+        new RegExp(`days\\.\\d+\\.${field}`),
+      );
     }
     const badKind = {
       ...current,
-      sessions: current.sessions.map((x) => (x.date === "2026-11-18" ? { ...x, blocks: [...x.blocks, { ...x.blocks.at(-1)!, kind: "cardio" }] } : x)),
+      sessions: current.sessions.map((x) =>
+        x.date === "2026-11-18" ? { ...x, blocks: [...x.blocks, { ...x.blocks.at(-1)!, kind: "cardio" }] } : x,
+      ),
     };
     await expect(restoreExport(db, badKind, { force: true })).rejects.toThrow(/sessions\.\d+\.blocks\.\d+\.kind/);
     // Back to the data as it was, for the tests below.

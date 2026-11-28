@@ -432,7 +432,7 @@ export const blockKind = z.enum(["primary", "accessory", "rehab"]);
 export type BlockKind = z.infer<typeof blockKind>;
 
 /** Strength's subsection an accessory block belongs to. Absent = Accessories. */
-export const blockSection = z.enum(["core"]);
+export const blockSection = z.enum(["accessories", "core"]);
 export type BlockSection = z.infer<typeof blockSection>;
 
 export const blockSchema = z.object({
@@ -446,8 +446,9 @@ export const blockSchema = z.object({
    */
   skipped: z.boolean().optional(),
   /**
-   * Accessory blocks only: "core" files the block under Strength's Core subsection. Absent =
-   * Accessories, as every block saved before subsections existed.
+   * Accessory blocks only: "core" files the block under Strength's Core subsection, "accessories"
+   * under Accessories (a block moved there from Core: so pre-fill's legacy Core rule never files
+   * it again). Absent = Accessories too, as every block saved before subsections existed.
    */
   section: blockSection.optional(),
   /** Rehab blocks only: the rehab block (`RehabProgram.id`) it was logged for. */

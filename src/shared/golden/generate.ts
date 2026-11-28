@@ -11,13 +11,15 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { argsOf, hash, normalize, recalcBefore, run, worldCases, WORLDS, type Pack } from "./compute";
+import { argsOf, hash, normalize, PREFILL_OFF, recalcBefore, run, worldCases, WORLDS, type Pack } from "./compute";
 import type { Session } from "../schemas";
 import type { BuildContext } from "../session";
 
 const dir = process.argv[2]!;
 const pack = JSON.parse(gunzipSync(readFileSync(`${dir}/inputs.json.gz`)).toString()) as Pack;
 const recorded = pack.calls.map(([fn, ref]) => run(fn, argsOf(pack, ref), "old"));
+// The same pre-fill calls as a Train with the flag off makes them: the old answer, without the Core rule.
+const recordedOff = pack.calls.map(([fn, ref]) => (PREFILL_OFF[fn] ? run(PREFILL_OFF[fn], argsOf(pack, ref), "old") : null));
 const recalc = pack.calls.map(([fn, ref]) => {
   if (fn !== "planChanged" && fn !== "mainLiftAdded") return null;
   const [s, ctx] = argsOf(pack, ref) as [Session, BuildContext];
@@ -40,7 +42,7 @@ for (let seed = 1; seed <= WORLDS; seed++) {
   }
   for (const [key, list] of groups) random[key] = hash(list);
 }
-writeFileSync(`${dir}/expected.json.gz`, gzipSync(JSON.stringify({ recorded, recalc, random, cases }), { level: 9 }));
+writeFileSync(`${dir}/expected.json.gz`, gzipSync(JSON.stringify({ recorded, recordedOff, recalc, random, cases }), { level: 9 }));
 console.log(
-  `recorded ${recorded.length}, recalc ${recalc.filter(Boolean).length}, random ${cases} cases in ${Object.keys(random).length} groups`,
+  `recorded ${recorded.length}, flag off ${recordedOff.filter(Boolean).length}, recalc ${recalc.filter(Boolean).length}, random ${cases} cases in ${Object.keys(random).length} groups`,
 );

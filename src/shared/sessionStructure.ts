@@ -6,9 +6,15 @@
  * Blocks belong to a **group** (SPEC §6.7): the main lift, Strength's Accessories or Core
  * subsection (`section`), or one rehab block's section (`kind: "rehab"`, `rehab: id`). They are
  * stored in that order (`normalizeSectionOrder`), and read grouped by a stable sort, so a document
- * an older build reordered still reads right. A superset never spans groups: every operation here
- * moves exercises only between blocks of one group, and a block between groups only with
- * `moveToSection` (Accessories ⇄ Core, a superset whole).
+ * an older build reordered still reads right. A block moves between Accessories and Core only with
+ * `moveToSection` (a superset whole); an exercise can join a superset of either (it is then in
+ * that block's subsection), never one of rehab, nor rehab exercises one of Strength or of another
+ * rehab block.
+ *
+ * Core is a group only where the page shows Strength's subsections (`StructureOpts.core`: the new
+ * Train, flag `trainDay`). Without it every accessory block is one list in stored order, `section`
+ * or not — the letters, block moves and their indices exactly as before subsections existed, and
+ * as an older build reads a document holding Core. `section` itself is kept whatever moves.
  *
  * Every operation keeps the identity of what it doesn't change — an exercise moved or reordered is
  * the same object (with its sets, logged or not, and their ids), a block it doesn't touch is the
@@ -37,20 +43,38 @@ export interface ExPlace {
 /** Where a block is shown: the main lift, Strength's Accessories or Core, or Rehab. */
 export type BlockGroup = "main" | "accessories" | "core" | "rehab";
 
-/** A block's group (`kind`, then an accessory's `section`; absent = Accessories). */
-export const blockGroup = (b: Pick<Block, "kind" | "section">): BlockGroup =>
-  b.kind === "primary" ? "main" : b.kind === "rehab" ? "rehab" : b.section === "core" ? "core" : "accessories";
+/**
+ * How the page reads Strength: `core` — in its subsections, Accessories then Core (the new Train).
+ * Without it (the default) Core is read as Accessories, as before subsections existed.
+ */
+export interface StructureOpts {
+  core?: boolean;
+}
+
+/** A block's group (`kind`, then — with `opts.core` — an accessory's `section`; absent = Accessories). */
+export const blockGroup = (b: Pick<Block, "kind" | "section">, opts: StructureOpts = {}): BlockGroup =>
+  b.kind === "primary" ? "main" : b.kind === "rehab" ? "rehab" : opts.core && b.section === "core" ? "core" : "accessories";
 
 const RANK: Record<BlockGroup, number> = { main: 0, accessories: 1, core: 2, rehab: 3 };
 
 /** Two blocks are in the same group: the same subsection, or rehab blocks of the same rehab block. */
-export const sameGroup = (a: Block, b: Block): boolean => blockGroup(a) === blockGroup(b) && (a.kind !== "rehab" || a.rehab === b.rehab);
+export const sameGroup = (a: Block, b: Block, opts: StructureOpts = {}): boolean =>
+  blockGroup(a, opts) === blockGroup(b, opts) && (a.kind !== "rehab" || a.rehab === b.rehab);
 
-/** The blocks in page order: main lift, Accessories, Core, Rehab — each group in stored order (a stable sort). */
-export function pageOrder(session: Pick<Session, "blocks">): Block[] {
+/**
+ * An exercise can move between the two blocks: both of Strength's accessories (Accessories or
+ * Core — the superset it joins stays in its own subsection), or both of the same rehab block.
+ */
+const sameFamily = (a: Block, b: Block): boolean => a.kind === b.kind && (a.kind !== "rehab" || a.rehab === b.rehab);
+
+/**
+ * The blocks in page order: main lift, Accessories, Core (with `opts.core`), Rehab — each group in
+ * stored order (a stable sort).
+ */
+export function pageOrder(session: Pick<Session, "blocks">, opts: StructureOpts = {}): Block[] {
   return session.blocks
     .map((b, i) => ({ b, i }))
-    .sort((x, y) => RANK[blockGroup(x.b)] - RANK[blockGroup(y.b)] || x.i - y.i)
+    .sort((x, y) => RANK[blockGroup(x.b, opts)] - RANK[blockGroup(y.b, opts)] || x.i - y.i)
     .map((x) => x.b);
 }
 
@@ -59,17 +83,17 @@ export function pageOrder(session: Pick<Session, "blocks">): Block[] {
  * rehab]`. The same object when they already are — every session saved before subsections and
  * rehab existed — so it is safe on any save.
  */
-export function normalizeSectionOrder(session: Session): Session {
-  const sorted = pageOrder(session);
+export function normalizeSectionOrder(session: Session, opts: StructureOpts = {}): Session {
+  const sorted = pageOrder(session, opts);
   return sorted.every((b, i) => b === session.blocks[i]) ? session : { ...session, blocks: sorted };
 }
 
 /**
- * The blocks of one group in stored order: a subsection's, or rehab's (`rehab`: of that rehab block
- * only; omitted, every rehab block).
+ * The blocks of one group in stored order: a subsection's, or rehab's (`opts.rehab`: of that rehab
+ * block only; omitted, every rehab block).
  */
-export function groupBlocks(session: Pick<Session, "blocks">, group: BlockGroup, rehab?: string): Block[] {
-  return session.blocks.filter((b) => blockGroup(b) === group && (rehab === undefined || b.rehab === rehab));
+export function groupBlocks(session: Pick<Session, "blocks">, group: BlockGroup, opts: StructureOpts & { rehab?: string } = {}): Block[] {
+  return session.blocks.filter((b) => blockGroup(b, opts) === group && (opts.rehab === undefined || b.rehab === opts.rehab));
 }
 
 /** A block exercises can move within: an accessory or rehab block (never the main lift's). */
@@ -77,12 +101,14 @@ const structural = (s: Session, blockId: string): Block | undefined => s.blocks.
 
 /**
  * Superset letters in page order (`pageOrder`): the first block of 2+ exercises is A, then B…
- * They run through the page — A, B in Accessories, C in Core, D in Rehab — and come out as an
- * older build's (which reads Core as accessories) once blocks are stored in page order.
+ * They run through the page — A, B in Accessories, C in Core (`opts.core`), D in Rehab — and come
+ * out as an older build's (which reads Core as accessories) once blocks are stored in page order.
+ * Without `opts.core`: in stored order, as a page without subsections lists the accessory blocks.
  */
-export function supersetLetters(session: Session): ReadonlyMap<string, string> {
+export function supersetLetters(session: Session, opts: StructureOpts = {}): ReadonlyMap<string, string> {
   const out = new Map<string, string>();
-  for (const b of pageOrder(session)) if (b.kind !== "primary" && b.exercises.length > 1) out.set(b.id, String.fromCharCode(65 + out.size));
+  for (const b of pageOrder(session, opts))
+    if (b.kind !== "primary" && b.exercises.length > 1) out.set(b.id, String.fromCharCode(65 + out.size));
   return out;
 }
 
@@ -90,17 +116,18 @@ export function supersetLetters(session: Session): ReadonlyMap<string, string> {
 export const accessoryBlocks = (session: Session): Block[] => session.blocks.filter((b) => b.kind === "accessory");
 
 /**
- * Move an exercise (with all its sets) into another block of its group, at `at` (default: the end,
- * i.e. the next member of the superset). Its old block loses it, and disappears when that leaves it
- * empty. Unchanged when either block is the main lift's or missing, they are in different groups
- * (Accessories and Core, two rehab blocks…), it's the same block, or the target already holds
- * `MAX_SUPERSET` exercises.
+ * Move an exercise (with all its sets) into another block, at `at` (default: the end, i.e. the next
+ * member of the superset). Its old block loses it, and disappears when that leaves it empty; it is
+ * then in the target block's subsection (a Core exercise joining an Accessories superset is an
+ * accessory there, as it always was). Unchanged when either block is the main lift's or missing,
+ * one is Strength's and the other rehab's, they are of two rehab blocks, it's the same block, or
+ * the target already holds `MAX_SUPERSET` exercises.
  */
 export function moveExerciseToBlock(session: Session, from: ExPlace, toBlockId: string, at?: number): Session {
   const src = structural(session, from.blockId);
   const dest = structural(session, toBlockId);
   const ex = src?.exercises[from.exIdx];
-  if (!src || !dest || !ex || src === dest || !sameGroup(src, dest) || dest.exercises.length >= MAX_SUPERSET) return session;
+  if (!src || !dest || !ex || src === dest || !sameFamily(src, dest) || dest.exercises.length >= MAX_SUPERSET) return session;
   const exercises = [...dest.exercises];
   exercises.splice(at === undefined ? exercises.length : Math.max(0, Math.min(at, exercises.length)), 0, ex);
   const left = src.exercises.filter((_, i) => i !== from.exIdx);
@@ -126,41 +153,45 @@ export function reorderInBlock(session: Session, blockId: string, fromIdx: numbe
 }
 
 /**
- * Put a block at another position among the blocks of its group (`to`, clamped): Accessories'
- * blocks among Accessories', Core's among Core's, a rehab block's among its own. Every other
- * block keeps its place in the list. Unchanged when the block is missing, the main lift's, or
- * already there. Crossing between Accessories and Core is `moveToSection`.
+ * Put a block at another position among the blocks of its group (`to`, clamped: an index into that
+ * group, in stored order): a rehab block among its own; with `opts.core`, Accessories' blocks among
+ * Accessories', Core's among Core's (crossing between them is `moveToSection`) — without it, an
+ * accessory block among every accessory block (`accessoryBlocks`, Core's included), as before
+ * subsections existed. Every other block keeps its place in the list. Unchanged when the block is
+ * missing, the main lift's, or already there.
  */
-export function moveBlock(session: Session, blockId: string, to: number): Session {
+export function moveBlock(session: Session, blockId: string, to: number, opts: StructureOpts = {}): Session {
   const block = structural(session, blockId);
   if (!block) return session;
-  const list = session.blocks.filter((b) => sameGroup(b, block));
+  const inGroup = (b: Block) => sameGroup(b, block, opts);
+  const list = session.blocks.filter(inGroup);
   const from = list.indexOf(block);
   const target = Math.max(0, Math.min(to, list.length - 1));
   if (target === from) return session;
   list.splice(from, 1);
   list.splice(target, 0, block);
   let k = 0;
-  return { ...session, blocks: session.blocks.map((x) => (sameGroup(x, block) ? list[k++]! : x)) };
+  return { ...session, blocks: session.blocks.map((x) => (inGroup(x) ? list[k++]! : x)) };
 }
 
 /**
  * Move an accessory block — a superset whole — to Strength's other subsection (`to`), at position
  * `at` among that subsection's blocks (clamped; default: the end), stored in page order
- * (`normalizeSectionOrder`). Moving to Accessories drops `section` (absent = Accessories, as an
- * older build writes it). Unchanged for the main lift, a rehab block, a missing block, or one
- * already there.
+ * (`normalizeSectionOrder`). It is written as `section: to`: a block moved to Accessories says so
+ * ("accessories"), so pre-fill's legacy Core rule — which only reads a template with no `section`
+ * at all — never files it under Core again. Unchanged for the main lift, a rehab block, a missing
+ * block, or one already there.
  */
 export function moveToSection(session: Session, blockId: string, to: "accessories" | "core", at?: number): Session {
+  const core = { core: true };
   const block = session.blocks.find((b) => b.id === blockId && b.kind === "accessory");
-  if (!block || blockGroup(block) === to) return session;
-  const { section: _section, ...rest } = block;
-  const moved: Block = to === "core" ? { ...rest, section: "core" } : rest;
+  if (!block || blockGroup(block, core) === to) return session;
+  const moved: Block = { ...block, section: to };
   const others = session.blocks.filter((b) => b !== block);
-  const dest = others.filter((b) => blockGroup(b) === to);
+  const dest = others.filter((b) => blockGroup(b, core) === to);
   const before = at !== undefined && at < dest.length ? dest[Math.max(0, at)] : undefined;
   const blocks = before ? others.flatMap((b) => (b === before ? [moved, b] : [b])) : [...others, moved];
-  return normalizeSectionOrder({ ...session, blocks });
+  return normalizeSectionOrder({ ...session, blocks }, core);
 }
 
 /**
@@ -221,15 +252,16 @@ export interface MoveCandidate extends ExPlace {
 }
 
 /**
- * The exercises in the other blocks of the block's group, in workout order: what "Add from this
- * workout" offers for a block (a Core superset offers Core's exercises, a rehab one its rehab
- * block's). Empty when the block is the main lift's, missing or full.
+ * The exercises of the other blocks that can move into the block (`moveExerciseToBlock`), in
+ * workout order: what "Add from this workout" offers for a block (a superset of Strength: every
+ * accessory and Core exercise, as it always did; a rehab one: its rehab block's). Empty when the
+ * block is the main lift's, missing or full.
  */
 export function movableInto(session: Session, blockId: string): MoveCandidate[] {
   const dest = structural(session, blockId);
   if (!dest || dest.exercises.length >= MAX_SUPERSET) return [];
   return session.blocks.flatMap((b) =>
-    b === dest || !sameGroup(b, dest)
+    b === dest || !sameFamily(b, dest)
       ? []
       : b.exercises.map((exercise, exIdx) => ({ blockId: b.id, exIdx, exercise, fromSuperset: b.exercises.length > 1 })),
   );

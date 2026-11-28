@@ -38,6 +38,7 @@ import {
   shownLoad,
 } from "./session";
 import { addDays } from "./dates";
+import { moveToSection } from "./sessionStructure";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 const settings = { ...defaultSettings(ids, "2026-11-01"), onboarded: true };
@@ -819,7 +820,10 @@ describe("sessionCounts", () => {
 
 describe("blockComplete", () => {
   const done = () => blankSet({ done: true });
-  const block = (exs: Array<{ sets: SetEntry[]; skipped?: boolean }>, extra: Partial<Session["blocks"][number]> = {}): Session["blocks"][number] => ({
+  const block = (
+    exs: Array<{ sets: SetEntry[]; skipped?: boolean }>,
+    extra: Partial<Session["blocks"][number]> = {},
+  ): Session["blocks"][number] => ({
     id: "b",
     kind: "accessory",
     exercises: exs.map((e, i) => ({ exerciseId: 10 + i, measure: "reps" as const, ...e })),
@@ -1171,6 +1175,8 @@ describe("Core and rehab in the session (SPEC §6.5, §6.8)", () => {
   const shape = (s: Session) =>
     s.blocks.map((b) => `${b.kind}${b.section ? `:${b.section}` : ""}[${b.exercises.map((e) => e.exerciseId).join("|")}]`).join(" ");
   const NEXT_MON = "2026-12-07";
+  /** Pre-fill for the new Train (Strength's subsections: flag `trainDay`). */
+  const CORE = { core: true };
 
   it("pre-fill from a session saved before subsections: a block of core exercises only lands in Core (stored last); others stay", () => {
     const old = prior([
@@ -1178,7 +1184,29 @@ describe("Core and rehab in the session (SPEC §6.5, §6.8)", () => {
       { id: "f", kind: "accessory", exercises: [fly()] },
       { id: "m", kind: "accessory", exercises: [fly("g"), hollow("i")] },
     ]);
-    expect(shape(buildSession(NEXT_MON, ctx([old])))).toBe("primary[1] accessory[10] accessory[10|11] accessory:core[11]");
+    expect(shape(buildSession(NEXT_MON, ctx([old]), CORE))).toBe("primary[1] accessory[10] accessory[10|11] accessory:core[11]");
+  });
+
+  it("pre-fill without the subsections (flag off, the default) is exactly as before: the template's order, no section written", () => {
+    // The owner's Monday today: a core couplet between two accessories.
+    const old = prior([
+      { id: "f", kind: "accessory", exercises: [fly()] },
+      { id: "c", kind: "accessory", exercises: [hollow(), hollow("j")] },
+      { id: "m", kind: "accessory", exercises: [fly("g")] },
+    ]);
+    const next = buildSession(NEXT_MON, ctx([old]));
+    expect(shape(next)).toBe("primary[1] accessory[10] accessory[11|11] accessory[10]");
+    expect(next.blocks.every((b) => !("section" in b))).toBe(true);
+    expect(shape(buildSession(NEXT_MON, ctx([old]), { core: false }))).toBe(shape(next));
+    // A template from a device with the flag on (Core stored last) reads in its stored order, untagged.
+    const tagged = prior([
+      { id: "f", kind: "accessory", exercises: [fly()] },
+      { id: "c", kind: "accessory", exercises: [hollow()], section: "core" },
+      { id: "a", kind: "accessory", exercises: [fly("g")], section: "accessories" },
+    ]);
+    const fromTagged = buildSession(NEXT_MON, ctx([tagged]));
+    expect(shape(fromTagged)).toBe("primary[1] accessory[10] accessory[11] accessory[10]");
+    expect(buildSessionFrom(NEXT_MON, "2026-12-01", ctx([old])).blocks.every((b) => !("section" in b))).toBe(true);
   });
 
   it("pre-fill carries each block's subsection once it has one: the tag decides, not the category", () => {
@@ -1186,16 +1214,38 @@ describe("Core and rehab in the session (SPEC §6.5, §6.8)", () => {
       { id: "h", kind: "accessory", exercises: [hollow()] },
       { id: "f", kind: "accessory", exercises: [fly()], section: "core" },
     ]);
-    expect(shape(buildSession(NEXT_MON, ctx([tagged])))).toBe("primary[1] accessory[11] accessory:core[10]");
+    expect(shape(buildSession(NEXT_MON, ctx([tagged]), CORE))).toBe("primary[1] accessory[11] accessory:core[10]");
+  });
+
+  it('every core block moved to Accessories by hand stays there: `section: "accessories"` carries, the legacy rule never fires again', () => {
+    const legacy = prior([
+      { id: "f", kind: "accessory", exercises: [fly()] },
+      { id: "c", kind: "accessory", exercises: [hollow()] },
+    ]);
+    const first = buildSession(NEXT_MON, ctx([legacy]), CORE);
+    expect(shape(first)).toBe("primary[1] accessory[10] accessory:core[11]");
+    const core = first.blocks.find((b) => b.section === "core")!;
+    const back = { ...moveToSection(first, core.id, "accessories"), completedAt: "2026-12-07T18:00:00Z" };
+    expect(shape(back)).toBe("primary[1] accessory[10] accessory:accessories[11]");
+    const after = buildSession("2026-12-14", ctx([legacy, back]), CORE);
+    expect(shape(after)).toBe("primary[1] accessory[10] accessory:accessories[11]");
+    expect(shape(buildSession("2026-12-21", ctx([legacy, back, { ...after, date: "2026-12-14", completedAt: "x" }]), CORE))).toBe(
+      "primary[1] accessory[10] accessory:accessories[11]",
+    );
   });
 
   it("Core carries forward like accessories: deload loads, a skipped exercise from its last real performance, the hint", () => {
     const normal = prior([{ id: "c", kind: "accessory", exercises: [fly()], section: "core" }]);
-    const deload = buildSession("2026-11-30", ctx([normal]));
+    const deload = buildSession("2026-11-30", ctx([normal]), CORE);
     const c = deload.blocks.find((b) => b.section === "core")!;
     expect(c.exercises[0]!.sets[0]!.targetWeight).toBe(40);
-    const skipped = { ...prior([{ id: "c", kind: "accessory", exercises: [{ ...fly("z"), skipped: true, sets: [] }], section: "core" }]), date: "2026-11-30" };
-    expect(buildSession(NEXT_MON, ctx([normal, skipped])).blocks.find((b) => b.section === "core")!.exercises[0]!.sets[0]!.targetWeight).toBe(50);
+    const skipped = {
+      ...prior([{ id: "c", kind: "accessory", exercises: [{ ...fly("z"), skipped: true, sets: [] }], section: "core" }]),
+      date: "2026-11-30",
+    };
+    expect(
+      buildSession(NEXT_MON, ctx([normal, skipped]), CORE).blocks.find((b) => b.section === "core")!.exercises[0]!.sets[0]!.targetWeight,
+    ).toBe(50);
     expect(accessoryHint(10, NEXT_MON, [normal], 5, W)?.suggestedWeight).toBe(55);
   });
 
@@ -1211,11 +1261,9 @@ describe("Core and rehab in the session (SPEC §6.5, §6.8)", () => {
     // A rehab-only session is no template: the strength session before it is.
     const onlyRehab = prior([{ id: "r", kind: "rehab", exercises: [{ ...fly("r"), sets: [logged("r1", 12, 90)] }], rehab: "knee" }]);
     expect(templateSource(NEXT_MON, ctx([strength, onlyRehab]))?.date).toBe("2026-11-16");
-    expect(setsForAddedExercise(exercises[2]!, { date: NEXT_MON, plannedFor: null, deload: false }, ctx([onlyRehab])).map((s) => s.targetWeight)).toEqual([
-      null,
-      null,
-      null,
-    ]);
+    expect(
+      setsForAddedExercise(exercises[2]!, { date: NEXT_MON, plannedFor: null, deload: false }, ctx([onlyRehab])).map((s) => s.targetWeight),
+    ).toEqual([null, null, null]);
     expect(accessoryHint(10, NEXT_MON, [onlyRehab], 5, W)).toBeNull();
   });
 
@@ -1240,7 +1288,12 @@ describe("Core and rehab in the session (SPEC §6.5, §6.8)", () => {
 
   it("an exercise of rehab follows the exercise's current measure while nothing is logged, as accessories do", () => {
     const s = withRehabBlocks("2026-11-02");
-    const open = { ...s, blocks: s.blocks.map((b) => (b.kind === "rehab" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, sets: [{ ...e.sets[0]!, done: false }] })) } : b)) };
+    const open = {
+      ...s,
+      blocks: s.blocks.map((b) =>
+        b.kind === "rehab" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, sets: [{ ...e.sets[0]!, done: false }] })) } : b,
+      ),
+    };
     const lib = exercises.map((e) => (e.id === 10 ? { ...e, measure: "seconds" as const } : e));
     expect(effectiveSession(open, lib).blocks.find((b) => b.kind === "rehab")!.exercises[0]!.measure).toBe("seconds");
   });
@@ -1250,7 +1303,9 @@ describe("Core and rehab in the session (SPEC §6.5, §6.8)", () => {
     const moved = buildSessionFrom("2026-11-09", "2026-11-03", ctx([]), today);
     expect(moved.plannedFor).toBe("2026-11-09");
     expect(moved.blocks.filter((b) => b.kind === "rehab")).toEqual(today.blocks.filter((b) => b.kind === "rehab"));
-    expect(moved.blocks.filter((b) => b.kind === "primary")[0]!.exercises[0]!.exerciseId).toBe(buildSession("2026-11-09", ctx([])).blocks[0]!.exercises[0]!.exerciseId);
+    expect(moved.blocks.filter((b) => b.kind === "primary")[0]!.exercises[0]!.exerciseId).toBe(
+      buildSession("2026-11-09", ctx([])).blocks[0]!.exercises[0]!.exerciseId,
+    );
     // Nothing to keep: exactly the move as before.
     const plain = buildSessionFrom("2026-11-09", "2026-11-03", ctx([]), session0("2026-11-03"));
     expect(Object.keys(plain)).toEqual(Object.keys(buildSessionFrom("2026-11-09", "2026-11-03", ctx([]))));

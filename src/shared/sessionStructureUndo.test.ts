@@ -23,7 +23,12 @@ const shape = (s: Session) => s.blocks.map((b) => `${b.id}[${b.exercises.map((e)
 
 describe("addStandings", () => {
   it("marks the block's members, moves an accessory from elsewhere (first copy), and keeps out the main lift", () => {
-    const s = sess([main, block("X", ex(10, set("a")), ex(11, set("b"))), block("Y", ex(12, set("c"))), block("Z", ex(12, set("d")), ex(13))]);
+    const s = sess([
+      main,
+      block("X", ex(10, set("a")), ex(11, set("b"))),
+      block("Y", ex(12, set("c"))),
+      block("Z", ex(12, set("d")), ex(13)),
+    ]);
     const m = addStandings(s, "X");
     expect(m.get(10)).toEqual({ kind: "member" });
     expect(m.get(11)).toEqual({ kind: "member" });
@@ -31,6 +36,31 @@ describe("addStandings", () => {
     expect(m.get(13)).toEqual({ kind: "elsewhere", place: { blockId: "Z", exIdx: 1 } });
     expect(m.get(1)).toEqual({ kind: "main" });
     expect(m.has(99)).toBe(false);
+  });
+
+  it("a Core exercise of the workout moves into an accessory superset (and back): never added a second time", () => {
+    const s: Session = sess([
+      main,
+      block("A", ex(10, set("a")), ex(12, set("b"))),
+      { id: "C", kind: "accessory", section: "core", exercises: [ex(11, set("h"))] },
+    ]);
+    const standing = addStandings(s, "A").get(11);
+    expect(standing).toEqual({ kind: "elsewhere", place: { blockId: "C", exIdx: 0 } });
+    // Picked in "Add another exercise": it moves in with its sets (the Core block, now empty, goes).
+    const moved = moveExerciseToBlock(s, { blockId: "C", exIdx: 0 }, "A");
+    expect(shape(moved)).toBe("P[1] A[10|12|11]");
+    expect(moved.blocks[1]!.exercises[2]).toBe(s.blocks[2]!.exercises[0]);
+    // The other way round: an accessory into a Core superset.
+    const core2: Session = {
+      ...s,
+      blocks: [...s.blocks.slice(0, 2), { ...s.blocks[2]!, exercises: [ex(11, set("h")), ex(13, set("k"))] }],
+    };
+    expect(addStandings(core2, "C").get(10)).toEqual({ kind: "elsewhere", place: { blockId: "A", exIdx: 0 } });
+    // Rehab exercises are never offered to Strength, nor the other way round.
+    const knee: Block = { id: "R", kind: "rehab", rehab: "knee", exercises: [ex(30, set("r")), ex(10, set("r2"))] };
+    const withRehab = sess([...s.blocks, knee]);
+    expect(addStandings(withRehab, "A").has(30)).toBe(false);
+    expect(addStandings(withRehab, "R").has(12)).toBe(false);
   });
 
   it("the main lift done as an accessory elsewhere moves; a member wins over both", () => {

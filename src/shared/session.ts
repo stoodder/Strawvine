@@ -411,22 +411,37 @@ export function planHasNoMainLift(session: Pick<Session, "date" | "plannedFor">,
  * (one that names a lift was built when the day had one: a plan change, not an addition). A plan
  * signature without a lift alone says nothing — seeded and imported sessions have none.
  */
-export function mainLiftAdded(session: Pick<Session, "date" | "plannedFor" | "planSig" | "blocks">, ctx: Pick<BuildContext, "settings">): number | null {
+export function mainLiftAdded(
+  session: Pick<Session, "date" | "plannedFor" | "planSig" | "blocks">,
+  ctx: Pick<BuildContext, "settings">,
+): number | null {
   const main = session.blocks.find((b) => b.kind === "primary")?.exercises[0];
   if (!main || plannedLiftOf(session) !== null || !planHasNoMainLift(session, ctx)) return null;
   return main.exerciseId;
 }
 
 /**
- * A day's strength session from the plan (SPEC §6.5): the main lift calculated, the accessory
- * blocks carried from `templateSource`, each into its own subsection (`section`: Core; absent =
- * Accessories), stored Accessories first, then Core (`normalizeSectionOrder`'s order). A source
- * saved before subsections existed (no block has a `section`) files a block made only of
+ * How a pre-fill files accessory blocks. `core` (the new Train, flag `trainDay`): into Strength's
+ * subsections (SPEC §6.5). Without it a pre-fill is exactly what it was before subsections existed
+ * — the template's accessory blocks in their order, no `section` written — which is what every
+ * Train without the subsections must get (an older build, or this one with the flag off).
+ */
+export interface PrefillOpts {
+  core?: boolean;
+}
+
+/**
+ * A day's strength session from the plan (SPEC §6.5): the main lift calculated and the accessory
+ * blocks carried from `templateSource`, in its order. With `opts.core`, each block goes into its
+ * own subsection (`section`: Core; "accessories" or absent: Accessories), stored Accessories first,
+ * then Core (`normalizeSectionOrder`'s order); a block filed under Accessories by hand
+ * (`section: "accessories"`) carries that forward, so the legacy rule below never files it again.
+ * A source saved before subsections existed (no block has a `section`) files a block made only of
  * core-category exercises under Core, so the old core couplet lands there on the first pre-fill,
  * with no migration. Rehab is never part of it — the day's rehab draft is added by
  * `withRehabDraft` (rehab.ts) — so this stays exactly the strength plan every caller had.
  */
-export function buildSession(date: ISODate, ctx: BuildContext): Session {
+export function buildSession(date: ISODate, ctx: BuildContext, opts: PrefillOpts = {}): Session {
   const { program } = ctx.settings;
   const { day, pos, block: primary, primaryMaxLb } = plannedPrimary(date, ctx);
   const blocks: Block[] = primary ? [primary] : [];
@@ -453,9 +468,11 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
         ];
       });
       if (!exercises.length) continue;
-      if (b.section === "core" || (legacy && exercises.every((e) => isCore(e.exerciseId))))
+      if (!opts.core) blocks.push({ id: newId(), kind: "accessory", exercises });
+      else if (b.section === "core" || (legacy && exercises.every((e) => isCore(e.exerciseId))))
         core.push({ id: newId(), kind: "accessory", exercises, section: "core" });
-      else blocks.push({ id: newId(), kind: "accessory", exercises });
+      else
+        blocks.push({ id: newId(), kind: "accessory", exercises, ...(b.section === "accessories" && { section: "accessories" as const }) });
     }
   }
   blocks.push(...core);
@@ -482,10 +499,16 @@ export function buildSession(date: ISODate, ctx: BuildContext): Session {
  *
  * It moves strength only (SPEC §6.8): the target day keeps its own rehab blocks — those of `keep`
  * (the session saved on `targetDate`, which this replaces), after the moved strength. With none,
- * the target day's rehab stays its live draft (`withRehabDraft`, rehab.ts).
+ * the target day's rehab stays its live draft (`withRehabDraft`, rehab.ts). `opts` as `buildSession`.
  */
-export function buildSessionFrom(sourceDate: ISODate, targetDate: ISODate, ctx: BuildContext, keep?: Session | null): Session {
-  const planned = buildSession(sourceDate, ctx);
+export function buildSessionFrom(
+  sourceDate: ISODate,
+  targetDate: ISODate,
+  ctx: BuildContext,
+  keep?: Session | null,
+  opts: PrefillOpts = {},
+): Session {
+  const planned = buildSession(sourceDate, ctx, opts);
   const moved: Session = { ...planned, date: targetDate, plannedFor: sourceDate === targetDate ? null : sourceDate };
   const rehab = keep?.blocks.filter((b) => b.kind === "rehab") ?? [];
   return rehab.length ? { ...moved, blocks: [...moved.blocks, ...rehab] } : moved;
@@ -499,12 +522,15 @@ export const isStrengthBlock = (b: Pick<Block, "kind">): boolean => b.kind === "
  * session's strength rebuilt from its own date's plan (`buildSession(session.date)`: label, week,
  * main lift, accessories; open, not moved), its rehab blocks and notes kept. Null when nothing else
  * is left in it (no rehab block, no notes): the document is deleted then, as before. Offered while
- * no strength set is logged (`isStrengthStarted`).
+ * no strength set is logged (`isStrengthStarted`). Notes are kept rather than deleted: on a day
+ * whose plan has no strength (a rest day's extra session) that leaves a document of notes only,
+ * which holds no Strength (`holdsStrength`, sections.ts), so no Strength section that can never be
+ * done appears. `opts` as `buildSession`.
  */
-export function resetStrength(session: Session, ctx: BuildContext): Session | null {
+export function resetStrength(session: Session, ctx: BuildContext, opts: PrefillOpts = {}): Session | null {
   const rehab = session.blocks.filter((b) => b.kind === "rehab");
   if (!rehab.length && !session.notes) return null;
-  const plan = buildSession(session.date, ctx);
+  const plan = buildSession(session.date, ctx, opts);
   return { ...plan, notes: session.notes, blocks: [...plan.blocks, ...rehab] };
 }
 

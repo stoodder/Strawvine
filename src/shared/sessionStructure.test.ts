@@ -243,6 +243,7 @@ describe("derivedBlockId", () => {
 });
 
 describe("groups: Accessories, Core and Rehab (SPEC §6.7)", () => {
+  const CORE = { core: true };
   const core = (id: string, ...exercises: BlockExercise[]): Block => ({ id, kind: "accessory", exercises, section: "core" });
   const rehab = (id: string, ...exercises: BlockExercise[]): Block => ({ id, kind: "rehab", exercises, rehab: "knee" });
   const raise = ex(20, set("h1"));
@@ -253,46 +254,70 @@ describe("groups: Accessories, Core and Rehab (SPEC §6.7)", () => {
   const mixed = sess([main, block("X", rows, curls), core("C", raise, hold), block("Y", dips), rehab("R", step), rehab("S", ext)]);
 
   it("reads blocks in page order (a stable sort) and stores them so; already ordered is the same object", () => {
-    expect(pageOrder(mixed).map((b) => b.id)).toEqual(["P", "X", "Y", "C", "R", "S"]);
-    const fixed = normalizeSectionOrder(mixed);
+    expect(pageOrder(mixed, CORE).map((b) => b.id)).toEqual(["P", "X", "Y", "C", "R", "S"]);
+    const fixed = normalizeSectionOrder(mixed, CORE);
     expect(shape(fixed)).toBe("P[1] X[10|11] Y[12] C[20|21] R[30] S[31]");
     expect(fixed.blocks[1]).toBe(mixed.blocks[1]);
-    expect(normalizeSectionOrder(fixed)).toBe(fixed);
-    expect(normalizeSectionOrder(base)).toBe(base);
-    expect(blockGroup(mixed.blocks[2]!)).toBe("core");
+    expect(normalizeSectionOrder(fixed, CORE)).toBe(fixed);
+    expect(normalizeSectionOrder(base, CORE)).toBe(base);
+    expect(blockGroup(mixed.blocks[2]!, CORE)).toBe("core");
     expect(groupBlocks(mixed, "rehab").map((b) => b.id)).toEqual(["R", "S"]);
-    expect(groupBlocks(mixed, "rehab", "hip")).toEqual([]);
+    expect(groupBlocks(mixed, "rehab", { rehab: "hip" })).toEqual([]);
+    expect(groupBlocks(mixed, "core", CORE).map((b) => b.id)).toEqual(["C"]);
+    // "accessories" (a block moved out of Core) reads as Accessories, as no `section` does.
+    expect(blockGroup({ kind: "accessory", section: "accessories" }, CORE)).toBe("accessories");
+  });
+
+  it("without subsections (the default) Core reads as Accessories: stored order, letters and moves as before", () => {
+    expect(blockGroup(mixed.blocks[2]!)).toBe("accessories");
+    expect(pageOrder(mixed).map((b) => b.id)).toEqual(["P", "X", "C", "Y", "R", "S"]);
+    expect(normalizeSectionOrder(mixed).blocks.slice(0, 4)).toEqual(mixed.blocks.slice(0, 4));
+    const s = sess([main, block("X", rows, curls), core("C", raise, hold), block("Y", dips, plank)]);
+    expect([...supersetLetters(s)]).toEqual([
+      ["X", "A"],
+      ["C", "B"],
+      ["Y", "C"],
+    ]);
+    // An index among every accessory block (Train's Reorder sheet): Core moves past an accessory and back.
+    expect(shape(moveBlock(s, "C", 0))).toBe("P[1] C[20|21] X[10|11] Y[12|13]");
+    expect(shape(moveBlock(s, "Y", 1))).toBe("P[1] X[10|11] Y[12|13] C[20|21]");
+    expect(moveBlock(s, "C", 0).blocks[1]).toBe(s.blocks[2]); // `section` kept: the same block
   });
 
   it("superset letters run through the page: Accessories, then Core, then Rehab", () => {
     const s = sess([main, core("C", raise, hold), block("X", rows, curls), rehab("R", step, ext)]);
-    expect([...supersetLetters(s)]).toEqual([
+    expect([...supersetLetters(s, CORE)]).toEqual([
       ["X", "A"],
       ["C", "B"],
       ["R", "C"],
     ]);
   });
 
-  it("a superset never spans groups: moves between Accessories, Core and Rehab are refused, within one they work", () => {
-    expect(moveExerciseToBlock(mixed, { blockId: "Y", exIdx: 0 }, "C")).toBe(mixed);
-    expect(moveExerciseToBlock(mixed, { blockId: "C", exIdx: 0 }, "X")).toBe(mixed);
+  it("an exercise joins a superset of Accessories or Core (never added twice); rehab only within its own block", () => {
+    // Core ⇄ Accessories: the exercise is then in the target's subsection; the superset stays in one.
+    const intoCore = moveExerciseToBlock(mixed, { blockId: "Y", exIdx: 0 }, "C");
+    expect(shape(intoCore)).toBe("P[1] X[10|11] C[20|21|12] R[30] S[31]");
+    expect(intoCore.blocks[2]!.section).toBe("core");
+    expect(shape(moveExerciseToBlock(mixed, { blockId: "C", exIdx: 0 }, "X"))).toBe("P[1] X[10|11|20] C[21] Y[12] R[30] S[31]");
+    expect(movableInto(mixed, "C").map((c) => c.exercise.exerciseId)).toEqual([10, 11, 12]);
+    expect(movableInto(mixed, "X").map((c) => c.exercise.exerciseId)).toEqual([20, 21, 12]);
+    // Rehab: only within its own rehab block.
     expect(moveExerciseToBlock(mixed, { blockId: "R", exIdx: 0 }, "Y")).toBe(mixed);
+    expect(moveExerciseToBlock(mixed, { blockId: "Y", exIdx: 0 }, "R")).toBe(mixed);
     const joined = moveExerciseToBlock(mixed, { blockId: "S", exIdx: 0 }, "R");
     expect(shape(joined)).toBe("P[1] X[10|11] C[20|21] Y[12] R[30|31]");
     expect(joined.blocks[4]!.exercises[1]).toBe(ext);
     // Rehab blocks of another rehab block are another group.
     const other = sess([rehab("R", step), { id: "H", kind: "rehab", exercises: [ext], rehab: "hip" }]);
     expect(moveExerciseToBlock(other, { blockId: "H", exIdx: 0 }, "R")).toBe(other);
-    expect(movableInto(mixed, "C")).toEqual([]);
     expect(movableInto(mixed, "R").map((c) => c.exercise.exerciseId)).toEqual([31]);
-    expect(movableInto(mixed, "X").map((c) => c.exercise.exerciseId)).toEqual([12]);
   });
 
   it("reorders within a block and moves blocks among their own group only, every other block in place", () => {
     expect(shape(reorderInBlock(mixed, "R", 0, 0))).toBe(shape(mixed));
     expect(shape(reorderInBlock(mixed, "C", 1, 0))).toBe("P[1] X[10|11] C[21|20] Y[12] R[30] S[31]");
-    expect(shape(moveBlock(mixed, "Y", 0))).toBe("P[1] Y[12] C[20|21] X[10|11] R[30] S[31]");
-    expect(moveBlock(mixed, "C", 1)).toBe(mixed);
+    expect(shape(moveBlock(mixed, "Y", 0, CORE))).toBe("P[1] Y[12] C[20|21] X[10|11] R[30] S[31]");
+    expect(moveBlock(mixed, "C", 1, CORE)).toBe(mixed);
     expect(shape(moveBlock(mixed, "S", 0))).toBe("P[1] X[10|11] C[20|21] Y[12] S[31] R[30]");
   });
 
@@ -309,17 +334,66 @@ describe("groups: Accessories, Core and Rehab (SPEC §6.7)", () => {
     const toCore = moveToSection(mixed, "Y", "core", 0);
     expect(shape(toCore)).toBe("P[1] X[10|11] Y[12] C[20|21] R[30] S[31]");
     expect(toCore.blocks[2]!.section).toBe("core");
-    expect(supersetLetters(toCore).get("C")).toBe("B");
+    expect(supersetLetters(toCore, CORE).get("C")).toBe("B");
     const end = moveToSection(mixed, "X", "core");
     expect(shape(end)).toBe("P[1] Y[12] C[20|21] X[10|11] R[30] S[31]");
     const back = moveToSection(mixed, "C", "accessories");
     expect(shape(back)).toBe("P[1] X[10|11] Y[12] C[20|21] R[30] S[31]");
-    expect("section" in back.blocks[3]!).toBe(false);
+    // Written as "accessories": pre-fill's legacy Core rule (a template with no `section`) never files it again.
+    expect(back.blocks[3]!.section).toBe("accessories");
     expect(back.blocks[3]!.exercises).toBe(mixed.blocks[2]!.exercises);
     expect(shape(moveToSection(mixed, "C", "accessories", 0))).toBe("P[1] C[20|21] X[10|11] Y[12] R[30] S[31]");
     expect(moveToSection(mixed, "C", "core")).toBe(mixed);
+    expect(moveToSection(back, "C", "accessories")).toBe(back);
+    expect(moveToSection(mixed, "Y", "accessories")).toBe(mixed);
     expect(moveToSection(mixed, "R", "core")).toBe(mixed);
     expect(moveToSection(mixed, "P", "core")).toBe(mixed);
     expect(sessionSchema.parse(toCore)).toEqual(toCore);
+    expect(sessionSchema.parse(back)).toEqual(back);
+  });
+});
+
+describe("Train without subsections, on a document holding Core (from a device with the flag on)", () => {
+  // Train.tsx: the list is `accessoryBlocks` (stored order), the Reorder sheet's Move up/down is
+  // moveBlock(session, accessories[index].id, index ± 1), letters are `supersetLetters`.
+  const accessories = (s: Session) => s.blocks.filter((b) => b.kind === "accessory");
+  const moveAccessory = (s: Session, index: number, delta: -1 | 1) => moveBlock(s, accessories(s)[index]!.id, index + delta);
+  const names = (s: Session) => accessories(s).map((b) => b.exercises.map((e) => e.exerciseId).join("+"));
+  const core = (id: string, ...exercises: BlockExercise[]): Block => ({ id, kind: "accessory", exercises, section: "core" });
+  // The flag-on pre-fill stored Core last; then a "+ Exercise" was appended after it here.
+  const s = sess([
+    main,
+    block("X", rows),
+    block("Y", dips),
+    core("C", ex(20, set("h1")), ex(21, set("k1"))),
+    block("N", ex(14, set("n1"))),
+  ]);
+
+  it("Move up / down move one place in the list shown, across Core and back", () => {
+    expect(names(moveAccessory(s, 2, -1))).toEqual(["10", "20+21", "12", "14"]);
+    expect(names(moveAccessory(s, 3, -1))).toEqual(["10", "12", "14", "20+21"]);
+    expect(names(moveAccessory(s, 1, 1))).toEqual(["10", "20+21", "12", "14"]);
+    expect(names(moveAccessory(moveAccessory(s, 2, -1), 1, 1))).toEqual(names(s));
+    // The block keeps its `section`: a device with the subsections still reads it as Core.
+    expect(moveAccessory(s, 2, -1).blocks.find((b) => b.id === "C")).toBe(s.blocks[3]);
+  });
+
+  it("superset letters follow the list shown", () => {
+    const pair = block("Q", ex(15, set("q1")), ex(16, set("q2")));
+    const withPair = sess([main, block("X", rows), core("C", ex(20, set("h1")), ex(21, set("k1"))), pair]);
+    const letters = supersetLetters(withPair);
+    expect(
+      accessories(withPair)
+        .filter((b) => b.exercises.length > 1)
+        .map((b) => letters.get(b.id)),
+    ).toEqual(["A", "B"]);
+    const moved = sess([main, pair, block("X", rows), core("C", ex(20, set("h1")), ex(21, set("k1")))]);
+    expect(supersetLetters(moved).get("Q")).toBe("A");
+  });
+
+  it("a document with no `section` (every one saved before this wave) reads the same with or without the subsections: indices, letters", () => {
+    expect(moveBlock(base, "Z", 0, { core: true })).toEqual(moveBlock(base, "Z", 0));
+    expect(supersetLetters(base, { core: true })).toEqual(supersetLetters(base));
+    expect(names(moveAccessory(base, 2, -1))).toEqual(["10+11", "13", "12"]);
   });
 });
