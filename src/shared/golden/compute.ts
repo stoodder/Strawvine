@@ -16,10 +16,6 @@
  * transform, applied to the *old* output only, so the new code has to produce it by itself. Without
  * the option (every Train with the flag off), pre-fill must give exactly the old output: the
  * `…FlagOff` cases compare it with the old answer untouched.
- *
- * Outputs the new code adds and the old one never had (`zone2Activities` of the weekly check-in,
- * the Zone 2 machine) are left out of the new side's answer (`ADDED_KEYS`): an addition, not a
- * change of what was there.
  */
 import { createHash } from "node:crypto";
 import { addDays, type ISODate } from "../dates";
@@ -93,20 +89,6 @@ export const PREFILL = new Set(["buildSession", "buildSessionFrom"]);
 /** The same pre-fills without the option (the flag off): the old output as it was. */
 export const PREFILL_OFF: Record<string, string> = { buildSession: "buildSessionFlagOff", buildSessionFrom: "buildSessionFromFlagOff" };
 
-/** Keys of outputs only the new code has (see the module comment), dropped from the new side's answer of these calls. */
-const ADDED_KEYS = new Set(["zone2Activities"]);
-const ADDED_IN = new Set(["buildModel", "weeklyCheckin"]);
-const dropAdded = (v: unknown): unknown =>
-  Array.isArray(v)
-    ? v.map(dropAdded)
-    : v && typeof v === "object" && !(v instanceof Map) && !(v instanceof Set)
-      ? Object.fromEntries(
-          Object.entries(v)
-            .filter(([k]) => !ADDED_KEYS.has(k))
-            .map(([k, x]) => [k, dropAdded(x)]),
-        )
-      : v;
-
 /** The arguments of a new-side pre-fill call with the new Train's option. */
 function withCore(fn: string, args: unknown[]): unknown[] {
   return fn === "buildSession" ? [args[0], args[1], { core: true }] : [args[0], args[1], args[2], args[3] ?? null, { core: true }];
@@ -160,9 +142,15 @@ function ids(v: unknown, out = new Set<string>()): Set<string> {
 }
 
 /**
+ * Fields added to an output after the golden answers were computed, by later work with tests of its own (the weekly
+ * check-in's Zone 2 activities, SPEC §3.5): left out of the comparison — the old code has nothing to say of them.
+ */
+const LATER_FIELDS = new Set(["zone2Activities"]);
+
+/**
  * An output as plain data: Maps and Sets spelled out, `undefined` kept apart from absent, and the
  * ids an output made up (fresh `newId`s) renamed in order of appearance — ids it took from its
- * inputs stay as they are.
+ * inputs stay as they are. `LATER_FIELDS` are left out.
  */
 export function normalize(out: unknown, args: unknown[]): unknown {
   const known = ids(args);
@@ -177,7 +165,12 @@ export function normalize(out: unknown, args: unknown[]): unknown {
     if (v instanceof Map) return { $map: [...v].map(([k, x]) => [walk(k), walk(x)]) };
     if (v instanceof Set) return { $set: [...v].map((x) => walk(x)).sort() };
     if (Array.isArray(v)) return v.map((x) => walk(x));
-    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, k)]));
+    if (v && typeof v === "object")
+      return Object.fromEntries(
+        Object.entries(v)
+          .filter(([k]) => !LATER_FIELDS.has(k))
+          .map(([k, x]) => [k, walk(x, k)]),
+      );
     return v;
   };
   // Whether a structure edit handed back its input unchanged (the same object) is part of its contract.
@@ -215,7 +208,6 @@ export function run(fn: string, args: unknown[], side: "old" | "new"): unknown {
     return { threw: String(e) };
   }
   if (side === "old" && PREFILL.has(fn)) out = legacyCore(out, exercisesOf(fn, args));
-  if (side === "new" && ADDED_IN.has(fn)) out = dropAdded(out);
   return normalize(out, args);
 }
 
@@ -563,8 +555,7 @@ export function worldCases(seed: number, side: "old" | "new"): Array<{ name: str
     "all/buildModel",
     () => {
       const m = insights.buildModel(data, end);
-      const model = { checkin: m.checkin, insights: m.insights, targets: m.targets };
-      return side === "new" ? dropAdded(model) : model;
+      return { checkin: m.checkin, insights: m.insights, targets: m.targets };
     },
     [data],
   );
