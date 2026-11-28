@@ -13,7 +13,7 @@ weekly layout and targets are all user-editable data.
 ## 1. The athlete & the training
 
 - CrossFit metcon — 6 days/week
-- Zone 2 cycling — 30 min, 5 days/week
+- Zone 2 — 30 min, 5 days/week, on the bike or another machine (§3.5)
 - Steps — 15,000/day
 - Powerbuilding — 5 days/week (main compound lift → bodybuilding accessories → core couplet)
 - Nutrition — the current focus; macros + calories logged daily as totals (meals tracked elsewhere)
@@ -35,19 +35,22 @@ weekly layout and targets are all user-editable data.
 
 All fields are optional and can be edited at any time during the day (or later).
 
-| Area             | Fields                                                                                                                                          |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Morning check-in | body weight (lb), sleep score, HRV (ms), sleep duration, energy (1–5), soreness (1–5); optional resting HR (bpm) and VO2 max (mL/kg/min) (§3.3) |
-| Nutrition        | calories, protein, carbs, fat; optional micronutrients; "Also today": alcohol, nicotine, THC, caffeine (tracking only, §3.4)                    |
-| Steps            | daily count                                                                                                                                     |
-| Zone 2           | done + duration (default 30 min); optional machine kcal reading — a reading only, never part of intake or the TDEE (§3.5)                       |
-| Metcon           | done, optional notes, optional benchmark name (autocompleted from past ones) + score                                                            |
-| Lifting          | the session (see §6)                                                                                                                            |
-| Journal          | free-form text for the day                                                                                                                      |
+| Area             | Fields                                                                                                                                                                                             |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Morning check-in | body weight (lb), sleep score, HRV (ms), sleep duration, energy (1–5), soreness (1–5); optional resting HR (bpm) and VO2 max (mL/kg/min) (§3.3)                                                    |
+| Nutrition        | calories, protein, carbs, fat; optional micronutrients; "Also today": alcohol, nicotine, THC, caffeine (tracking only, §3.4)                                                                       |
+| Steps            | daily count                                                                                                                                                                                        |
+| Zone 2           | done + duration (default 30 min) + the machine (Bike, Row, Elliptical, Ski, or a name of the owner's own); optional machine kcal reading — a reading only, never part of intake or the TDEE (§3.5) |
+| Metcon           | done, optional notes, optional benchmark name (autocompleted from past ones) + score                                                                                                               |
+| Lifting          | the session (see §6)                                                                                                                                                                               |
+| Journal          | free-form text for the day                                                                                                                                                                         |
 
 - The **steps target**, **Zone 2's minutes and days** and the **metcon days** are part of the training plan (§6.4),
   edited on Program › Targets & days: each day is measured by those of the plan in force on it, so a new
   cycle with other targets never changes how an earlier day reads.
+- The day log also stores `metconSkipped` and `zone2Skipped` (default false): a metcon or Zone 2 marked "Not today" on
+  purpose. They are for the new Train (behind its `trainDay` flag, not yet launched); nothing writes them yet. They
+  don't close the checklist item, so streaks are unchanged.
 - The day ends at **midnight local time**.
 - Raw entries are the source of truth; **all derived numbers are recomputed** from them, so editing
   any past day ripples forward correctly.
@@ -179,19 +182,51 @@ tile.
   no flag is recorded.
 - Nothing reads them yet: no insight, checklist item or score.
 
-### 3.5 Zone 2 machine kcal
+### 3.5 Zone 2: machine and kcal
 
 - The Zone 2 editor takes the machine's calorie reading (`zone2Kcal`, whole kcal, 0–3000) beside the duration, captioned
   "Machine reading · not added to intake". Optional; out of range it is refused like the recovery readings (§3.3), the
   range said under the field ("0–3000 kcal").
 - It is **a reading only**: it is not the day's calories and is excluded from intake, the TDEE estimate (§4), energy
   balance, calorie and macro targets, the fuel bars (§3.1), adherence, the check-in's intake average and every insight.
-  Nothing but the Zone 2 row and the check-in's Zone 2 count reads it.
+  Nothing reads it but the Zone 2 row, the check-in's Zone 2 total and the machine's rules below (a reading is Zone 2
+  logged).
 - It doesn't close anything: the Zone 2 item is still done by "done" (the dot, or entering a duration), never by the
   reading alone.
-- The Zone 2 row's summary on Today adds it once logged ("Cycling · 320 kcal"); the weekly check-in (§4.6) adds the
-  week's total under the Zone 2 count ("940 kcal"), and the shared check-in text after it ("Zone 2 3/5 (940 kcal on the
-  machine)").
+- **The machine.** Zone 2 can be done on any machine. Under the duration and the reading the editor has one line,
+  "Machine · Rowing ▾": a native select offering Bike · Row · Elliptical · Ski · the owner's own names · Other….
+  The line is a 44 px target and truncates a long name; neither a name nor the options ever change its size. The
+  machine the day shows is always among the options.
+  - Stored as `zone2Machine` on the day: a key (`bike`, `row`, `elliptical`, `ski`) or the owner's own name (trimmed,
+    spaces collapsed, at most 40 characters — a longer one is cut). Any name of a common machine ("Rowing", "SkiErg")
+    is stored as its key. Read it through `src/shared/zone2.ts`.
+  - Summaries name the activity: Cycling, Rowing, Elliptical, Ski erg, or the owner's name.
+- **What a day shows** (`shownZone2Machine`): its own machine. Failing that, a day with Zone 2 logged and no machine
+  recorded shows the bike: it was logged before machines existed. Failing that, the last one used
+  (`zone2MachineFor`): the machine of the most recent earlier day with Zone 2 logged (done, a duration or a reading),
+  or the bike if there is none. A day with a machine chosen and no Zone 2 logged is skipped. Nothing is stored for any
+  of this.
+- **Writing it.**
+  - Choosing a machine writes it to the day at once, even with nothing else logged.
+  - "Other…" shows a name field under the line, the last thing in the editor, and changes nothing until a name is
+    given. An empty name writes nothing, and a name spelt like an offered one (by case, spacing or punctuation) is
+    that one. A name typed and not yet left is saved, once, if the app is hidden or the field goes away while it has
+    focus (as a number is, §3).
+  - A patch that writes the day's first Zone 2 value without a machine, when the day has none, gets the machine the
+    day shows (`fillZone2Machine`). The device does this as it saves, and the server does it for any writer that
+    didn't (an older build, another screen). So a day with Zone 2 and no machine is only ever one logged before
+    machines; it reads as the bike and is never filled in later.
+- **The owner's names** offered (`zone2Machines`) are those used on days with Zone 2 logged within 180 days of the day
+  shown, even once. Spellings are folded by case, spacing and punctuation, and the most recent spelling is kept. They
+  are ranked by days used, then by most recent.
+- **A machine alone is not Zone 2.** It doesn't tick the Zone 2 item, close a day, keep a streak, earn an achievement
+  or count in the check-in, and it isn't Zone 2 logged for the rules above.
+- **The Zone 2 row** on Today names the activity, with the reading once logged: "Rowing · 320 kcal". Only the name
+  truncates; the reading always shows.
+- **The weekly check-in** (§4.6) adds the week's total reading under the Zone 2 count ("940 kcal"). Its shared text
+  names the week's activities after the count, each once, most days first, then most recent, over the same days as
+  the count's "done", then that total: "Zone 2 3/5 (Rowing, Cycling · 940 kcal on the machines)" — "on the machine"
+  when one machine or none is named. Days with no machine recorded name nothing.
 
 ## 4. Energy engine (TDEE)
 
@@ -813,6 +848,22 @@ accessory increment, rest timers — are one global set, not part of a plan.
   duration …", "Short on distance …"). A performance logged without any load (while the exercise was unweighted) is
   passed over for the one before it; one where only some sets had a load gives no hint. Unweighted exercises get no hint.
 - Rest timer (targets editable: **180 s** after main-lift sets, **90 s** after accessories); plate calculator.
+- **Stored** in the session document: each block has a `kind` — `primary` (the main lift), `accessory` or `rehab`
+  (§6.8).
+  - An accessory block's optional `section` is `"accessories"` or `"core"` (Strength's Accessories or Core). Absent =
+    Accessories, as every session saved before Core existed; `"accessories"` is written when a block is moved out of
+    Core, so pre-fill's rule for sessions from before Core (a block of core-category exercises only goes to Core) never
+    files it there again. A rehab block carries `rehab`, the id of the rehab block it was logged for.
+  - Pre-fill and moves between sections store blocks in page order — main lift, Accessories, Core, rehab — but readers
+    group them by kind and section (a stable sort), so a document in another order (one an older build reordered, an
+    exercise added at the end) still reads right.
+  - The 30-block limit includes rehab blocks. The server refuses an unknown kind or section with a 400.
+  - Core and rehab come with the new Train (§3). Without it Core reads as plain accessories (stored order, superset
+    letters, moves), and pre-fill neither files blocks under Core nor writes `section`.
+  - Train's and Today's lift counts, Finish, Reset to plan and "Do this session today" are strength-only (main lift,
+    Accessories, Core: `strengthCounts`, `isStrengthStarted`); rehab blocks are kept through Reset to plan, "Back to
+    today's plan" and "Do this session today". A document of notes only (no block, not finished, not moved, not an
+    extra session) holds no Strength.
 
 ### 6.6 Program screen
 
@@ -885,6 +936,21 @@ back only its own fields; focus then returns to the control that was undone.
 Program, Settings, Goals and Progress share one header (`ScreenHeader`): an eyebrow row (with the back control where
 there is one), the title in the same size and at the same height as Today's and Train's, an optional tagline.
 
+### 6.8 Rehab blocks
+
+A rehab block is a protocol on its own timeline ("Knee rehab · 6 weeks · Mon/Wed/Fri"), independent of the strength
+plans (§6.4): a pause, a new cycle or a moved start never moves it. What it does — its part of a training day, its
+draft, its place on Program — is coming with the new Train (§3); until then nothing shows or writes one, and only its
+storage is settled:
+
+- **Stored** in the settings document as `settings.rehab.programs` (at most 100, ordered by start). Each has an `id`, a
+  `name`, a `start` (any weekday), `weeks` (1–52), `days` (seven flags, index 0 = Sun, as the plans' schedules),
+  `carry` (`last` | `weekday`: which earlier session a day's rehab starts from) and an optional `end` (its last day,
+  inclusive: ended early). Absent = no rehab blocks: settings stored before it existed validate as they are.
+- A block is **in force** on d when start ≤ d ≤ min(start + 7·weeks − 1, end), and planned on d when it is in force and
+  `days` has d's weekday. A session's rehab blocks name the rehab block they were logged for (`rehab`, §6.5).
+- Read and edit them only through `src/shared/rehab.ts`, never the fields.
+
 ## 7. Gamification & feedback
 
 - **Close the day**: today's checklist (morning check-in — done by the weigh-in alone — nutrition, steps target,
@@ -955,6 +1021,9 @@ there is one), the title in the same size and at the same height as Today's and 
   it — exactly, whatever else is writing at the same time — so a device whose copy was current stays current after its
   own edits (the next revalidation is a 304), and one that missed another write never mistakes it for current. After
   onboarding the app asks the browser for persistent storage so the offline copy isn't evicted.
+- Day-log edits are patches of the fields they change (the Zone 2 machine and the Not today flags too, §3, §3.5):
+  queued offline they merge field by field, and the server sets only the fields a patch names, so another device's edit
+  of another field of the day survives.
 - Exercise creates and the `weighted` flag (§6.5), with windows of different app versions sharing one queue: a weighted
   create is sent without the flag (absent = weighted, as servers before it accept), and the flag doesn't count toward a
   create's idempotency check, so one sent by an older window (which drops it) and retried by a newer one replays. When
@@ -963,11 +1032,16 @@ there is one), the title in the same size and at the same height as Today's and 
   sets only the fields a patch names, so another device's edit of a different field survives. A patch the exercise
   locks refuse (§6.5: a program day's main lift, a lift with a strength target) is answered 409 with the reason and no
   document — not a version conflict, so it isn't merged or re-sent: it shows as a change not saved (Retry / Discard)
-  with that reason. A measure change sends no workout: sessions follow it when read (§6.5). Exports are version 5
-  (v3: exercises carry `weighted`; v4: days carry resting HR, VO2 max and the four "Also today" flags; v5: days carry
-  the Zone 2 machine kcal); older ones restore every exercise as weighted and those day fields as null (not recorded).
-  Migration 0006 turned the flag off once for existing exercises with no sign of a load (not main lifts or max-tracked,
-  no max entry, strength target, program day or logged/planned load).
+  with that reason. A measure change sends no workout: sessions follow it when read (§6.5). Migration 0006 turned the
+  flag off once for existing exercises with no sign of a load (not main lifts or max-tracked, no max entry, strength
+  target, program day or logged/planned load).
+- **Exports are version 6** (v3: exercises carry `weighted`; v4: days carry resting HR, VO2 max and the four "Also
+  today" flags; v5: days carry the Zone 2 machine kcal; v6: days carry `zone2Machine`, `zone2Skipped` and
+  `metconSkipped`, and sessions and settings may hold Core, rehab blocks and `settings.rehab`). Older ones restore every
+  exercise as weighted, the day fields they lack as null (not recorded) and the two Not today flags as false; a
+  restore refuses a version newer than its own. Migration 0009 adds the v6 day fields as columns (`zone2_machine`
+  varchar(40), null; the two flags boolean, not null, default false). Rolling back is in the README: past 0009 it is
+  safe, but from the release that writes rehab on it is roll forward only.
 - Edits the server would reject (limits a person can hit: too many sets, an overlong note…) are refused before they are
   queued; Settings → Sync lists the last 20 with why, until cleared. That includes text with a broken character — half
   of an emoji or of any other character beyond U+FFFF (ill-formed UTF-16, as left by cutting text mid-character). The
@@ -988,10 +1062,10 @@ there is one), the title in the same size and at the same height as Today's and 
   carries the revision it was made on; when another device saved the document since, the server answers 409 with its
   copy and the edit is merged onto it and sent once more ("Merged changes from another device"):
   - workouts merge per set (by id; two sessions built separately on two devices are paired up main lift to main lift
-    of the same lift, accessory blocks by their exercises, sets in order): a set logged or edited on this device wins —
-    except that a set logged on either device beats an edit of the same unlogged set's targets on the other; sets and blocks only the
-    other device has are kept; something one device removed stays removed unless the other changed it; the workout's
-    own fields (notes, finish, skip) merge like settings;
+    of the same lift, other blocks by their kind, rehab block and exercises, sets in order): a set logged or edited on
+    this device wins — except that a set logged on either device beats an edit of the same unlogged set's targets on
+    the other; sets and blocks only the other device has are kept; something one device removed stays removed unless
+    the other changed it; the workout's own fields (notes, finish, skip) merge like settings;
   - sets in two measures are never mixed: when the two copies of an exercise disagree on its measure, the copy holding
     logged sets decides (its measure and sets; the other's are unlogged targets meant for another measure); with nothing
     logged on either, the measure this device changed (else the server's) with that copy's sets; with logged sets on
@@ -999,9 +1073,14 @@ there is one), the title in the same size and at the same height as Today's and 
     entry of the exercise in their own measure right after it — never mixed in or dropped;
   - exercises are matched by the sets they hold (not their position), so splitting or joining a superset — or moving an
     exercise into another one — on one device while the other logs never duplicates an exercise or a set; a set added
-    on both devices keeps both. An exercise that had no sets is matched by its lift across the whole workout (the same
-    block first, then anywhere, in order), so one moved, split out or skipped on one device while the other skips it,
-    adds and logs a set on it, or moves it elsewhere is still one exercise; the same lift twice on purpose stays twice;
+    on both devices keeps both. An exercise that had no sets is matched by its lift across its part of the workout —
+    strength (main lift, Accessories, Core) or rehab (the same block first, then anywhere in that part, in order) — so
+    one moved, split out or skipped on one device while the other skips it, adds and logs a set on it, or moves it
+    elsewhere is still one exercise; the same lift twice on purpose stays twice, and so does a lift in strength and in
+    rehab;
+  - a rehab block never pairs with a strength block, even holding the same exercises. Core or Accessories is not part
+    of the pairing — an older build pre-fills the core couplet without `section`, the new Train with it, and the two
+    copies of the day pair up — and `section` merges as a field of the block;
   - order (a superset's members, the workout's blocks) follows the device that reordered: this device's order when it
     changed it, else the server's — so a reorder on one device and logging on the other both survive. Something only one
     device added goes after what precedes it there — or, when it was last there, stays last;
@@ -1021,10 +1100,11 @@ there is one), the title in the same size and at the same height as Today's and 
     is never dropped;
   - a merged workout is brought within the server's limits (30 sets, 6 per superset, 30 blocks): unlogged sets past 30
     are dropped; a superset over 6 (e.g. each device moved an exercise into a superset of 5) keeps 6 — those with logged
-    sets first, then in order — and the rest move, with their sets, into a block of their own right after it; past 30
-    blocks, blocks with nothing logged are dropped from the end, those overflow blocks first. Whatever unlogged work is
-    dropped is named in the merge toast ("…; 2 unlogged exercises were left out (a workout holds at most 30 blocks)");
-    if logged work alone is over a limit, the edit is marked "not saved" with the reason;
+    sets first, then in order — and the rest move, with their sets, into a block of their own right after it (of the
+    superset's kind, section and rehab block); past 30 blocks, blocks with nothing logged are dropped from the end,
+    those overflow blocks first. Whatever unlogged work is dropped is named in the merge toast ("…; 2 unlogged
+    exercises were left out (a workout holds at most 30 blocks)"); if logged work alone is over a limit, the edit is
+    marked "not saved" with the reason;
   - the main-lift block holds the main lift alone: one holding more (an older build, a merge, an import) keeps its
     first exercise and the others move, with their sets, into an accessory block right after it — in every merge and
     on the server when a workout is saved or restored, so it is never stored (a save that leaves no room for that block
@@ -1032,6 +1112,14 @@ there is one), the title in the same size and at the same height as Today's and 
   - settings merge field by field: the fields this device changed, the server's for everything else; strength targets
     merge by id, the weekday schedules and program weeks element by element; for other lists both devices changed, this
     device's wins and the toast names it;
+  - rehab blocks (§6.8) merge by id, and their days day by day; a document without them counts as having none, so
+    blocks started on two devices both survive. The merged list is ordered by start. Two blocks newly in force on the
+    same day (each device started one) are both kept — nothing logged for either is orphaned — and the merge reports a
+    **rehab blocks** conflict; afterwards an edit of either is refused only when it adds shared days;
+  - an older build (from before Core and rehab) keeps rehab blocks, `section` (when it copies a block whole) and
+    `settings.rehab`. A block it rebuilds loses `section` and reads as Accessories, with no set lost. Known gap, to be
+    closed before any build writes rehab: when two copies were built without a common ancestor, an older build's merge
+    can pair a rehab block with an accessory block of the same exercises and save them as one;
   - edits made while a conflicting save was in flight are re-merged onto the merged copy (never sent over it); every 409
     teaches the device the server's current copy and revision;
   - a save that went out and was never answered (the connection dropped, the request timed out, the app was closed
