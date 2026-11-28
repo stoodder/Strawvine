@@ -818,6 +818,111 @@ describe("outdated builds and rehab (SPEC §8)", () => {
   });
 });
 
+describe("outdated builds and rehab: a workout created concurrently (SPEC §8)", () => {
+  let ck = "";
+  beforeAll(async () => {
+    ck = await login();
+  });
+  const old = (path: string, init: RequestInit) =>
+    gateApp.request(path, {
+      ...init,
+      headers: { "content-type": "application/json", cookie: ck, ...(init.headers as Record<string, string>) },
+    });
+  const doc = (date: string, rehab: boolean): Session => ({
+    date,
+    label: "Push",
+    cycle: null,
+    week: null,
+    deload: false,
+    primaryMaxLb: null,
+    blocks: [
+      { id: "a", kind: "accessory", exercises: [{ exerciseId: 1, measure: "reps", sets: [blankSet({ id: "s1", targetReps: 5 })] }] },
+      ...(rehab
+        ? [
+            {
+              id: "rh",
+              kind: "rehab" as const,
+              rehab: "knee",
+              exercises: [
+                { exerciseId: 1, measure: "reps" as const, sets: [blankSet({ id: "r1", targetReps: 15, done: true, reps: 15 })] },
+              ],
+            },
+          ]
+        : []),
+    ],
+    notes: "",
+    completedAt: null,
+  });
+  /**
+   * A current device's save of `date` (with a rehab block), committed only after `ms` (in flight while the old build's
+   * write runs). `holdWrites`: it also holds back every other write to the table until then (a SHARE lock, which a
+   * `select … for update` passes), so the old build's check runs before the commit and its write after it.
+   */
+  const concurrentSave = (date: string, ms: number, { holdWrites = false, rehab = true } = {}) =>
+    client.begin(async (tx) => {
+      await tx`insert into sessions (date, data) values (${date}, ${JSON.stringify(doc(date, rehab))}::jsonb)`;
+      if (holdWrites) await tx`lock table sessions in share mode`;
+      await new Promise((r) => setTimeout(r, ms));
+    });
+
+  for (const [name, headers] of [
+    ["If-None-Match: * (a first save)", { "if-none-match": "*" }],
+    ["no precondition (an entry from a build before revisions)", {}],
+  ] as const)
+    it(`never hands the old build a rehab workout to merge, nor overwrites one — ${name}`, async () => {
+      const date = name.startsWith("If") ? "2027-01-05" : "2027-01-06";
+      const committing = concurrentSave(date, 300);
+      await new Promise((r) => setTimeout(r, 50)); // the current device's insert is in, not committed
+      const res = await old(`/api/sessions/${date}`, { method: "PUT", body: JSON.stringify(doc(date, false)), headers });
+      await committing;
+      const body = await res.json();
+      const [row] = await db.execute<{ data: Session }>(sql`select data from sessions where date = ${date}`);
+      // Refused as outdated, the rehab block on the server untouched.
+      expect(
+        row!.data.blocks.some((b) => b.kind === "rehab"),
+        "rehab block kept on the server",
+      ).toBe(true);
+      expect({
+        status: res.status,
+        code: body.code,
+        handedRehab: !!body.current?.blocks?.some((b: { kind: string }) => b.kind === "rehab"),
+      }).toEqual({
+        status: 409,
+        code: "upgrade-required",
+        handedRehab: false,
+      });
+    });
+
+  for (const [name, headers] of [
+    ["If-Match (a delete with its base)", { "if-match": '"1"' }],
+    ["no precondition", {}],
+  ] as const)
+    it(`never deletes a rehab workout created after its check — ${name}`, async () => {
+      const date = name.startsWith("If") ? "2027-01-07" : "2027-01-08";
+      const committing = concurrentSave(date, 300, { holdWrites: true });
+      await new Promise((r) => setTimeout(r, 50));
+      const res = await old(`/api/sessions/${date}`, { method: "DELETE", headers });
+      await committing;
+      const body = await res.json();
+      const [row] = await db.execute<{ data: Session }>(sql`select data from sessions where date = ${date}`);
+      expect(
+        row?.data.blocks.some((b) => b.kind === "rehab"),
+        "rehab workout kept on the server",
+      ).toBe(true);
+      expect({ status: res.status, code: body.code }).toEqual({ status: 409, code: "upgrade-required" });
+    });
+
+  it("deletes as before when what was created meanwhile holds no rehab", async () => {
+    const date = "2027-01-09";
+    const committing = concurrentSave(date, 300, { holdWrites: true, rehab: false });
+    await new Promise((r) => setTimeout(r, 50));
+    const res = await old(`/api/sessions/${date}`, { method: "DELETE" });
+    await committing;
+    expect(res.status).toBe(200);
+    expect(await db.execute(sql`select 1 from sessions where date = ${date}`)).toHaveLength(0);
+  });
+});
+
 describe("idempotent creates", () => {
   const withKey = (key: string, body: unknown) => ({ ...json("POST", body), headers: { "idempotency-key": key } });
   const count = async (table: "exercises" | "max_entries") =>

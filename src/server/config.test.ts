@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -96,5 +97,17 @@ describe("environment helpers", () => {
     // Not 0 (builds that send no level would pass), not above this build (its own app would be refused), whole only.
     for (const bad of ["0", String(BUILD_LEVEL + 1), "-1", "1.5", "one", "1e3"])
       expect(() => loadConfig({ ...env, MIN_REHAB_BUILD_LEVEL: bad }), bad).toThrow(/Refusing to start:[\s\S]*MIN_REHAB_BUILD_LEVEL/);
+  });
+
+  it("the release phase (migrate.ts) refuses a bad MIN_REHAB_BUILD_LEVEL before touching the database", () => {
+    // An address nothing listens on: reaching the database would fail with another message.
+    const env = { ...process.env, DATABASE_URL: "postgres://nobody@127.0.0.1:1/none", MIN_REHAB_BUILD_LEVEL: String(BUILD_LEVEL + 1) };
+    const run = spawnSync(process.execPath, ["--import", "tsx", path.resolve(import.meta.dirname, "migrate.ts")], {
+      env,
+      encoding: "utf8",
+    });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toMatch(/Refusing to release:[\s\S]*MIN_REHAB_BUILD_LEVEL/);
+    expect(run.stderr).not.toMatch(/Migration failed/);
   });
 });

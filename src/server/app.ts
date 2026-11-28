@@ -836,6 +836,12 @@ export function createApp(opts: AppOptions) {
       .where(eq(sessions.date, date));
     return lock ? q.for("update") : q;
   };
+  /**
+   * The stored workout holds no rehab block (`sessionHoldsRehab` in SQL): an outdated build's write matches only
+   * such a row, so one created by another save after its check (`for update` locks nothing when there was no row) is
+   * never overwritten or deleted by it.
+   */
+  const noRehab = sql`not (${sessions.data} @> '{"blocks":[{"kind":"rehab"}]}'::jsonb)`;
 
   api.put("/sessions/:date", async (c) => {
     const parsed = sessionSchema.safeParse(await c.req.json().catch(() => null));
@@ -855,11 +861,18 @@ export function createApp(opts: AppOptions) {
       if (belowRehab(c) && (sessionHoldsRehab(doc) || sessionHoldsRehab((await currentSessionDoc(tx, doc.date, true))[0]?.data)))
         return { outdated: true };
       if (!pre) {
+        // Unchecked (an entry from a build before revisions); from an outdated build, never over a row created since
+        // the check that holds rehab (`noRehab`): no row back, refused.
         const [row] = await tx
           .insert(sessions)
           .values({ date: doc.date, data: doc })
-          .onConflictDoUpdate({ target: sessions.date, set: { data: doc, updatedAt: new Date() } })
+          .onConflictDoUpdate({
+            target: sessions.date,
+            set: { data: doc, updatedAt: new Date() },
+            ...(belowRehab(c) ? { setWhere: noRehab } : {}),
+          })
           .returning({ rev: xmin(sessions) });
+        if (!row && belowRehab(c)) return { outdated: true };
         return { rev: row?.rev ?? null };
       }
       for (let attempt = 0; ; attempt++) {
@@ -884,6 +897,7 @@ export function createApp(opts: AppOptions) {
           .returning({ rev: xmin(sessions) });
         if (row) return { rev: row.rev };
         const [created] = await currentSessionDoc(tx, doc.date, false);
+        if (created && belowRehab(c) && sessionHoldsRehab(created.data)) return { outdated: true };
         if (created) return { conflict: created };
         if (attempt >= 2) throw new Error("session row kept changing"); // created and deleted again, three times over
       }
@@ -907,8 +921,14 @@ export function createApp(opts: AppOptions) {
         if (cur && belowRehab(c) && sessionHoldsRehab(cur.data)) return "outdated" as const;
         if (pre && cur && conflicts(pre, cur.rev)) return cur;
       }
-      await tx.delete(sessions).where(eq(sessions.date, date.data));
-      return null;
+      if (!belowRehab(c)) {
+        await tx.delete(sessions).where(eq(sessions.date, date.data));
+        return null;
+      }
+      // One holding rehab created meanwhile is not deleted, and refused like one found above.
+      await tx.delete(sessions).where(and(eq(sessions.date, date.data), noRehab));
+      const [created] = await currentSessionDoc(tx, date.data, false);
+      return created && sessionHoldsRehab(created.data) ? ("outdated" as const) : null;
     });
     if (conflict === "outdated") return outdated(c);
     if (conflict) return c.json({ error: "conflict", current: conflict.data, rev: conflict.rev }, 409);
