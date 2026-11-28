@@ -6,18 +6,18 @@
  */
 import { useEffect, useRef } from "react";
 import type { Session } from "../../../shared/schemas";
-import { savedAfterEdit, sessionCounts } from "../../../shared/session";
+import { savedAfterEdit, strengthCounts } from "../../../shared/session";
 import { cachedSession, useDeleteSession, useSaveSession } from "../../lib/store";
 import { useToast } from "../Toast";
 import { mapBlock, mapExercise, type ExRef } from "./sessionEdit";
 
 /**
- * A finished session stays consistent with its sets: once nothing is logged in it any more (an
- * Undo or unlog after Finish), it's open again — unless the main lift was skipped, which may
- * finish with nothing logged.
+ * A finished session stays consistent with its sets: once no strength set is logged in it any
+ * more (an Undo or unlog after Finish; rehab sets don't finish strength), it's open again — unless
+ * the main lift was skipped, which may finish with nothing logged.
  */
 export const settled = (s: Session): Session =>
-  s.completedAt && sessionCounts(s).done === 0 && !s.blocks.some((b) => b.kind === "primary" && b.skipped)
+  s.completedAt && strengthCounts(s).done === 0 && !s.blocks.some((b) => b.kind === "primary" && b.skipped)
     ? { ...s, completedAt: null }
     : s;
 

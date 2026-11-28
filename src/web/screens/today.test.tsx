@@ -13,7 +13,7 @@ import { emptyDayLog } from "../../shared/empty";
 import { streaks, type AppData } from "../../shared/gamify";
 import { buildModel } from "../../shared/insights";
 import { cycleLabel, type CyclePosition } from "../../shared/program";
-import type { DayLog } from "../../shared/schemas";
+import type { DayLog, Session, SetEntry } from "../../shared/schemas";
 import { cycleParts, TodayScreen } from "./Today";
 
 const TODAY = "2026-11-03";
@@ -553,5 +553,42 @@ describe("cycleParts: the short label, and the tail of the full one", () => {
   it("has no tail when the full label is already the short one", () => {
     // A week past the cycle's length is just "Week 7".
     expect(cycleParts(pos(1, 6), 5)).toEqual({ short: "Week 7", rest: "" });
+  });
+});
+
+describe("Today's Lift row", () => {
+  it("counts strength only: rehab sets (saved by a device with the training day) are no part of the lift", () => {
+    const set = (id: string, done: boolean): SetEntry => ({
+      id,
+      targetReps: 5,
+      targetWeight: 100,
+      reps: done ? 5 : null,
+      weight: done ? 100 : null,
+      done,
+      amrap: false,
+      appliedProgressionLb: null,
+    });
+    const session: Session = {
+      date: TODAY,
+      label: "Pull",
+      cycle: 1,
+      week: 1,
+      deload: false,
+      primaryMaxLb: 300,
+      notes: "",
+      completedAt: null,
+      blocks: [
+        { id: "p", kind: "primary", exercises: [{ exerciseId: 2, measure: "reps", sets: [set("p1", true), set("p2", false)] }] },
+        {
+          id: "r",
+          kind: "rehab",
+          rehab: "knee",
+          exercises: [{ exerciseId: 2, measure: "reps", sets: [set("r1", true), set("r2", true)] }],
+        },
+      ],
+    };
+    const { container } = renderDay({ ...history(), sessions: [session] });
+    expect(container.textContent).toMatch(/1\/2\s*sets/);
+    expect(container.textContent).not.toMatch(/3\/4/);
   });
 });

@@ -168,9 +168,12 @@ export interface OrderedSet {
   set: SetEntry;
 }
 
-/** Every set the screen shows as loggable, in page order (skipped exercises and a skipped main lift left out). */
+/**
+ * Every set the screen shows as loggable, in page order: the main lift, then the accessory blocks
+ * (skipped exercises and a skipped main lift left out; rehab, which Train doesn't show yet, too).
+ */
 export function setsInPageOrder(session: Session): OrderedSet[] {
-  const blocks = [...session.blocks.filter((b) => b.kind === "primary"), ...session.blocks.filter((b) => b.kind !== "primary")];
+  const blocks = [...session.blocks.filter((b) => b.kind === "primary"), ...session.blocks.filter((b) => b.kind === "accessory")];
   const out: OrderedSet[] = [];
   for (const block of blocks) {
     if (block.skipped) continue;

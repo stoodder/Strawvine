@@ -10,7 +10,7 @@ import { isOnHold, overTarget, PROTEIN_OVER_TARGET_SCALE, remainingKcal, type Ov
 import { cycleLabel, cyclePosition, planTargets, programDayFor, type CyclePosition } from "../../shared/program";
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
-import { buildSession, nextSession, sessionCounts, sessionDoneEarly } from "../../shared/session";
+import { buildSession, nextSession, sessionDoneEarly, strengthCounts } from "../../shared/session";
 import { zone2MachineFor, zone2Machines as zone2MachineChips } from "../../shared/zone2";
 import { Bar, Section, severityClass, severityColor, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
@@ -23,6 +23,7 @@ import { NextSession } from "../components/today/NextSession";
 import { PendingSyncChip } from "../components/today/PendingSyncChip";
 import { SavedTick, useSavedFlash } from "../components/today/saved";
 import { Signals } from "../components/today/Signals";
+import { feature } from "../lib/features";
 import { fmt, signed } from "../lib/format";
 import { success } from "../lib/haptics";
 import { useData, usePendingDates, useSaveDay } from "../lib/store";
@@ -84,13 +85,13 @@ export function TodayScreen() {
   const dayTargets = planTargets(data.settings, date);
   // This day's plan, moved to (and maybe done on) another day ("Do this session today").
   const doneEarly = session ? null : sessionDoneEarly(date, data.sessions);
-  const draft = programDay && !session && !doneEarly ? buildSession(date, data) : null;
+  const draft = programDay && !session && !doneEarly ? buildSession(date, data, { core: feature("trainDay") }) : null;
   const sess = session ?? doneEarly ?? draft;
   const primaryBlock = sess?.blocks.find((b) => b.kind === "primary");
   const primaryEx = primaryBlock?.exercises[0];
   const primaryName = primaryEx ? data.exercises.find((e) => e.id === primaryEx.exerciseId)?.name : null;
-  // Same count as Train's header: skipped exercises don't count.
-  const { done: setsDone, total: setsTotal } = sess ? sessionCounts(sess) : { done: 0, total: 0 };
+  // Same count as Train's header: skipped exercises don't count, nor rehab (the Lift row is strength).
+  const { done: setsDone, total: setsTotal } = sess ? strengthCounts(sess) : { done: 0, total: 0 };
   // Only on today: what's coming up next on the program (links to its preview on Train).
   const upcoming = useMemo(() => (isToday ? nextSession(today, data) : null), [isToday, today, data]);
   // The Zone 2 machine a day starts on (the last one used) and the chips: from the other days, never stored.

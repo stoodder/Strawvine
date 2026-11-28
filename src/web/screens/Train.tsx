@@ -15,6 +15,7 @@ import {
   effectiveSession,
   effectiveTargetWeight,
   isSessionStarted,
+  isStrengthStarted,
   isWeighted,
   logAtTargets,
   mainLiftAdded,
@@ -23,11 +24,12 @@ import {
   newId,
   nextSetAfter,
   planChanged,
-  sessionCounts,
+  resetStrength,
   sessionDoneEarly,
-  sessionVolume,
   setsForAddedExercise,
   shownLoad,
+  strengthCounts,
+  strengthVolume,
   templateSource,
 } from "../../shared/session";
 import {
@@ -96,6 +98,7 @@ import { useHeldWhile, useTyping } from "../components/useHeldWhileTyping";
 import { JournalText } from "../components/TextArea";
 import { fmt } from "../lib/format";
 import { success, tick } from "../lib/haptics";
+import { feature } from "../lib/features";
 import { currentData } from "../lib/sync";
 import {
   cachedSession,
@@ -155,11 +158,16 @@ export function TrainScreen() {
   const programDay = programDayFor(program, date);
   const weekday = weekdayName(date);
 
+  /**
+   * How pre-fill files the accessories: into Strength's subsections (Core) only with the new
+   * training day (flag `trainDay`); without it exactly as before subsections existed.
+   */
+  const core = feature("trainDay");
   /** Today's plan as the program + history would build it right now. */
   const fresh = useMemo(
-    () => buildSession(date, data),
+    () => buildSession(date, data, { core }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [date, data.settings, data.maxEntries, data.exercises, data.sessions],
+    [date, core, data.settings, data.maxEntries, data.exercises, data.sessions],
   );
   /**
    * An unsaved day is shown as a live draft: it follows plan changes until the first real edit
@@ -360,7 +368,7 @@ export function TrainScreen() {
    */
   const plannedFor = session.plannedFor ?? null;
   const planFresh = useMemo(
-    () => (plannedFor ? buildSessionFrom(plannedFor, date, data) : fresh),
+    () => (plannedFor ? buildSessionFrom(plannedFor, date, data, null, { core }) : fresh),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [plannedFor, fresh],
   );
@@ -632,17 +640,18 @@ export function TrainScreen() {
 
   // --- Do this session today ----------------------------------------------------------------
   const todaySaved = data.sessions.find((s) => s.date === today) ?? null;
-  /** Today already holds logged work (or is finished): a previewed day can't replace it. */
-  const todayBusy = !!todaySaved && (isSessionStarted(todaySaved) || !!todaySaved.completedAt);
+  /** Today already holds logged strength (or is finished): a previewed day can't replace it. Rehab it holds stays through a Replace. */
+  const todayBusy = !!todaySaved && (isStrengthStarted(todaySaved) || !!todaySaved.completedAt);
 
   /**
    * Save the previewed day's plan under today (travel, a moved rest day) and go there. Notes
-   * already written on today's session come along (nothing is logged in it: it isn't busy).
+   * already written on today's session come along (no strength is logged in it: it isn't busy),
+   * and so do its rehab blocks (`keep`).
    */
   const doThisToday = () => {
     if (!isPreview || todayBusy) return;
     const before = todaySaved;
-    const moved = buildSessionFrom(date, today, data);
+    const moved = buildSessionFrom(date, today, data, todaySaved, { core });
     saveSession(before?.notes ? { ...moved, notes: before.notes } : moved);
     tick();
     navigate("/train");
@@ -654,13 +663,21 @@ export function TrainScreen() {
     focusWhenReady(() => document.querySelector<HTMLElement>("[data-train-title]"));
   };
 
-  /** A moved session nothing has been logged in yet can go back to this date's own plan. */
-  const canRevert = !!saved && !!plannedFor && !isPreview && !isSessionStarted(session) && !session.completedAt;
+  /** A moved session no strength has been logged in yet can go back to this date's own plan. */
+  const canRevert = !!saved && !!plannedFor && !isPreview && !isStrengthStarted(session) && !session.completedAt;
   /** Drop a moved session: today shows its own plan again (Undo restores the moved one). */
   const revertToTodaysPlan = () => {
     const before = stored;
-    // Notes written on the moved session (or carried into it by "Replace") stay with the day.
-    if (session.notes) saveSession({ ...fresh, label: programDay ? fresh.label : "Extra session", notes: session.notes });
+    // Notes written on the moved session (or carried into it by "Replace") stay with the day, and
+    // so do its rehab blocks (this page doesn't show them; it moves strength only).
+    const rehab = stored.blocks.filter((b) => b.kind === "rehab");
+    if (session.notes || rehab.length)
+      saveSession({
+        ...fresh,
+        label: programDay ? fresh.label : "Extra session",
+        notes: session.notes,
+        blocks: [...fresh.blocks, ...rehab],
+      });
     else deleteSession(date);
     offerUndo("Back to today's plan", () => saveSession(before));
     focusWhenReady(() => document.querySelector<HTMLElement>("[data-train-title]"));
@@ -687,6 +704,9 @@ export function TrainScreen() {
   };
 
   // --- Superset & workout structure (src/shared/sessionStructure) ---------------------------
+  // This page shows no subsections: Core is read as accessories — listed, lettered and moved
+  // among them in stored order (sessionStructure's default), whatever the flag, as an older build
+  // reads a document holding Core. `section` itself is kept by every edit.
   const letters = supersetLetters(session);
   const accessories = accessoryBlocks(session);
   /**
@@ -952,9 +972,11 @@ export function TrainScreen() {
   const amrapFound = findSet(session, amrap);
   const actionsBlock = actions ? session.blocks.find((b) => b.id === actions.blockId) : undefined;
   const actionsEx = actions ? actionsBlock?.exercises[actions.exIdx] : undefined;
-  const volume = sessionVolume(session);
-  // Exercises skipped today count toward nothing (the same counts Today shows).
-  const { done: doneSets, total: totalSets } = sessionCounts(session);
+  // What this page's strength moved (rehab, not shown here, apart; lifetime volume sums every block).
+  const volume = strengthVolume(session);
+  // Exercises skipped today count toward nothing (the same counts Today shows); rehab, which this
+  // page doesn't show, counts toward nothing either: Finish is about strength (SPEC §6.7).
+  const { done: doneSets, total: totalSets } = strengthCounts(session);
   const blocksFull = session.blocks.length >= MAX_BLOCKS;
   /** A previewed day with planned work can be done today instead (not once today holds logged work). */
   const canMove = isPreview && !earlyDone && !todayBusy && totalSets > 0 && todaySaved?.plannedFor !== date;
@@ -967,7 +989,7 @@ export function TrainScreen() {
     setRestDate(date);
     setLastLogged(null);
   }
-  const nextUp = isPreview || session.completedAt || (!lastLogged && !isSessionStarted(session)) ? null : nextOpenSet(session, lastLogged);
+  const nextUp = isPreview || session.completedAt || (!lastLogged && !isStrengthStarted(session)) ? null : nextOpenSet(session, lastLogged);
   const nextIsBarbell =
     !!nextUp && nextUp.ex.measure === "reps" && (nextUp.block.kind === "primary" || exById(nextUp.ex.exerciseId)?.category === "primary");
   // An unweighted exercise's next set has no load to show, whatever target it still holds.
@@ -1205,13 +1227,18 @@ export function TrainScreen() {
                   }}
                   onReopen={() => commit({ ...session, completedAt: null })}
                 />
-                {saved && !plannedFor && !isSessionStarted(session) && !session.completedAt && (
+                {saved && !plannedFor && !isStrengthStarted(session) && !session.completedAt && (
                   <button
                     type="button"
                     className="label min-h-11 px-3 text-mute"
                     onClick={() => {
                       const before = stored;
-                      deleteSession(date);
+                      // Strength only: rehab blocks this page doesn't show stay (with the notes);
+                      // a session without any is deleted, as before.
+                      const rehab = stored.blocks.filter((b) => b.kind === "rehab");
+                      const kept = !rehab.length ? null : earlyDone ? { ...stored, blocks: rehab } : resetStrength(stored, data, { core });
+                      if (kept) saveSession(kept);
+                      else deleteSession(date);
                       offerUndo(earlyDone ? "Session discarded" : "Reset to plan", () => saveSession(before));
                     }}
                   >

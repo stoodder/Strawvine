@@ -114,7 +114,9 @@ const planned = (date = TODAY): Session => ({
     {
       id: "pull",
       kind: "accessory",
-      exercises: [{ exerciseId: PULL_UP, measure: "reps", sets: [blankSet({ id: "p1", targetReps: 8 }), blankSet({ id: "p2", targetReps: 8 })] }],
+      exercises: [
+        { exerciseId: PULL_UP, measure: "reps", sets: [blankSet({ id: "p1", targetReps: 8 }), blankSet({ id: "p2", targetReps: 8 })] },
+      ],
     },
     { id: "curl", kind: "accessory", exercises: [{ exerciseId: CURL, measure: "reps", sets: [blankSet({ id: "c1", targetReps: 10 })] }] },
     {
@@ -644,7 +646,12 @@ describe("Finish in the dock", () => {
     const s = allLogged(planned(), ["c1"]);
     store.data = {
       ...base(),
-      sessions: [{ ...s, blocks: s.blocks.map((b) => (b.id === "curl" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, skipped: true })) } : b)) }],
+      sessions: [
+        {
+          ...s,
+          blocks: s.blocks.map((b) => (b.id === "curl" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, skipped: true })) } : b)),
+        },
+      ],
     };
     renderTrain();
     expect(finishInDock()!.getAttribute("aria-label")).toBe("Finish · 7/7 sets");
@@ -663,6 +670,72 @@ describe("Finish in the dock", () => {
     expect(screen.getByText("Preview")).toBeTruthy();
     expect(finishInDock()).toBeNull();
     expect(screen.queryByRole("button", { name: "Finish session" })).toBeNull();
+  });
+});
+
+describe("rehab blocks on this Train (saved by a device with the training day; not shown here)", () => {
+  const rehabBlock = (done: boolean): Session["blocks"][number] => ({
+    id: "knee",
+    kind: "rehab",
+    rehab: "knee",
+    exercises: [
+      {
+        exerciseId: CURL,
+        measure: "reps",
+        sets: [blankSet({ id: "r1", targetReps: 12, targetWeight: 20, ...(done && { done: true, reps: 12, weight: 20 }) })],
+      },
+    ],
+  });
+  const withRehab = (s: Session, done: boolean): Session => ({ ...s, blocks: [...s.blocks, rehabBlock(done)] });
+
+  it("rehab logged, strength not: nothing to finish — Finish waits for a strength set, the counts are strength's", () => {
+    store.data = { ...base(), sessions: [withRehab(planned(), true)] };
+    renderTrain();
+    expect(screen.getByRole("button", { name: "Finish session" })).toHaveProperty("disabled", true);
+    expect(screen.getByText("Log a set to finish.")).toBeTruthy();
+    expect(finishInDock()).toBeNull();
+  });
+
+  it("every strength set logged, rehab not: Finish in the dock says strength's count and asks nothing", async () => {
+    const user = userEvent.setup();
+    store.data = { ...base(), sessions: [withRehab(allLogged(planned()), false)] };
+    renderTrain();
+    expect(finishInDock()!.getAttribute("aria-label")).toBe("Finish · 8/8 sets");
+    await user.click(finishInDock()!);
+    expect(screen.queryByText(/unlogged\?/)).toBeNull();
+    expect(today().completedAt).not.toBeNull();
+    // Unlogging every strength set reopens it, whatever rehab holds.
+    store.set({ ...store.data, sessions: [{ ...withRehab(planned(), true), completedAt: today().completedAt }] });
+    expect(await screen.findByRole("heading", { name: "Session complete" })).toBeTruthy();
+  });
+
+  it("Reset to plan resets strength only: the rehab blocks stay (rehab logged doesn't hold it back)", async () => {
+    const user = userEvent.setup();
+    const s = withRehab(planned(), true);
+    store.data = { ...base(), sessions: [{ ...s, notes: "knee ok" }] };
+    renderTrain();
+    await user.click(screen.getByRole("button", { name: "Reset to plan" }));
+    expect(today().blocks.filter((b) => b.kind === "rehab")).toEqual([rehabBlock(true)]);
+    expect(today().blocks.filter((b) => b.kind === "accessory")).toEqual([]);
+    expect(today().notes).toBe("knee ok");
+    // Without rehab, the document goes, as it always did.
+    reload();
+    store.data = { ...base(), sessions: [planned()] };
+    renderTrain();
+    await user.click(screen.getByRole("button", { name: "Reset to plan" }));
+    expect(store.data.sessions.find((x) => x.date === TODAY)).toBeUndefined();
+  });
+
+  it("Do this session today, replacing today's session with logged rehab: today keeps its rehab blocks", async () => {
+    const user = userEvent.setup();
+    const deadliftMax: MaxEntry = { ...maxEntries[0]!, id: 2, exerciseId: DEADLIFT, valueLb: 315 };
+    store.data = { ...base(), maxEntries: [...maxEntries, deadliftMax], sessions: [withRehab(planned(), true)] };
+    renderTrain("/train/2026-11-17");
+    await user.click(screen.getByRole("button", { name: /Do this session today/ }));
+    await user.click(screen.getByRole("button", { name: "Replace" }));
+    expect(today().plannedFor).toBe("2026-11-17");
+    expect(today().blocks.filter((b) => b.kind === "rehab")).toEqual([rehabBlock(true)]);
+    expect(today().blocks.filter((b) => b.kind === "primary")[0]!.exercises[0]!.exerciseId).toBe(DEADLIFT);
   });
 });
 
@@ -863,7 +936,9 @@ describe("a preview's footnote says only what's true", () => {
   it("accessories carried over and a main lift: both", () => {
     store.data = { ...base(), sessions: [{ ...planned("2026-11-09"), completedAt: "2026-11-09T18:00:00.000Z" }] };
     renderTrain("/train/2026-11-23");
-    expect(screen.getByText("Carried over from your last Monday; main-lift loads use today's max and move with any AMRAP before then.")).toBeTruthy();
+    expect(
+      screen.getByText("Carried over from your last Monday; main-lift loads use today's max and move with any AMRAP before then."),
+    ).toBeTruthy();
     expect(screen.queryByText(/Nothing to carry over yet/)).toBeNull();
   });
 
@@ -977,7 +1052,12 @@ describe("done exercises fold to a summary row", () => {
     const beaten: Session = {
       ...s,
       blocks: s.blocks.map((b) =>
-        b.kind === "primary" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, sets: e.sets.map((x) => (x.amrap ? { ...x, reps: x.targetReps! + 3 } : x)) })) } : b,
+        b.kind === "primary"
+          ? {
+              ...b,
+              exercises: b.exercises.map((e) => ({ ...e, sets: e.sets.map((x) => (x.amrap ? { ...x, reps: x.targetReps! + 3 } : x)) })),
+            }
+          : b,
       ),
     };
     act(() => store.set({ ...base(), sessions: [beaten] }));
@@ -1155,7 +1235,9 @@ describe("done exercises fold to a summary row", () => {
     const s = allLogged(withSuperset(), ["c1"]);
     const skipped: Session = {
       ...s,
-      blocks: s.blocks.map((b) => (b.id === "ss" ? { ...b, exercises: b.exercises.map((e) => (e.exerciseId === CURL ? { ...e, skipped: true } : e)) } : b)),
+      blocks: s.blocks.map((b) =>
+        b.id === "ss" ? { ...b, exercises: b.exercises.map((e) => (e.exerciseId === CURL ? { ...e, skipped: true } : e)) } : b,
+      ),
     };
     store.data = { ...base(), sessions: [skipped] };
     renderTrain();
@@ -1165,7 +1247,10 @@ describe("done exercises fold to a summary row", () => {
 
   it("an exercise skipped today stays its own row: not done, nothing to fold", () => {
     const s = allLogged(planned());
-    const skipped: Session = { ...s, blocks: s.blocks.map((b) => (b.id === "hang" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, skipped: true })) } : b)) };
+    const skipped: Session = {
+      ...s,
+      blocks: s.blocks.map((b) => (b.id === "hang" ? { ...b, exercises: b.exercises.map((e) => ({ ...e, skipped: true })) } : b)),
+    };
     store.data = { ...base(), sessions: [skipped] };
     renderTrain();
     expect(screen.getByRole("button", { name: "Unskip Hang" })).toBeTruthy();
