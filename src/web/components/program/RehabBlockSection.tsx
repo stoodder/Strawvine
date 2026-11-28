@@ -3,36 +3,50 @@
  * rehab · 6 weeks · Mon/Wed/Fri"), independent of the strength plans. Behind the `rehab` flag
  * (screens/Program.tsx mounts it).
  *
- * - The block in force (and any scheduled after it): its name, where it is ("Week 2 of 6 · Oct 19
- *   – Nov 29", sessions logged of planned), a week rail, its days, its length (−/+ and the day it
- *   ends), its start, what each session starts from (the last session / the same weekday),
- *   "+ A week" with what it would do, End today, and Cancel while nothing is logged under it.
+ * - The block in force: its name, where it is ("Week 2 of 6 · Oct 19 – Nov 29", sessions logged
+ *   of planned), a week rail, its days, its length (−/+ and the day it ends; a − that can't go
+ *   further says why), its start, what each session starts from (the last session / the same
+ *   weekday), "+ A week" with what it would do, End today, and Cancel while nothing is logged
+ *   under it. A block scheduled after it shows as one row ("Hip rehab · from Mon Nov 30 · 4 wks ·
+ *   Tue/Thu ›") that opens into the same card on a tap (view state).
  * - Earlier blocks, read-only: name, dates, sessions logged.
- * - A new block, starting where `newRehabStart` says (the day after the latest one ends, or
- *   today); with none at all, an empty state that sets up the first.
+ * - A new block, starting on the first day on or after today that no block holds (the day after
+ *   the one in force ends; after End today, the free days before the next one), moved on to the
+ *   first of its weekdays; with none at all, an empty state that sets up the first.
  *
  * Nothing here calculates or writes a block's fields: every read and edit goes through
  * src/shared/rehab.ts, and an edit it refuses (an overlap, no day left) says why. Every change
  * leaves an Undo (`settings/undo.ts`) that works on the settings as they are when it is tapped
- * and puts back only that block's own field — and declines when that field was changed again
- * since. Consecutive changes of one field fold into one toast. End today can change today's
- * session too (its unlogged rehab blocks of the block go, `endRehab`): that is saved through the
- * session outbox, and its Undo puts back, on today's session as it is then, only those blocks.
+ * and puts back only that block's own field — and declines, saying why, when that field was
+ * changed again since or the rest of the settings no longer allow it. Consecutive changes of one
+ * field fold into one toast. End today and Cancel work on the block as the settings hold it when
+ * tapped, and can change today's session too (its unlogged rehab blocks of the block go,
+ * `endRehab` / `cancelRehab`): that is saved through the session outbox, and their Undo puts back,
+ * on today's session as it is then, only those blocks. End today on a block with nothing logged in
+ * it at all removes it, as Cancel does (its Undo brings it back).
  *
  * Typing stays put: the lines an edit changes keep their height (the status is two lines that
- * never wrap into a third at 320 px, the two carry explanations share one box), and what an
+ * never wrap into a third at 320 px, the two one-line carry hints share one box), and what an
  * action adds or removes is below the control that was tapped.
  */
 import clsx from "clsx";
 import { useId, useRef, useState, type ReactNode } from "react";
-import { Plus } from "lucide-react";
-import { addDays, daysBetween, formatShortDate, isISODate, weekdayName, WEEKDAY_SHORT, type ISODate } from "../../../shared/dates";
+import { ChevronRight, Plus } from "lucide-react";
+import {
+  addDays,
+  daysBetween,
+  formatShortDate,
+  isISODate,
+  weekdayName,
+  weekdayOf,
+  WEEKDAY_SHORT,
+  type ISODate,
+} from "../../../shared/dates";
 import {
   cancelRehab,
   editRehab,
   endRehab,
   extendRehab,
-  newRehabStart,
   rehabById,
   rehabInForce,
   rehabLastDay,
@@ -105,17 +119,48 @@ function setSpan(settings: Settings, id: string, span: Span, sessions: ReadonlyA
 const fieldsOf = (p: RehabProgram): RehabFields => ({ name: p.name, start: p.start, weeks: p.weeks, days: [...p.days], carry: p.carry });
 
 /**
- * A block put back as it was, after it was removed (an Undo of Cancel, or of End today on its
- * first day): started for its first week, then given its span — so an early end it had counts
- * when checking it against the blocks set up since.
+ * A block put back as it was, after it was removed (an Undo of Cancel, or of End today on a block
+ * with nothing logged): started for its first week, then given its span — so an early end it had
+ * counts when checking it against the blocks set up since. Refused (why) when it is back already,
+ * or another block has its days now.
  */
-function restoreBlock(now: Settings, p: RehabProgram, sessions: ReadonlyArray<Session>): Settings | null {
-  if (rehabById(now, p.id)) return null;
+function restoreBlock(now: Settings, p: RehabProgram, sessions: ReadonlyArray<Session>): Settings | { refused: string } {
+  if (rehabById(now, p.id)) return { refused: `${nameOf(p)} was changed again since.` };
   const back = startRehab(now, { ...fieldsOf(p), weeks: 1 }, p.id);
-  if ("refused" in back) return null;
+  if ("refused" in back) return back;
   const span = setSpan(back.settings, p.id, spanOf(p), sessions);
-  return "refused" in span ? null : span.settings;
+  return "refused" in span ? span : span.settings;
 }
+
+/**
+ * The first day on or after `from` that no rehab block holds: `from` itself, else the day after the
+ * block in force then ends, and so on past any that follows on at once — so after End today, the
+ * free days before the next block (where a new one can go), not the day after the last.
+ */
+function firstFreeDay(settings: Pick<Settings, "rehab">, from: ISODate): ISODate {
+  const all = rehabPrograms(settings);
+  let d = from;
+  for (let i = 0; i <= all.length; i++) {
+    const holding = all.filter((p) => rehabInForce(p, d));
+    if (!holding.length) return d;
+    d = addDays(holding.map(rehabLastDay).sort().at(-1)!, 1);
+  }
+  return d;
+}
+
+/** The first of `days` (by weekday) on or after `from`; `from` when none is set. */
+function firstWeekdayFrom(from: ISODate, days: ReadonlyArray<boolean>): ISODate {
+  if (!days.some(Boolean)) return from;
+  let d = from;
+  while (!days[weekdayOf(d)]) d = addDays(d, 1);
+  return d;
+}
+
+/** "Mon/Wed/Fri". */
+const daysSlashed = (days: ReadonlyArray<boolean>) =>
+  WEEK_ORDER.filter((d) => days[d])
+    .map((d) => WEEKDAY_SHORT[d])
+    .join("/");
 
 /**
  * End today's Undo for today's session: the session as it is now with the rehab blocks End today
@@ -135,6 +180,35 @@ function withDroppedBack(now: Session | null, ended: Session, dropped: ReadonlyA
   return added ? { ...base, blocks } : null;
 }
 
+/** Why an Undo can't be: what it would undo isn't there any more. */
+const changedSince = (name: string) => ({ refused: `${name} was changed again since.` });
+
+/**
+ * An Undo whose `undo` says why it can't be (`{ refused }`): the toast then says "Can't undo:"
+ * and that reason — the real one (an overlap, a logged session), not a guess. (`cantUndo` is read
+ * when the Undo is declined, right after `undo` ran: a getter hands it the reason.)
+ */
+function undoSaying<T>(
+  name: string,
+  u: Omit<SettingsUndo<T>, "undo" | "cantUndo"> & { undo: (now: Settings, from: T) => Settings | { refused: string } },
+): SettingsUndo<T> {
+  let why = changedSince(name).refused;
+  return {
+    ...u,
+    undo: (now, from) => {
+      const r = u.undo(now, from);
+      if ("refused" in r) {
+        why = r.refused;
+        return null;
+      }
+      return r;
+    },
+    get cantUndo() {
+      return `Can't undo: ${why}`;
+    },
+  };
+}
+
 /** The block `id`'s card (`data-rehab-block`), as a selector. */
 const blockSel = (id: string) => `[data-rehab-block="${id.replace(/["\\]/g, "\\$&")}"]`;
 /** Where focus goes after an Undo of the block `id`: what `selector` matches in its card. */
@@ -143,17 +217,10 @@ const inBlock =
   () =>
     document.querySelector<HTMLElement>(`${blockSel(id)} ${selector}`);
 
+/** Each choice with its one-line hint (one line at 320 px: the two share a box, so a choice never moves what's under it). */
 const CARRY: Array<[Carry, string, string]> = [
-  [
-    "last",
-    "The last session",
-    "Each session starts from the one before it — Wednesday from Monday — with its exercises, sets and loads. Pick “The same weekday” when each day has its own routine.",
-  ],
-  [
-    "weekday",
-    "The same weekday",
-    "Each session starts from the same weekday’s last one — Monday from last Monday. Pick “The last session” when every day is the same routine.",
-  ],
+  ["last", "The last session", "Wednesday starts from Monday’s session."],
+  ["weekday", "The same weekday", "Monday starts from last Monday’s session."],
 ];
 
 // ---------------------------------------------------------------------------
@@ -245,7 +312,7 @@ function WeeksStepper({ weeks, min, label, onChange }: { weeks: number; min: num
   );
 }
 
-/** "The last session / The same weekday", and what the choice means (both lines share one box: a tap never moves what's below). */
+/** "The last session / The same weekday", and a one-line hint of what the choice means (both share one box: a tap never moves what's below). */
 function CarryChoice({ label, value, onChange }: { label: string; value: Carry; onChange: (v: Carry) => void }) {
   const noteId = useId();
   return (
@@ -325,6 +392,11 @@ function WeekRail({ p, today }: { p: RehabProgram; today: ISODate }) {
 // A block in force or scheduled
 // ---------------------------------------------------------------------------
 
+/** What a − that can't shorten a block in force any further says. */
+const EARLIEST_END = "Ends this week at the earliest — End today stops it now.";
+/** "+ A week" refused: "Can't add a week: Hip rehab starts Nov 30." */
+const cantExtend = (why: string) => `Can't add a week: ${why}`;
+
 /** An edit through rehab.ts: the new settings, or why it can't be made. */
 type Edit = (now: Settings) => { settings: Settings } | { refused: string };
 
@@ -361,7 +433,8 @@ function BlockCard({ p, ctx, heading }: { p: RehabProgram; ctx: BlockContext; he
 
   /**
    * One field of this block set to `after`, with its Undo: back to `from` (the first `before` of
-   * the folded changes) only while the field still reads `after`.
+   * the folded changes) only while the field still reads `after` — and only if rehab.ts lets it
+   * (else the toast says why).
    */
   const editField = <T,>(
     key: string,
@@ -372,18 +445,20 @@ function BlockCard({ p, ctx, heading }: { p: RehabProgram; ctx: BlockContext; he
     message: string | ((from: T) => string),
     focus: Focus,
   ) =>
-    run<T>((now) => set(now, after), {
-      fold: { key: `rehab-${key}-${id}`, before, after },
-      message,
-      undo: (now, from) => {
-        const q = rehabById(now, id);
-        if (!q || read(q) !== after) return null;
-        const r = set(now, from);
-        return "refused" in r ? null : r.settings;
-      },
-      cantUndo: `Can't undo: ${name} was changed again since.`,
-      focus,
-    });
+    run<T>(
+      (now) => set(now, after),
+      undoSaying(name, {
+        fold: { key: `rehab-${key}-${id}`, before, after },
+        message,
+        undo: (now, from) => {
+          const q = rehabById(now, id);
+          if (!q || read(q) !== after) return changedSince(name);
+          const r = set(now, from);
+          return "refused" in r ? r : r.settings;
+        },
+        focus,
+      }),
+    );
 
   /** The length set to `to` (one toast for the stepper and "+ A week", however many taps). */
   const setLength = (to: Span, focus: Focus) =>
@@ -398,12 +473,16 @@ function BlockCard({ p, ctx, heading }: { p: RehabProgram; ctx: BlockContext; he
     );
   /** "+ A week" (and the stepper's +): what `extendRehab` makes of it, saved as a length change. */
   const addWeek = (focus: Focus) => {
-    if ("refused" in extend) return run(() => extend, { message: "", undo: () => null });
+    if ("refused" in extend) return run(() => ({ refused: cantExtend(extend.refused) }), { message: "", undo: () => null });
     return setLength(spanOf(extend.program), focus);
   };
-  // The − never ends it before this week is out: ending it is End today.
+  // The − never ends it before this week is out: ending it is End today — which a − tapped there says.
   const minWeeks = Math.max(1, week ?? 1);
   const shorter = (to: number) => {
+    if (to < minWeeks) {
+      toast.show({ message: EARLIEST_END });
+      return;
+    }
     const natural = addDays(p.start, to * 7 - 1);
     setLength(
       { weeks: to, end: p.end !== undefined && p.end < natural ? p.end : undefined },
@@ -412,79 +491,109 @@ function BlockCard({ p, ctx, heading }: { p: RehabProgram; ctx: BlockContext; he
   };
 
   /**
-   * End today. With nothing of it logged today, today's session loses its rehab blocks of it (an
-   * unlogged draft the first edit saved) — saved through the session outbox like any session edit,
-   * or deleted when nothing else was in it (`endRehab`'s `today`). Its Undo puts back the block's
-   * length and, on today's session as it is when Undo is tapped, only those blocks.
+   * A change of the block that can change today's session too (End today, Cancel): worked out on
+   * the block and the sessions as they are when tapped (`edit` gets the block as settings hold it
+   * then); today's session as `edit` says (`today`: what to save, null to delete it) is saved
+   * through the session outbox like any session edit. Its Undo puts back the block (`undo`, given
+   * the block as it was) and — only once that can be — on today's session as it is then, only the
+   * blocks it dropped. Declined, it says why.
    */
-  const endToday = () => {
+  const changeWithToday = <R extends { settings: Settings; today?: Session | null }>(
+    edit: (now: Settings, before: RehabProgram, all: ReadonlyArray<Session>) => R | { refused: string },
+    u: {
+      message: (r: R) => string;
+      undo: (now: Settings, before: RehabProgram, r: R) => Settings | { refused: string };
+      focus: Focus;
+    },
+  ): R | null => {
     const date = today;
-    const ended: {
-      lastDay: ISODate | null;
-      /**
-       * Today's session when End today changes it: as it was, what to save (null: delete it), and
-       * the blocks it dropped, with where they were.
-       */
+    const done: {
+      r: R | null;
+      before: RehabProgram | null;
+      /** Today's session when the change touches it: as it was, what to save (null: delete it), the blocks it dropped and where they were. */
       session: { was: Session; next: Session | null; dropped: Array<{ at: number; block: Block }> } | null;
-    } = { lastDay: null, session: null };
+    } = { r: null, before: null, session: null };
     const saved = run<undefined>(
       (now) => {
+        const before = rehabById(now, id);
+        if (!before) return { refused: "That rehab block is gone." };
         const all = liveSessions(sessions);
-        const r = endRehab(now, id, date, all);
+        const r = edit(now, before, all);
         if ("refused" in r) return r;
-        ended.lastDay = r.lastDay;
-        const was = all.findLast((s) => s.date === date);
+        done.r = r;
+        done.before = before;
+        const was = all.findLast((x) => x.date === date);
         if (r.today !== undefined && was) {
           const kept = new Set((r.today?.blocks ?? []).map((b) => b.id));
           const dropped = was.blocks.flatMap((block, at) => (kept.has(block.id) ? [] : [{ at, block }]));
-          ended.session = { was, next: r.today, dropped };
+          done.session = { was, next: r.today, dropped };
         }
         return r;
       },
-      {
-        message: () =>
-          ended.lastDay === null
-            ? `${name} removed: it started today, with nothing logged`
-            : ended.lastDay === date
-              ? `${name} ends today`
-              : `${name} ended: its last day was yesterday`,
+      undoSaying(name, {
+        message: () => u.message(done.r!),
         undo: (now) => {
-          const q = rehabById(now, id);
-          let back: Settings | null;
-          if (!q) back = restoreBlock(now, p, sessions);
-          else if (q.end !== ended.lastDay) back = null;
-          else {
-            const r = setSpan(now, id, spanOf(p), sessions);
-            back = "refused" in r ? null : r.settings;
-          }
-          // Today's session too — only once the block's length can be put back (else neither is).
-          const s = ended.session;
-          if (back && s) {
-            const restored = withDroppedBack(liveSessions(sessions).findLast((x) => x.date === date) ?? null, s.was, s.dropped);
+          const back = u.undo(now, done.before!, done.r!);
+          const x = done.session;
+          if (!("refused" in back) && x) {
+            const restored = withDroppedBack(liveSessions(sessions).findLast((y) => y.date === date) ?? null, x.was, x.dropped);
             if (restored) saveSession(restored);
           }
           return back;
         },
-        cantUndo: `Can't undo: ${name} was changed again since.`,
+        focus: u.focus,
+      }),
+    );
+    if (!saved) return null;
+    if (done.session) {
+      if (done.session.next) saveSession(done.session.next);
+      else deleteSession(date);
+    }
+    return done.r;
+  };
+
+  /**
+   * End today: its last day is today with rehab of it logged today, else yesterday; today's
+   * session loses its unlogged rehab blocks of it (`endRehab`). A block with nothing logged in it at
+   * all is removed instead, as Cancel does (no block of no sessions is left in the history). Its
+   * Undo puts back the block as it was when tapped.
+   */
+  const endToday = () => {
+    const r = changeWithToday<{ settings: Settings; today?: Session | null; lastDay: ISODate | null }>(
+      (now, before, all) => {
+        if (rehabSessions(before, all).length) return endRehab(now, id, today, all);
+        const c = cancelRehab(now, id, all, today);
+        return "refused" in c ? c : { ...c, lastDay: null };
+      },
+      {
+        message: (r) =>
+          r.lastDay === null
+            ? `${name} removed: nothing was logged in it`
+            : r.lastDay === today
+              ? `${name} ends today`
+              : `${name} ended: its last day was yesterday`,
+        undo: (now, before, r) => {
+          const q = rehabById(now, id);
+          if (!q) return r.lastDay === null ? restoreBlock(now, before, sessions) : changedSince(name);
+          if (r.lastDay === null || q.end !== r.lastDay) return changedSince(name);
+          const back = setSpan(now, id, spanOf(before), sessions);
+          return "refused" in back ? back : back.settings;
+        },
         focus: inBlock(id, `[data-rehab-control="end"]`),
       },
     );
-    if (saved && ended.session) {
-      if (ended.session.next) saveSession(ended.session.next);
-      else deleteSession(date);
-    }
-    // Ended before today: its card goes (to the earlier blocks).
-    if (saved && ended.lastDay !== date) focusAway();
+    // Ended before today (or removed): its card goes.
+    if (r && r.lastDay !== today) focusAway();
   };
 
+  /** Cancel (nothing logged in it): the block goes, and its draft in today's session with it (`cancelRehab`). */
   const cancel = () => {
-    const saved = run<undefined>((now) => cancelRehab(now, id, liveSessions(sessions)), {
-      message: `${name} cancelled`,
-      undo: (now) => restoreBlock(now, p, sessions),
-      cantUndo: `Can't undo: another rehab block has ${name}'s dates now.`,
+    const r = changeWithToday((now, _before, all) => cancelRehab(now, id, all, today), {
+      message: () => `${name} cancelled`,
+      undo: (now, before) => restoreBlock(now, before, sessions),
       focus: inBlock(id, `[data-rehab-control="cancel"]`),
     });
-    if (saved) focusAway();
+    if (r) focusAway();
   };
 
   return (
@@ -544,7 +653,8 @@ function BlockCard({ p, ctx, heading }: { p: RehabProgram; ctx: BlockContext; he
           <div data-rehab-length="">
             <WeeksStepper
               weeks={weeks}
-              min={minWeeks}
+              // Not `minWeeks`: once started, a − there still answers, saying why it can't (`shorter`).
+              min={started ? 0 : 1}
               label={`${name} length`}
               onChange={(to) => (to > weeks ? addWeek(inBlock(id, `[data-rehab-length] button[aria-label^="Increase"]`)) : shorter(to))}
             />
@@ -617,8 +727,36 @@ function BlockCard({ p, ctx, heading }: { p: RehabProgram; ctx: BlockContext; he
         )}
       </div>
       <p id={previewId} className="mt-2 text-xs text-mute" data-rehab-preview="">
-        {"refused" in extend ? extend.refused : `“+ A week” ends it ${dayName(extend.lastDay)} instead of ${formatShortDate(extend.was)}.`}
+        {"refused" in extend
+          ? cantExtend(extend.refused)
+          : `“+ A week” ends it ${dayName(extend.lastDay)} instead of ${formatShortDate(extend.was)}.`}
       </p>
+    </div>
+  );
+}
+
+/**
+ * A block scheduled after the one in force, folded to one row — "Hip rehab · from Mon Nov 30 ·
+ * 4 wks · Tue/Thu ›" — that opens into its card on a tap (view state: nothing folds by itself).
+ */
+function NextBlockRow({ p, onOpen }: { p: RehabProgram; onOpen: () => void }) {
+  const weeks = spanWeeks(p);
+  return (
+    <div data-rehab-block={p.id} data-rehab-folded="">
+      <SubHead>Next rehab block</SubHead>
+      <button type="button" aria-expanded={false} onClick={onOpen} className="tap flex min-h-11 w-full items-center gap-3 py-2 text-left">
+        <span className="min-w-0 flex-1 text-[0.9375rem] text-fg">
+          {nameOf(p)}
+          {/* Each part keeps together: a narrow phone breaks the line between them, never inside one. */}
+          {[`from ${dayName(p.start)}`, `${weeks} ${weeks === 1 ? "wk" : "wks"}`, daysSlashed(p.days)].map((part) => (
+            <span key={part} className="text-mute">
+              {" "}
+              · <span className="whitespace-nowrap">{part}</span>
+            </span>
+          ))}
+        </span>
+        <ChevronRight size={14} className="shrink-0 text-mute" aria-hidden />
+      </button>
     </div>
   );
 }
@@ -631,16 +769,23 @@ function BlockCard({ p, ctx, heading }: { p: RehabProgram; ctx: BlockContext; he
 const FIRST_DAYS = [false, true, false, true, false, true, false];
 const FIRST_WEEKS = 6;
 
-/** Setting up a rehab block: nothing is saved until "Start it". */
+/**
+ * Setting up a rehab block: nothing is saved until "Start it". Until a start is picked, it starts on
+ * the first of its days on or after `from` — and follows the days as they are changed.
+ */
 function NewBlockForm({
-  start: initialStart,
+  from,
   like,
+  heading,
   onStart,
   onClose,
 }: {
-  start: ISODate;
+  /** The first day it can start (`firstFreeDay`). */
+  from: ISODate;
   /** The latest block: a new one starts with its days, length and carry. */
   like: RehabProgram | null;
+  /** Its own heading, under others' blocks (with none, the section's heading says it all). */
+  heading: boolean;
   /** Saves it; why it can't be, or null. */
   onStart: (fields: RehabFields) => string | null;
   onClose: () => void;
@@ -648,7 +793,8 @@ function NewBlockForm({
   const [name, setName] = useState("");
   const [days, setDays] = useState<boolean[]>(like ? [...like.days] : FIRST_DAYS);
   const [weeks, setWeeks] = useState(like?.weeks ?? FIRST_WEEKS);
-  const [start, setStart] = useState(initialStart);
+  const [picked, setStart] = useState<ISODate | null>(null);
+  const start = picked ?? firstWeekdayFrom(from, days);
   const [carry, setCarry] = useState<Carry>(like?.carry ?? "last");
   const [refused, setRefused] = useState<string | null>(null);
   const nameId = useId();
@@ -656,7 +802,7 @@ function NewBlockForm({
   const errorId = useId();
   return (
     <div data-rehab-new="">
-      <SubHead>New rehab block</SubHead>
+      {heading && <SubHead>New rehab block</SubHead>}
       <div className="py-2">
         <label htmlFor={nameId} className="text-[0.9375rem] text-fg">
           Name
@@ -739,9 +885,16 @@ export function RehabBlockSection({
   const earlier = all.filter((p) => rehabLastDay(p) < today).reverse();
   const inForce = ahead.find((p) => rehabInForce(p, today)) ?? null;
   const latest = all.at(-1) ?? null;
-  const until = ahead.at(-1) ?? null;
-  const newStart = newRehabStart(settings, today);
+  // A new block: from the first day no block holds, on the first of its days.
+  const freeFrom = firstFreeDay(settings, today);
+  const newStart = firstWeekdayFrom(freeFrom, latest?.days ?? FIRST_DAYS);
+  const follows = ahead.find((p) => addDays(rehabLastDay(p), 1) === freeFrom) ?? null;
+  // Rehab of the block in force logged today: End today would make today its last day, so the next could start tomorrow.
+  const loggedToday = !!inForce && rehabSessions(inForce, sessions).some((x) => x.date === today);
   const any = all.length > 0;
+  // Blocks scheduled after the one in force show as one row until opened (view state).
+  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const open = (blockId: string) => setOpened((o) => new Set([...o, blockId]));
 
   const run: BlockContext["run"] = (edit, u) => {
     let refused: string | null = null;
@@ -786,12 +939,15 @@ export function RehabBlockSection({
     );
     if (!saved) return refused ?? "Couldn't set it up.";
     setAdding(false);
+    open(blockId);
     focusAfter(() => document.querySelector<HTMLElement>(blockSel(blockId)));
     return null;
   };
 
-  const newLine = until
-    ? `Starts ${dayName(newStart)}, the day after ${nameOf(until)} ends${inForce?.id === until.id ? " — or today, if you end it first" : ""}.`
+  const newLine = follows
+    ? `Starts ${dayName(newStart)}, ${newStart === freeFrom ? "the day after" : "after"} ${nameOf(follows)} ends${
+        inForce?.id === follows.id ? ` — or ${loggedToday ? "tomorrow, if you end it today" : "today, if you end it first"}` : ""
+      }.`
     : `Starts ${newStart === today ? "today" : dayName(newStart)}.`;
 
   return (
@@ -806,9 +962,20 @@ export function RehabBlockSection({
             </p>
           </div>
         )}
-        {ahead.map((p, i) => (
-          <BlockCard key={p.id} p={p} ctx={ctx} heading={i > 0 ? "Next rehab block" : undefined} />
-        ))}
+        {ahead.map((p, i) =>
+          i > 0 && !rehabInForce(p, today) && !opened.has(p.id) ? (
+            <NextBlockRow
+              key={p.id}
+              p={p}
+              onOpen={() => {
+                open(p.id);
+                focusAfter(() => document.querySelector<HTMLElement>(blockSel(p.id)));
+              }}
+            />
+          ) : (
+            <BlockCard key={p.id} p={p} ctx={ctx} heading={i > 0 ? "Next rehab block" : undefined} />
+          ),
+        )}
 
         {earlier.length > 0 && (
           <div data-rehab-history="">
@@ -828,8 +995,9 @@ export function RehabBlockSection({
 
         {adding ? (
           <NewBlockForm
-            start={newStart}
+            from={freeFrom}
             like={latest}
+            heading={any}
             onStart={startNew}
             onClose={() => {
               setAdding(false);

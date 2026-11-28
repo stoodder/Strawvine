@@ -207,7 +207,7 @@ function overlap(p: RehabProgram, others: ReadonlyArray<RehabProgram>, was?: Reh
     if (shared === 0 || (was && shared <= sharedDays(was, o))) continue;
     return o.start <= p.start
       ? `${nameOf(o)} runs until ${formatShortDate(rehabLastDay(o))}: end it or start this one after.`
-      : `${nameOf(o)} starts ${formatShortDate(o.start)}: end this one before it.`;
+      : `${nameOf(o)} starts ${formatShortDate(o.start)}.`;
   }
   return null;
 }
@@ -396,22 +396,44 @@ export function endRehab(
   return out;
 }
 
+/** `cancelRehab`'s result. */
+export interface RehabCancelled {
+  settings: Settings;
+  /**
+   * Today's session, when cancelling changes it (as `endRehab`'s `today`): without its rehab
+   * blocks of the block — nothing of them logged, only the draft the first edit saved — to save;
+   * null to delete it (nothing else was left in it). Absent: it stays as it is.
+   */
+  today?: Session | null;
+}
+
 /**
  * Remove a rehab block set up by mistake — only while no session holds a logged set of it (one
- * with logged sessions is ended, `endRehab`, so its history stays).
+ * with logged sessions is ended, `endRehab`, so its history stays). Given `today`, today's
+ * session loses its rehab blocks of it, as with End today (`today` in the result): no session
+ * keeps blocks naming a rehab block settings no longer hold.
  */
 export function cancelRehab(
   settings: Settings,
   id: string,
   sessions: ReadonlyArray<Session>,
-): { settings: Settings } | { refused: string } {
+  today?: ISODate,
+): RehabCancelled | { refused: string } {
   const p = rehabById(settings, id);
   if (!p) return { refused: "That rehab block is gone." };
   if (rehabSessions(p, sessions).length) return { refused: `${nameOf(p)} has logged sessions: end it instead.` };
-  return {
+  const out: RehabCancelled = {
     settings: withPrograms(
       settings,
       settings.rehab!.programs.filter((o) => o.id !== id),
     ),
   };
+  // Nothing of it is logged anywhere: its blocks in today's session are only the draft.
+  const saved = today === undefined ? undefined : sessions.findLast((s) => s.date === today);
+  if (saved && rehabBlocks(saved, p.id).length) {
+    const blocks = saved.blocks.filter((b) => !(b.kind === "rehab" && b.rehab === p.id));
+    const empty = !blocks.length && !saved.notes && !saved.completedAt && !saved.plannedFor;
+    out.today = empty ? null : { ...saved, blocks };
+  }
+  return out;
 }

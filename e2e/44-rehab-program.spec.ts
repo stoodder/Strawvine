@@ -2,9 +2,11 @@
  * Program › Rehab (behind the `rehab` flag, set on this device in localStorage): set up "Knee
  * rehab · 6 weeks · M/W/F" from the empty state; "+ A week" says what it will do, does it, and
  * Undo takes it back; End today sends it to the earlier blocks (and drops today's unlogged rehab
- * draft from today's session, which its Undo puts back); a new block that would overlap is
+ * draft from today's session, which its Undo puts back) — or, with nothing logged in it at all,
+ * removes it; a new block that would overlap is
  * refused with the reason; an Undo after another device's edit puts back only its own field. With
- * the flag off there is no Rehab section; `?flags=rehab` turns it on for the device.
+ * the flag off there is no Rehab section; `?flags=rehab` turns it on for the device (merged into
+ * its flags, said in a toast), `?flags=-rehab` off.
  */
 import type { Page } from "@playwright/test";
 import { expect, expectSynced, MONDAY, MONDAY_ISO, notifications, onboardedOn, serverData, test, toastMessage } from "./helpers";
@@ -27,6 +29,30 @@ async function api(page: Page, method: string, path: string, data?: unknown) {
   const res = await page.request.fetch(path, { method, headers: { "cache-control": "no-cache" }, ...(data !== undefined ? { data } : {}) });
   expect(res.ok(), `${method} ${path} → ${res.status()}`).toBe(true);
   return res.status() === 204 ? null : res.json();
+}
+
+/** A Knee rehab session logged on Mon Oct 19 (one set of a Spanish squat), as another device would save it. */
+async function logKneeOct19(page: Page) {
+  const ex = await api(page, "POST", "/api/exercises", {
+    name: "Spanish squat",
+    category: "accessory",
+    measure: "seconds",
+    weighted: false,
+  });
+  const done = {
+    id: "o1",
+    targetReps: 45,
+    targetWeight: null,
+    reps: 45,
+    weight: null,
+    done: true,
+    amrap: false,
+    appliedProgressionLb: null,
+  };
+  const blocks = [{ id: "k19", kind: "rehab", rehab: "knee", exercises: [{ exerciseId: ex.id, measure: "seconds", sets: [done] }] }];
+  const session = { date: "2026-10-19", label: "Push", cycle: 1, week: 1, deload: false, primaryMaxLb: null, notes: "", completedAt: null };
+  await api(page, "PUT", "/api/sessions/2026-10-19", { ...session, blocks });
+  return ex;
 }
 
 /** Saves `programs` as the rehab blocks on the server, as another device would, and opens Program. */
@@ -82,15 +108,32 @@ test.describe("with the rehab flag", () => {
   });
 
   test("End today: it ended yesterday and moves to the earlier blocks; Undo brings it back", async ({ page }) => {
+    await logKneeOct19(page);
     await seedRehab(page, [KNEE]);
-    await expect(status(page)).toHaveText("Week 2 of 6 · Oct 19 – Nov 290 of 18 sessions logged");
+    await expect(status(page)).toHaveText("Week 2 of 6 · Oct 19 – Nov 291 of 18 sessions logged");
     await card(page).getByRole("button", { name: "End today" }).click();
     await expect(toastMessage(page, "Knee rehab ended: its last day was yesterday")).toBeVisible();
     await expect(rehab(page).locator("[data-rehab-block]")).toHaveCount(0);
-    await expect(rehab(page).locator("[data-rehab-history] li")).toHaveText("Knee rehabOct 19 – Oct 25 · 0 sessions");
+    await expect(rehab(page).locator("[data-rehab-history] li")).toHaveText("Knee rehabOct 19 – Oct 25 · 1 session");
     await expect(rehab(page).getByRole("button", { name: "New rehab block" })).toHaveAccessibleDescription("Starts today.");
     await expect.poll(async () => (await programs(page))[0]?.end).toBe("2026-10-25");
 
+    await undoButton(page).click();
+    await expect(status(page)).toHaveText("Week 2 of 6 · Oct 19 – Nov 291 of 18 sessions logged");
+    await expectSynced(page);
+    expect(await programs(page)).toEqual([KNEE]);
+  });
+
+  test("End today on a block with nothing logged at all removes it — no empty block in the history; Undo brings it back", async ({
+    page,
+  }) => {
+    await seedRehab(page, [KNEE]);
+    await expect(status(page)).toHaveText("Week 2 of 6 · Oct 19 – Nov 290 of 18 sessions logged");
+    await card(page).getByRole("button", { name: "End today" }).click();
+    await expect(toastMessage(page, "Knee rehab removed: nothing was logged in it")).toBeVisible();
+    await expect(rehab(page).locator("[data-rehab-block]")).toHaveCount(0);
+    await expect(rehab(page).locator("[data-rehab-history]")).toHaveCount(0);
+    await expect.poll(() => programs(page)).toEqual([]);
     await undoButton(page).click();
     await expect(status(page)).toHaveText("Week 2 of 6 · Oct 19 – Nov 290 of 18 sessions logged");
     await expectSynced(page);
@@ -98,13 +141,8 @@ test.describe("with the rehab flag", () => {
   });
 
   test("End today drops today's unlogged rehab draft from today's session on the server; Undo puts back only it", async ({ page }) => {
+    const ex = await logKneeOct19(page);
     await seedRehab(page, [KNEE]);
-    const ex = await api(page, "POST", "/api/exercises", {
-      name: "Spanish squat",
-      category: "accessory",
-      measure: "seconds",
-      weighted: false,
-    });
     const set = (id: string) => ({
       id,
       targetReps: 45,
@@ -133,7 +171,7 @@ test.describe("with the rehab flag", () => {
     await expect(toastMessage(page, "Knee rehab ended: its last day was yesterday")).toBeVisible();
     await expect.poll(blockIds).toEqual(["acc"]);
     await undoButton(page).click();
-    await expect(status(page)).toHaveText("Week 2 of 6 · Oct 19 – Nov 290 of 18 sessions logged");
+    await expect(status(page)).toHaveText("Week 2 of 6 · Oct 19 – Nov 291 of 18 sessions logged");
     await expect.poll(blockIds).toEqual(["acc", "knee-draft"]);
     await expectSynced(page);
     expect(await programs(page)).toEqual([KNEE]);
@@ -205,7 +243,9 @@ test.describe("with the rehab flag", () => {
   });
 });
 
-test("flag off: Program has no Rehab section; ?flags=rehab turns it on for this device, ?flags= off again", async ({ page }) => {
+test("flag off: Program has no Rehab section; ?flags=rehab turns it on for this device (merged, said in a toast), -rehab off, empty changes nothing", async ({
+  page,
+}) => {
   await onboardedOn(page, MONDAY);
   await page.goto("/program");
   await expect(page.getByRole("heading", { level: 2, name: "Cycle weeks" })).toBeVisible();
@@ -214,15 +254,25 @@ test("flag off: Program has no Rehab section; ?flags=rehab turns it on for this 
   await page.goto("/settings");
   await expect(page.locator('[data-program-link="rehab"]')).toHaveCount(0);
 
-  // Opened with ?flags=rehab: on, and the address bar loses the parameter.
+  // Opened with ?flags=rehab: on, said in the dock, and the address bar loses the parameter.
+  await page.evaluate((key) => localStorage.setItem(key, "trainDay"), FLAGS_KEY);
   await page.goto("/program?flags=rehab");
   await expect(page.getByRole("heading", { level: 2, name: "Rehab" })).toBeVisible();
+  await expect(toastMessage(page, "Rehab preview on for this device")).toBeVisible();
   expect(new URL(page.url()).search).toBe("");
-  expect(await page.evaluate((key) => localStorage.getItem(key), FLAGS_KEY)).toBe("rehab");
+  // Merged: what the device had stays.
+  expect(await page.evaluate((key) => localStorage.getItem(key), FLAGS_KEY)).toBe("trainDay,rehab");
   await page.goto("/settings");
   await expect(page.locator('[data-program-link="rehab"]')).toBeVisible();
 
+  // An empty value changes nothing.
   await page.goto("/program?flags=");
+  await expect(page.getByRole("heading", { level: 2, name: "Rehab" })).toBeVisible();
+  expect(new URL(page.url()).search).toBe("");
+
+  await page.goto("/program?flags=-rehab");
   await expect(page.getByRole("heading", { level: 2, name: "Cycle weeks" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 2, name: "Rehab" })).toHaveCount(0);
+  await expect(toastMessage(page, "Rehab preview off for this device")).toBeVisible();
+  expect(await page.evaluate((key) => localStorage.getItem(key), FLAGS_KEY)).toBe("trainDay");
 });

@@ -6,7 +6,7 @@
  * settings as they are when it is tapped, putting back only its own field. Without the flag,
  * Program and Settings are exactly as before.
  */
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -252,6 +252,50 @@ describe("the rehab flag", () => {
   });
 });
 
+describe("Settings › Previews (the flags, for the app on the Home Screen: its own storage, no address bar)", () => {
+  const toggle = (name: string) => screen.getByRole("switch", { name });
+
+  it("turns each preview on or off for this device, saying so; the Rehab row comes and goes with it", async () => {
+    const user = userEvent.setup();
+    window.localStorage.removeItem(FLAGS_KEY);
+    show("/settings");
+    const previews = document.getElementById("previews")!;
+    expect(within(previews).getByRole("heading", { level: 2 }).textContent).toBe("Previews");
+    expect(within(previews).getAllByText("Only on this device · still being built")).toHaveLength(2);
+    expect(toggle("New Train (preview)").getAttribute("aria-checked")).toBe("false");
+    expect(toggle("Rehab (preview)").getAttribute("aria-checked")).toBe("false");
+    expect(document.querySelector('[data-program-link="rehab"]')).toBeNull();
+
+    await user.click(toggle("Rehab (preview)"));
+    expect(window.localStorage.getItem(FLAGS_KEY)).toBe("rehab");
+    expect(toggle("Rehab (preview)").getAttribute("aria-checked")).toBe("true");
+    expect(lastToast().message).toBe("Rehab preview on for this device");
+    expect(document.querySelector('[data-program-link="rehab"]')).not.toBeNull();
+
+    await user.click(toggle("New Train (preview)"));
+    expect(window.localStorage.getItem(FLAGS_KEY)).toBe("trainDay,rehab");
+    await user.click(toggle("Rehab (preview)"));
+    expect(window.localStorage.getItem(FLAGS_KEY)).toBe("trainDay");
+    expect(lastToast().message).toBe("Rehab preview off for this device");
+    expect(document.querySelector('[data-program-link="rehab"]')).toBeNull();
+  });
+
+  it("says so when this device's storage refuses it, and shows what is stored", async () => {
+    const user = userEvent.setup();
+    window.localStorage.removeItem(FLAGS_KEY);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    show("/settings");
+    await user.click(toggle("Rehab (preview)"));
+    expect(lastToast()).toMatchObject({
+      message: "Couldn't change the Rehab preview: this device didn't let Strawvine save it",
+      tone: "warn",
+    });
+    expect(toggle("Rehab (preview)").getAttribute("aria-checked")).toBe("false");
+  });
+});
+
 describe("Program › Rehab", () => {
   it("with no block yet: an empty state that sets up the first — Knee rehab, 6 weeks, M/W/F from today — with an Undo", async () => {
     const user = userEvent.setup();
@@ -261,6 +305,8 @@ describe("Program › Rehab", () => {
     expect(described(setUp)).toBe("Starts today.");
     await user.click(setUp);
 
+    // One heading: the section's (no "New rehab block" under "Rehab" with nothing between).
+    expect(within(rehab()).queryByRole("heading", { level: 3 })).toBeNull();
     // The form starts as a knee protocol would: Mon / Wed / Fri, six weeks, from today.
     for (const d of ["Mon", "Wed", "Fri"]) expect(day("New rehab block days", d).getAttribute("aria-pressed")).toBe("true");
     expect(day("New rehab block days", "Tue").getAttribute("aria-pressed")).toBe("false");
@@ -345,9 +391,13 @@ describe("Program › Rehab", () => {
     await user.click(screen.getByRole("button", { name: "Decrease Knee rehab length" }));
     await user.click(screen.getByRole("button", { name: "Decrease Knee rehab length" }));
     expect(block()!.weeks).toBe(3);
+    const saves = store.saved.length;
     await user.click(screen.getByRole("button", { name: "Decrease Knee rehab length" }));
     expect(block()!.weeks).toBe(3);
-    undo();
+    expect(store.saved).toHaveLength(saves);
+    // A − that can't go further says why, and what does.
+    expect(lastToast().message).toBe("Ends this week at the earliest — End today stops it now.");
+    undo(store.toasts.at(-2));
     expect(block()).toEqual(knee());
   });
 
@@ -381,7 +431,8 @@ describe("Program › Rehab", () => {
     reset(withRehab(knee()));
     show();
     const note = screen.getByRole("group", { name: "Knee rehab: each session starts from" });
-    expect(described(note)).toContain("Wednesday from Monday");
+    // A one-line hint (each card has its own; the long explanation is gone).
+    expect(described(note)).toContain("Wednesday starts from Monday’s session.");
     await user.click(screen.getByRole("button", { name: "The same weekday" }));
     expect(block()!.carry).toBe("weekday");
     expect(lastToast().message).toBe("Knee rehab: each session starts from the same weekday");
@@ -520,8 +571,11 @@ describe("Program › Rehab", () => {
     expect(next.querySelector("[data-rehab-status]")!.textContent).toBe("Starts Mon Nov 30 · Nov 30 – Jan 10, 202718 sessions planned");
     expect(within(next).queryByRole("button", { name: "End today" })).toBeNull();
     // The one in force can't run into it any more.
-    expect(described(screen.getAllByRole("button", { name: "A week" })[0]!)).toBe("Hip rehab starts Nov 30: end this one before it.");
+    expect(described(screen.getAllByRole("button", { name: "A week" })[0]!)).toBe("Can't add a week: Hip rehab starts Nov 30.");
     expect(screen.getAllByRole("button", { name: "A week" })[0]!.hasAttribute("disabled")).toBe(true);
+    // The stepper's + says the same.
+    await user.click(screen.getByRole("button", { name: "Increase Knee rehab length" }));
+    expect(lastToast()).toMatchObject({ message: "Can't add a week: Hip rehab starts Nov 30.", tone: "warn" });
   });
 
   it("renaming it leaves an Undo that only puts the name back", async () => {
@@ -538,5 +592,145 @@ describe("Program › Rehab", () => {
     act(() => store.remote(other));
     undo();
     expect(block()).toEqual(knee({ weeks: 8 }));
+  });
+
+  it("rehab logged today: the new-block line says 'or tomorrow' (End today would make today its last day)", () => {
+    reset(withRehab(knee()), [rehabSession("2026-10-19"), rehabSession(TODAY)]);
+    show();
+    expect(described(screen.getByRole("button", { name: "New rehab block" }))).toBe(
+      "Starts Mon Nov 30, the day after Knee rehab ends — or tomorrow, if you end it today.",
+    );
+  });
+
+  it("a block scheduled after the one in force is one row — name, start, weeks, days — that opens into its card on a tap", async () => {
+    const user = userEvent.setup();
+    const hip = knee({
+      id: "hip",
+      name: "Hip rehab",
+      start: "2026-11-30",
+      weeks: 4,
+      days: [false, false, true, false, true, false, false],
+      carry: "weekday",
+    });
+    reset(withRehab(knee(), hip));
+    show();
+    const folded = rehab().querySelector<HTMLElement>('[data-rehab-block="hip"]')!;
+    expect(folded.hasAttribute("data-rehab-folded")).toBe(true);
+    expect(within(folded).getByRole("heading", { level: 3 }).textContent).toBe("Next rehab block");
+    const row = within(folded).getByRole("button");
+    expect(row.textContent).toBe("Hip rehab · from Mon Nov 30 · 4 wks · Tue/Thu");
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    expect(within(folded).queryByRole("textbox")).toBeNull();
+    // The carry hint shows once on the page (the card in force), not per card.
+    expect(within(rehab()).getAllByText("Wednesday starts from Monday’s session.")).toHaveLength(1);
+    await user.click(row);
+    const card = rehab().querySelector<HTMLElement>('[data-rehab-block="hip"]')!;
+    expect(card.hasAttribute("data-rehab-folded")).toBe(false);
+    expect(card.querySelector("[data-rehab-status]")!.textContent).toBe("Starts Mon Nov 30 · Nov 30 – Dec 278 sessions planned");
+    await vi.waitFor(() => expect(document.activeElement).toBe(card));
+  });
+
+  it("a new block starts on the first of its days on or after the first free day, and follows the days until a start is picked", async () => {
+    const user = userEvent.setup();
+    // Knee on Tue/Thu, ending Sun Nov 29: the next free day is Mon Nov 30, its first Tuesday Dec 1.
+    reset(withRehab(knee({ days: [false, false, true, false, true, false, false] })));
+    show();
+    const add = screen.getByRole("button", { name: "New rehab block" });
+    expect(described(add)).toBe("Starts Tue Dec 1, after Knee rehab ends — or today, if you end it first.");
+    await user.click(add);
+    const starts = screen.getByLabelText<HTMLInputElement>("Starts");
+    expect(starts.value).toBe("2026-12-01");
+    await user.click(day("New rehab block days", "Mon"));
+    expect(starts.value).toBe("2026-11-30");
+    fireEvent.change(starts, { target: { value: "2026-12-03" } });
+    await user.click(day("New rehab block days", "Wed"));
+    expect(starts.value).toBe("2026-12-03");
+  });
+
+  it("after End today, a new block can start in the free days before the next one", async () => {
+    const user = userEvent.setup();
+    const hip = knee({ id: "hip", name: "Hip rehab", start: "2026-11-30", weeks: 4 });
+    reset(withRehab(knee(), hip), [rehabSession("2026-10-19")]);
+    show();
+    expect(described(screen.getByRole("button", { name: "New rehab block" }))).toBe("Starts Mon Dec 28, the day after Hip rehab ends.");
+    await user.click(screen.getByRole("button", { name: "End today" }));
+    expect(block()!.end).toBe("2026-11-03");
+    expect(described(screen.getByRole("button", { name: "New rehab block" }))).toBe("Starts today.");
+  });
+
+  it("End today on a block with nothing logged at all removes it (no empty block in the history), with today's draft; Undo brings both back", async () => {
+    const user = userEvent.setup();
+    const today = withStrength(draftOf(TODAY));
+    reset(withRehab(knee()), [today]);
+    show();
+    await user.click(screen.getByRole("button", { name: "End today" }));
+    expect(programs()).toEqual([]);
+    expect(lastToast().message).toBe("Knee rehab removed: nothing was logged in it");
+    expect(rehab().querySelector("[data-rehab-history]")).toBeNull();
+    expect(store.sessionWrites).toEqual([{ date: TODAY, doc: { ...today, blocks: [STRENGTH] } }]);
+    undo();
+    expect(block()).toEqual(knee());
+    expect(store.sessionWrites.at(-1)).toEqual({ date: TODAY, doc: today });
+  });
+
+  it("Cancel drops today's unlogged draft of the block, as End today does; Undo puts back the block and, on today's session as it is then, only the draft", async () => {
+    const user = userEvent.setup();
+    const today = withStrength(draftOf(TODAY));
+    reset(withRehab(knee({ start: "2026-11-02" })), [today]);
+    show();
+    await user.click(screen.getByRole("button", { name: "Cancel it" }));
+    expect(block()).toBeUndefined();
+    expect(store.data.sessions.find((s) => s.date === TODAY)!.blocks.map((b) => b.id)).toEqual(["main"]);
+    expect(store.sessionWrites).toEqual([{ date: TODAY, doc: { ...today, blocks: [STRENGTH] } }]);
+    act(() => store.writeSession(TODAY, { ...store.data.sessions.find((s) => s.date === TODAY)!, notes: "sore" }));
+    undo();
+    expect(block()).toEqual(knee({ start: "2026-11-02" }));
+    expect(store.sessionWrites.at(-1)).toEqual({ date: TODAY, doc: { ...today, notes: "sore" } });
+    // Only its draft there: the session goes, and comes back with Undo.
+    store.sessionWrites.length = 0;
+    const only = draftOf(TODAY);
+    reset(withRehab(knee({ start: "2026-11-02" })), [only]);
+    await user.click(screen.getByRole("button", { name: "Cancel it" }));
+    expect(store.sessionWrites).toEqual([{ date: TODAY, doc: null }]);
+  });
+
+  it("End today and Cancel work on the block as settings hold it when tapped — their Undo brings back that, not the card's last render", async () => {
+    const user = userEvent.setup();
+    reset(withRehab(knee()), [rehabSession("2026-10-19")]);
+    show();
+    // Another device makes it 8 weeks; this card hasn't rendered it yet (the live copy has it).
+    const other = structuredClone(store.data.settings);
+    other.rehab!.programs[0]!.weeks = 8;
+    store.data = { ...store.data, settings: other };
+    await user.click(screen.getByRole("button", { name: "End today" }));
+    expect(block()).toEqual(knee({ weeks: 8, end: "2026-11-03" }));
+    undo();
+    expect(block()).toEqual(knee({ weeks: 8 }));
+
+    cleanup();
+    reset(withRehab(knee({ start: "2026-11-02" })));
+    show();
+    const renamed = structuredClone(store.data.settings);
+    renamed.rehab!.programs[0]!.name = "Left knee";
+    store.data = { ...store.data, settings: renamed };
+    await user.click(screen.getByRole("button", { name: "Cancel it" }));
+    expect(programs()).toEqual([]);
+    undo();
+    expect(block()).toEqual(knee({ start: "2026-11-02", name: "Left knee" }));
+  });
+
+  it("an Undo that can't be says the real reason", async () => {
+    const user = userEvent.setup();
+    reset(withRehab(knee()), [rehabSession("2026-10-19")]);
+    show();
+    await user.click(screen.getByRole("button", { name: "End today" }));
+    // A new block set up from today meanwhile: Knee can't run on into it.
+    const other = structuredClone(store.data.settings);
+    other.rehab!.programs.push(knee({ id: "hip", name: "Hip rehab", start: TODAY }));
+    act(() => store.remote(other));
+    undo(store.toasts.find((t) => t.message.startsWith("Knee rehab ended")));
+    expect(lastToast()).toMatchObject({ message: "Can't undo: Hip rehab starts Nov 4.", tone: "warn" });
+    expect(block()!.end).toBe("2026-11-03");
+    expect(store.sessionWrites).toEqual([]);
   });
 });
