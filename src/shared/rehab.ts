@@ -288,6 +288,26 @@ export function editRehab(settings: Settings, id: string, patch: Partial<RehabFi
   return lost ? { refused: lost } : put(settings, next);
 }
 
+/**
+ * The block `id` with its stored length set to `span`: its `weeks`, and `end` — the day it was
+ * ended early, or absent (not ended early). What a length change saves, and what its Undo — or the
+ * Undo of "+ A week" or End today — puts back. Refused like `editRehab`: 1–52 weeks, an end before
+ * its start, an overlap it adds, a logged session (`sessions`) it would leave outside the block.
+ */
+export function restoreRehabSpan(
+  settings: Settings,
+  id: string,
+  span: { weeks: number; end?: ISODate | undefined },
+  sessions: ReadonlyArray<Session>,
+): RehabEdit {
+  const p = rehabById(settings, id);
+  if (!p) return { refused: "That rehab block is gone." };
+  const { end: _end, ...rest } = p;
+  const next: RehabProgram = span.end === undefined ? { ...rest, weeks: span.weeks } : { ...rest, weeks: span.weeks, end: span.end };
+  const lost = invalid(next) ?? orphans(next, p, sessions);
+  return lost ? { refused: lost } : put(settings, next);
+}
+
 /** `extendRehab`'s result: also the last day before (`was`) and after (`lastDay`), or why it can't. */
 export type RehabExtend = { settings: Settings; program: RehabProgram; was: ISODate; lastDay: ISODate } | { refused: string };
 

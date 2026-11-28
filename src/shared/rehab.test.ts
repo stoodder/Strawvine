@@ -19,6 +19,7 @@ import {
   rehabTemplate,
   rehabTemplateSource,
   rehabWeek,
+  restoreRehabSpan,
   startRehab,
   withRehabDraft,
   type RehabFields,
@@ -403,6 +404,50 @@ describe("editing rehab blocks (Program › Rehab)", () => {
       refused: "Knee rehab hasn't started yet: cancel it instead.",
     });
     expect(endRehab(withKnee({ end: "2026-11-06" }), "knee", MON, [])).toEqual({ refused: "Knee rehab ended Nov 6." });
+  });
+
+  it("restoreRehabSpan sets the stored length (weeks, and an early end or none): the Undo of End today and of length changes", () => {
+    const ended = endRehab(settings, "knee", WED, [monday]);
+    if ("refused" in ended) throw new Error(ended.refused);
+    // End today's Undo: back to 6 weeks, not ended early.
+    const back = restoreRehabSpan(ended.settings, "knee", { weeks: 6, end: undefined }, [monday]);
+    if ("refused" in back) throw new Error(back.refused);
+    expect(back.program).toEqual(knee);
+    expect(back.program).not.toHaveProperty("end");
+    expect(settingsSchema.parse(back.settings).rehab?.programs).toEqual([knee]);
+    // An early end is set as given; only the block's span changes.
+    const early = restoreRehabSpan(withKnee({ name: "Knee", carry: "weekday" }), "knee", { weeks: 4, end: "2026-11-20" }, []);
+    expect("program" in early && early.program).toEqual({ ...knee, name: "Knee", carry: "weekday", weeks: 4, end: "2026-11-20" });
+    // "+ A week"'s Undo: shorter again.
+    const longer = extendRehab(settings, "knee");
+    if ("refused" in longer) throw new Error(longer.refused);
+    expect(restoreRehabSpan(longer.settings, "knee", { weeks: 6 }, [monday])).toMatchObject({ program: knee });
+  });
+
+  it("restoreRehabSpan is refused like an edit: gone, out of range, an added overlap, a logged session left outside", () => {
+    expect(restoreRehabSpan(settings, "nope", { weeks: 6 }, [])).toEqual({ refused: "That rehab block is gone." });
+    expect(restoreRehabSpan(settings, "knee", { weeks: 53 }, [])).toEqual({ refused: "A rehab block lasts 1 to 52 weeks." });
+    expect(restoreRehabSpan(settings, "knee", { weeks: 6, end: "2026-11-01" }, [])).toEqual({ refused: "It would end before it starts." });
+    // Ended, then the next block set up from today: putting the length back would overlap it.
+    const ended = endRehab(settings, "knee", WED, [monday]);
+    if ("refused" in ended) throw new Error(ended.refused);
+    const next = startRehab(ended.settings, { name: "Hip", start: WED, weeks: 2, days: MWF, carry: "last" }, "hip");
+    if ("refused" in next) throw new Error(next.refused);
+    expect(restoreRehabSpan(next.settings, "knee", { weeks: 6 }, [monday])).toEqual({
+      refused: "Hip starts Nov 11: end this one before it.",
+    });
+    // "+ A week", then a session logged in the added week: its Undo would leave that session outside.
+    const longer = extendRehab(settings, "knee");
+    if ("refused" in longer) throw new Error(longer.refused);
+    const added = session("2026-12-14", [rehabBlock("x", [ex(22, [done("x1", 10, null)])])]);
+    expect(restoreRehabSpan(longer.settings, "knee", { weeks: 6 }, [monday, added])).toEqual({
+      refused: "Knee rehab has a session logged Dec 14: end it on or after then.",
+    });
+    // An overlap it doesn't add (two devices' blocks merged) doesn't hold it.
+    const hip: RehabProgram = { ...knee, id: "hip", name: "Hip", start: "2026-12-07", weeks: 2 };
+    const merged: Settings = { ...base, rehab: { programs: [{ ...knee, end: "2026-12-08" }, hip] } };
+    expect(restoreRehabSpan(merged, "knee", { weeks: 6, end: "2026-12-07" }, [])).not.toHaveProperty("refused");
+    expect(restoreRehabSpan(merged, "knee", { weeks: 6 }, [])).toEqual({ refused: "Hip starts Dec 7: end this one before it." });
   });
 
   it("cancel removes a block only while nothing of it is logged", () => {
