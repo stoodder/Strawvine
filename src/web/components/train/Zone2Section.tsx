@@ -15,8 +15,9 @@
 import { useMemo } from "react";
 import { planTargets } from "../../../shared/program";
 import { shownZone2Machine, zone2Activity, zone2MachineFor, zone2Machines } from "../../../shared/zone2";
+import { fmt } from "../../lib/format";
 import { useData } from "../../lib/store";
-import { LogSection, type LogSectionInput } from "../sections/LogSection";
+import { LogSection, skippedLine, type LogSectionInput } from "../sections/LogSection";
 import { dotted, zone2Plan, zone2Summary } from "../sections/summary";
 import { Zone2Body } from "../sections/Zone2Body";
 
@@ -46,14 +47,14 @@ export function Zone2Section(props: Zone2SectionProps) {
       title="Zone 2"
       kind="zone2"
       skipField="zone2Skipped"
-      onCheck={() =>
-        patch({
-          zone2Done: !log.zone2Done,
-          zone2Minutes: !log.zone2Done && log.zone2Minutes === null ? target : log.zone2Minutes,
-        })
-      }
+      // Ticked with the plan's minutes when none are entered; the minutes are never written otherwise (a count typed
+      // and saved as the field was left for the check stays).
+      onCheck={(want, live) => {
+        if (!!live.zone2Done === want) return;
+        patch(want && live.zone2Minutes == null ? { zone2Done: true, zone2Minutes: target } : { zone2Done: want });
+      }}
       meta={meta}
-      skippedLine="Open on the checklist"
+      skippedLine={skippedLine(`${fmt(target)} min`, props.day.isToday)}
     >
       <Zone2Body key={date} day={log} patch={patch} last={offer.last} machines={offer.machines} />
     </LogSection>

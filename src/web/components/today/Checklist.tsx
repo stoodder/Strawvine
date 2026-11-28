@@ -8,6 +8,8 @@ import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { substanceSummary } from "../../../shared/substances";
 import { DEFAULT_ZONE2_MACHINE, shownZone2Machine, zone2Activity, ZONE2_PRESETS, type LastZone2Machine } from "../../../shared/zone2";
 import { compactSteps, fmt, minutesToHM } from "../../lib/format";
+import { currentData } from "../../lib/sync";
+import { useCheckIntent } from "../sections/useCheckIntent";
 import { Bar, CheckDot } from "../ui";
 import { useHeldWhile } from "../useHeldWhileTyping";
 import { FuelEditor, MetconEditor, MorningEditor, StepsEditor, Zone2Editor } from "./editors";
@@ -104,15 +106,17 @@ export function DayChecklist({
           saved?.mark(item.key);
           patch(p);
         };
-        const onCheck =
+        // The check sets the value decided as the finger landed (`CheckToggle`), on the day as it is then: a value typed in
+        // the row's editor and saved as it was left for the check (which ticks it off) is never undone by it.
+        const onCheck: ((want: boolean, live: DayLog) => void) | null =
           item.key === "metcon"
-            ? () => rowPatch({ metconDone: !day.metconDone })
+            ? (want, live) => !!live.metconDone !== want && rowPatch({ metconDone: want })
             : item.key === "zone2"
-              ? () =>
-                  rowPatch({
-                    zone2Done: !day.zone2Done,
-                    zone2Minutes: !day.zone2Done && day.zone2Minutes === null ? zone2Minutes : day.zone2Minutes,
-                  })
+              ? (want, live) => {
+                  if (!!live.zone2Done === want) return;
+                  // Ticked with the plan's minutes when none are entered; never written otherwise.
+                  rowPatch(want && live.zone2Minutes == null ? { zone2Done: true, zone2Minutes } : { zone2Done: want });
+                }
               : null;
         return (
           <ChecklistRow
@@ -122,6 +126,7 @@ export function DayChecklist({
             open={open === item.key}
             onToggleOpen={() => toggle(item.key)}
             onCheck={onCheck}
+            day={day}
             summary={summary}
             saved={saved?.shown === item.key}
           >
@@ -348,6 +353,7 @@ function ChecklistRow({
   open,
   onToggleOpen,
   onCheck,
+  day,
   summary,
   saved = false,
   children,
@@ -356,8 +362,10 @@ function ChecklistRow({
   lines: RowLines;
   open: boolean;
   onToggleOpen: () => void;
-  /** A real done/not-done toggle (metcon, zone 2); `null` for items done by entering a value. */
-  onCheck: (() => void) | null;
+  /** A real done/not-done toggle (metcon, zone 2): set done to `want` on the day as it is now; `null` for items done by entering a value. */
+  onCheck: ((want: boolean, live: DayLog) => void) | null;
+  /** The day as rendered (the check reads it live, `currentData`, when there is a live copy). */
+  day: DayLog;
   summary: Summary;
   /** The server just acknowledged an edit made in this row. */
   saved?: boolean;
@@ -372,11 +380,7 @@ function ChecklistRow({
       data-celebration-hold={open ? "" : undefined}
     >
       <div className="flex items-center gap-4 px-1">
-        {onCheck ? (
-          <CheckDot done={item.done} onClick={onCheck} label={`${item.label} complete`} />
-        ) : (
-          <StatusDot done={item.done} onActivate={onToggleOpen} />
-        )}
+        {onCheck ? <CheckToggle item={item} day={day} onCheck={onCheck} /> : <StatusDot done={item.done} onActivate={onToggleOpen} />}
         <button
           type="button"
           aria-expanded={open}
@@ -404,6 +408,18 @@ function ChecklistRow({
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+/** A row's real check (metcon, zone 2): what it sets is decided as the finger lands (`useCheckIntent`). */
+function CheckToggle({ item, day, onCheck }: { item: ChecklistItem; day: DayLog; onCheck: (want: boolean, live: DayLog) => void }) {
+  // The day as it is right now (a field's blur commit may have saved since this render), else as rendered.
+  const live = () => currentData()?.days.find((d) => d.date === day.date) ?? day;
+  const intent = useCheckIntent(() => !!live()[item.key === "metcon" ? "metconDone" : "zone2Done"]);
+  return (
+    <span {...intent.capture} className="contents">
+      <CheckDot done={item.done} onClick={() => onCheck(intent.take(), live())} label={`${item.label} complete`} />
+    </span>
   );
 }
 

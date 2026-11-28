@@ -11,6 +11,12 @@
  * A block that becomes done while the page is in use — its last set logged here, or on another
  * device — stays as it is until the next of those moments.
  *
+ * Coming back to the foreground is a moment the athlete may be in the middle of something — a
+ * metcon's notes half written when they switched apps to look up the workout. So at that moment
+ * a block never folds with a field in it holding the focus, nor one that folds only
+ * when its day is opened (`openOnly`: Metcon and Zone 2, sections written in rather than logged
+ * set by set, whose fields keep no focus across an app switch on iOS).
+ *
  * A block opened by hand stays open through those moments, for the life of the page (`rememberedOpen`),
  * until it is folded by hand — or stops being done (a set unlogged or added), which makes it an
  * ordinary open block again.
@@ -27,8 +33,10 @@ export interface FoldView {
 
 export interface BlockState {
   id: string;
-  /** Every set of the block is logged (`blockComplete`). */
+  /** Every set of the block is logged (`blockComplete`); a Metcon / Zone 2 section: checked. */
   done: boolean;
+  /** It folds only when its day is opened (or by hand), never as the app comes back to the foreground. */
+  openOnly?: boolean;
 }
 
 const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>) => a.size === b.size && [...a].every((x) => b.has(x));
@@ -50,11 +58,32 @@ export function reconcileFolds(view: FoldView, blocks: ReadonlyArray<BlockState>
   return sameSet(folded, view.folded) && sameSet(open, view.open) ? view : { folded, open };
 }
 
-/** One of the moments at which done blocks fold: every done block does, except those opened by hand. */
-export function foldDone(view: FoldView, blocks: ReadonlyArray<BlockState>): FoldView {
+/**
+ * One of the moments at which done blocks fold: every done block does, except those opened by
+ * hand. `foreground`: the app came back to the foreground — then a block `openOnly`, or among
+ * `holding` (the one with the focus), stays as it is (folded already: still folded).
+ */
+export function foldDone(
+  view: FoldView,
+  blocks: ReadonlyArray<BlockState>,
+  moment: { foreground?: boolean; holding?: ReadonlySet<string> } = {},
+): FoldView {
   const kept = reconcileFolds(view, blocks);
-  const folded = new Set(blocks.filter((b) => b.done && !kept.open.has(b.id)).map((b) => b.id));
+  const stays = (b: BlockState) => !!moment.foreground && (!!b.openOnly || !!moment.holding?.has(b.id));
+  const folded = new Set(blocks.filter((b) => b.done && !kept.open.has(b.id) && (kept.folded.has(b.id) || !stays(b))).map((b) => b.id));
   return sameSet(folded, kept.folded) ? kept : { folded, open: kept.open };
+}
+
+/**
+ * The block (`[data-fold]`) with a field being written in (an input, a text area, a select or
+ * editable text holding the focus), if any. A focused button — the set check just tapped — doesn't
+ * hold its block: it folds, and the focus goes to its folded row (`foldInPlace`).
+ */
+function blockBeingWritten(): ReadonlySet<string> {
+  const el = document.activeElement as HTMLElement | null;
+  if (!el || !(el.matches("input, textarea, select") || el.isContentEditable)) return new Set();
+  const id = el.closest<HTMLElement>("[data-fold]")?.dataset.fold;
+  return new Set(id ? [id] : []);
 }
 
 /** A done block folded (`fold`) or opened by hand. */
@@ -116,7 +145,8 @@ export function foldInPlace(folding: ReadonlySet<string>, apply: () => void) {
  * The folds of one Train day. `blocks`: every block with whether it is done.
  *
  * Returns `folded(id)` and `setFolded(id, fold)` (by hand). Opening the day folds its done blocks
- * (the first render for a date); coming back to the foreground folds them in place.
+ * (the first render for a date); coming back to the foreground folds them in place — but not one
+ * `openOnly`, nor the one with a field holding the focus.
  */
 export function useFolds(date: string, blocks: ReadonlyArray<BlockState>) {
   const [state, setState] = useState(() => ({ date, view: foldDone(initialFolds(rememberedOpen(date)), blocks) }));
@@ -137,10 +167,13 @@ export function useFolds(date: string, blocks: ReadonlyArray<BlockState>) {
       // Behind an open sheet the page is pinned and can't be held in place: it folds at the next of these moments.
       if (document.visibilityState !== "visible" || "scrollLocked" in document.documentElement.dataset) return;
       const { date, blocks, view } = now.current;
-      const next = foldDone(view, blocks);
+      const moment = { foreground: true, holding: blockBeingWritten() };
+      const next = foldDone(view, blocks, moment);
       if (next === view) return;
       const folding = new Set([...next.folded].filter((id) => !view.folded.has(id)));
-      foldInPlace(folding, () => flushSync(() => setState((s) => (s.date === date ? { date, view: foldDone(s.view, blocks) } : s))));
+      foldInPlace(folding, () =>
+        flushSync(() => setState((s) => (s.date === date ? { date, view: foldDone(s.view, blocks, moment) } : s))),
+      );
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);

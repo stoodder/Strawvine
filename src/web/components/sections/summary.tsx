@@ -32,15 +32,17 @@ export const METCON_PLAN = "CrossFit";
 
 /**
  * A metcon's summary: what it was (the benchmark, else the first line of the notes, else
- * "CrossFit"), the score, and "New best" (gold: a benchmark PR is a PR) when it beat the best
- * before the day. `days`: the day logs (the best is of earlier days).
+ * "CrossFit"), the score, and — with `best`, and only for a metcon done — "New best" (gold: a
+ * benchmark PR is a PR) when it beat the best before the day. `days`: the day logs (the best is of
+ * earlier days). The section asks for it only when folded: open, the body's line under the notes
+ * says it, and it is said once.
  */
-export function metconSummary(log: DayLog, days: ReadonlyArray<DayLog>): ReactNode {
+export function metconSummary(log: DayLog, days: ReadonlyArray<DayLog>, opts: { best?: boolean } = {}): ReactNode {
   const name = text(log.metconBenchmark);
   const score = text(log.metconScore);
   const parts: ReactNode[] = [name ?? firstLine(log.metconNotes) ?? METCON_PLAN];
   if (score) parts.push(<Num>{score}</Num>);
-  if (name && score) {
+  if (opts.best && log.metconDone && name && score) {
     const best = benchmarkBest(days, name, log.date);
     const parsed = parseScore(score);
     const verdict = best?.parsed && parsed ? compareScore(parsed, best.parsed) : null;

@@ -324,7 +324,7 @@ describe("Zone 2 row", () => {
     expect(row().textContent).toBe("Zone 230 minSki erg");
     // Un-ticked: the machine stays the day's.
     await user.click(screen.getByRole("button", { name: "Zone 2 complete" }));
-    expect(patches.at(-1)).toEqual({ zone2Done: false, zone2Minutes: 30 });
+    expect(patches.at(-1)).toEqual({ zone2Done: false });
     expect(row().textContent).toBe("Zone 2Ski erg");
     // Nothing chosen: the dot's value is saved with the last one used.
     cleanup();

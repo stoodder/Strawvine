@@ -87,14 +87,17 @@ export function MetconBody({ day, patch }: EditorProps) {
               className="hit-lg -my-1 rounded-sm py-1 text-left text-mute underline decoration-white/20 decoration-dotted underline-offset-4"
             >
               {/* Once this day beats it, it's the previous best. */}
-              {verdict?.tone === "gold" ? "Prev. best" : "Best"} <span className="num text-fg-2">{best.score}</span> ·{" "}
+              {verdict?.tone === "gold" && day.metconDone ? "Prev. best" : "Best"} <span className="num text-fg-2">{best.score}</span> ·{" "}
               {formatShortDate(best.date, best.date.slice(0, 4) !== day.date.slice(0, 4))}
               <span className="sr-only">. Show all results</span>
             </button>
           ) : (
             <span className="text-mute">First time logged — this sets the mark.</span>
           )}
-          {verdict && <span className={clsx("num", verdict.tone === "gold" ? "text-gold" : "text-mute")}>{verdict.text}</span>}
+          {/* Gold only for a real PR: the metcon done (a score typed and then unticked is no PR yet). */}
+          {verdict && (
+            <span className={clsx("num", verdict.tone === "gold" && day.metconDone ? "text-gold" : "text-mute")}>{verdict.text}</span>
+          )}
         </div>
       )}
       {!day.metconBenchmark && recent.length > 0 && (

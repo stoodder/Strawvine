@@ -9,7 +9,7 @@
  * the day, with Remove). A preview shows the head alone.
  */
 import { useData } from "../../lib/store";
-import { LogSection, type LogSectionInput } from "../sections/LogSection";
+import { LogSection, skippedLine, type LogSectionInput } from "../sections/LogSection";
 import { MetconBody } from "../sections/MetconBody";
 import { dotted, METCON_PLAN, metconSummary } from "../sections/summary";
 
@@ -21,7 +21,8 @@ export function MetconSection(props: MetconSectionProps) {
   const status = section.status;
   const meta =
     status === "done" || status === "progress"
-      ? metconSummary(log, data.days)
+      ? // "New best" once, where it is seen: in the body's line while the section is open, here only when folded.
+        metconSummary(log, data.days, { best: props.folded === true && status === "done" })
       : onRemove && status === "todo"
         ? "Added for today"
         : status === "notDone"
@@ -33,9 +34,9 @@ export function MetconSection(props: MetconSectionProps) {
       title="Metcon"
       kind="metcon"
       skipField="metconSkipped"
-      onCheck={() => patch({ metconDone: !log.metconDone })}
+      onCheck={(want, live) => !!live.metconDone !== want && patch({ metconDone: want })}
       meta={meta}
-      skippedLine="Open on the checklist"
+      skippedLine={skippedLine(METCON_PLAN, props.day.isToday)}
     >
       <MetconBody key={log.date} day={log} patch={patch} />
     </LogSection>

@@ -64,7 +64,8 @@ afterEach(() => {
 const section = () => screen.getByRole("region", { name: "Metcon" });
 const meta = () => document.getElementById(section().getAttribute("aria-describedby")!)!.textContent;
 const check = () => screen.getByRole("button", { name: "Metcon complete" });
-const notToday = () => screen.queryByRole("button", { name: "Not today: Metcon" });
+/** Skip (Not today): a quiet button in words, unlike the NOT TODAY state it leads to. */
+const notToday = () => screen.queryByRole("button", { name: "Skip Metcon" });
 const bringBack = () => screen.queryByRole("button", { name: "Bring back Metcon" });
 const notes = () => screen.queryByRole("textbox", { name: "Metcon notes" });
 const field = (name: string) => screen.getByLabelText(name, { selector: "input" });
@@ -119,7 +120,7 @@ describe("MetconSection", () => {
     expect(notToday()).toBeTruthy();
   });
 
-  it("summarises a benchmark logged as name · score · New best (gold), and folds to that one line at the fold moments", async () => {
+  it("summarises a benchmark logged as name · score, says New best (gold) once — in the body while open, in the meta folded — and folds only when its day is opened", async () => {
     const user = userEvent.setup();
     const { control } = setup();
     await user.type(field("Benchmark name"), "Fran");
@@ -130,21 +131,47 @@ describe("MetconSection", () => {
       { metconBenchmark: "Fran", metconDone: true },
       { metconScore: "4:12", metconDone: true },
     ]);
-    expect(meta()).toBe("Fran · 4:12 · New best");
-    expect(within(document.getElementById(section().getAttribute("aria-describedby")!)!).getByText("New best").className).toContain(
-      "text-gold",
-    );
-    // Done while in use: still open.
+    // Open: the body's line under the notes says it, the meta doesn't repeat it.
+    expect(meta()).toBe("Fran · 4:12");
+    const golds = () => [...section().querySelectorAll(".text-gold")].map((e) => e.textContent);
+    expect(golds()).toEqual(["New best"]);
+    // Done while in use: still open — and back in the foreground too (a metcon may be half written).
     expect(notes()).toBeTruthy();
-    // Back in the foreground (a fold moment): it shows as its head and summary only.
     act(() => hide());
+    expect(notes()).toBeTruthy();
+    // Folded by hand: its head and summary only, New best in the meta.
+    await user.click(screen.getByRole("button", { name: "Fold Metcon" }));
     expect(notes()).toBeNull();
-    expect(section().querySelector("[data-section-heading]")).toBeTruthy();
     expect(meta()).toBe("Fran · 4:12 · New best");
+    expect(golds()).toEqual(["New best"]);
     expect(check().getAttribute("aria-pressed")).toBe("true");
     const show = screen.getByRole("button", { name: "Show Metcon" });
     expect(show.getAttribute("aria-expanded")).toBe("false");
     expect(show.dataset.foldToggle).toBe("metcon");
+    await user.click(show);
+    expect(notes()).toBeTruthy();
+    // The day opened again (the screen shown anew; on a new page, so nothing is remembered opened by hand), done: it
+    // opens folded, New best in the meta.
+    cleanup();
+    forgetFolds();
+    setup({ days: [FRAN_BEFORE, day(TODAY, { metconDone: true, metconBenchmark: "Fran", metconScore: "4:12" })] });
+    expect(notes()).toBeNull();
+    expect(meta()).toBe("Fran · 4:12 · New best");
+    expect(golds()).toEqual(["New best"]);
+  });
+
+  it("a score that beats the best but isn't ticked: New best once, and not gold (no PR yet)", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.type(field("Benchmark name"), "Fran");
+    await user.click(field("Benchmark score"));
+    await user.type(field("Benchmark score"), "4:12");
+    await user.tab();
+    await user.click(check());
+    expect(check().getAttribute("aria-pressed")).toBe("false");
+    expect(meta()).toBe("Fran · 4:12");
+    expect(within(section()).getAllByText("New best")).toHaveLength(1);
+    expect(section().querySelectorAll(".text-gold")).toHaveLength(0);
   });
 
   it("opens folded when its day is opened done; a past day not done says so, and keeps its check", () => {
@@ -156,7 +183,8 @@ describe("MetconSection", () => {
     expect(meta()).toBe("Not done · CrossFit");
     expect(section().dataset.state).toBe("missed");
     expect(check()).toBeTruthy();
-    expect(notToday()).toBeTruthy();
+    // A past day was done or it wasn't: no Skip.
+    expect(notToday()).toBeNull();
   });
 
   it("Not today: saves metconSkipped, shows one muted line and Bring back (focused); Undo puts back only its own field; Bring back clears it", async () => {
@@ -167,7 +195,8 @@ describe("MetconSection", () => {
     expect(section().dataset.state).toBe("skipped");
     expect(notes()).toBeNull();
     expect(screen.queryByRole("button", { name: "Metcon complete" })).toBeNull();
-    expect(within(section()).getByText("Open on the checklist")).toBeTruthy();
+    // What was skipped, and that the checklist still has it open.
+    expect(section().querySelector("[data-skipped-line]")!.textContent).toBe("CrossFit · open on Today");
     await vi.waitFor(() => expect(document.activeElement).toBe(bringBack()));
     expect(live()).toContain("Metcon: not today");
 
@@ -265,5 +294,43 @@ describe("MetconSection", () => {
     act(() => hide());
     expect(control.patches).toEqual([{ metconScore: "12+4", metconDone: true }]);
     expect(check().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("notes typed, then the check tapped (the blur commit ticks it first): the metcon ends up done, the notes kept", async () => {
+    const user = userEvent.setup();
+    const { control } = setup();
+    await user.click(notes()!);
+    await user.type(notes()!, "Cindy");
+    await user.click(check());
+    expect(control.patches).toEqual([{ metconNotes: "Cindy", metconDone: true }]);
+    expect(check().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("the check tapped with the notes still focused (iOS: the click first, the blur after): done once, the notes saved after", () => {
+    const { control } = setup();
+    const n = notes()!;
+    act(() => n.focus());
+    fireEvent.change(n, { target: { value: "Cindy" } });
+    fireEvent.pointerDown(check());
+    fireEvent.click(check());
+    act(() => n.blur());
+    expect(control.patches).toEqual([{ metconDone: true }, { metconNotes: "Cindy", metconDone: true }]);
+    expect(check().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("a metcon being written is never folded away as the app comes back: notes focused, app switched and back", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.type(field("Benchmark name"), "Fran");
+    await user.click(notes()!);
+    await user.type(notes()!, "21-15-9");
+    const n = notes();
+    expect(check().getAttribute("aria-pressed")).toBe("true");
+    act(() => hide());
+    expect(notes()).toBe(n);
+    // And with the focus gone meanwhile (iOS drops it as the app goes to the background): still open.
+    act(() => n!.blur());
+    act(() => hide());
+    expect(notes()).toBeTruthy();
   });
 });

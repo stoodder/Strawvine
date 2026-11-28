@@ -105,4 +105,21 @@ describe("folds", () => {
     // One that isn't done any more isn't held open.
     expect(opened(initialFolds(["a"]), { a: false }).open.size).toBe(0);
   });
+
+  it("back in the foreground, a block holding the focus — or one that folds only when its day is opened — stays as it is", () => {
+    const list: BlockState[] = [
+      { id: "main", done: true },
+      { id: "metcon", done: true, openOnly: true },
+      { id: "acc", done: true },
+    ];
+    let view = reconcileFolds(initialFolds(), list);
+    const back = foldDone(view, list, { foreground: true, holding: new Set(["acc"]) });
+    expect(list.filter((b) => isFolded(back, b)).map((b) => b.id)).toEqual(["main"]);
+    // Folded already: still folded.
+    view = setFold(view, "metcon", true);
+    expect(isFolded(foldDone(view, list, { foreground: true }), list[1]!)).toBe(true);
+    // The day opened: everything done folds, those too.
+    const reopened = foldDone(reconcileFolds(initialFolds(), list), list);
+    expect(list.filter((b) => isFolded(reopened, b)).map((b) => b.id)).toEqual(["main", "metcon", "acc"]);
+  });
 });

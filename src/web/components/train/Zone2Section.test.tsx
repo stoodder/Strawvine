@@ -61,7 +61,8 @@ afterEach(() => {
 const section = () => screen.getByRole("region", { name: "Zone 2" });
 const meta = () => document.getElementById(section().getAttribute("aria-describedby")!)!.textContent;
 const check = () => screen.getByRole("button", { name: "Zone 2 complete" });
-const notToday = () => screen.queryByRole("button", { name: "Not today: Zone 2" });
+/** Skip (Not today). */
+const notToday = () => screen.queryByRole("button", { name: "Skip Zone 2" });
 const bringBack = () => screen.queryByRole("button", { name: "Bring back Zone 2" });
 const minutes = () => screen.queryByRole("textbox", { name: "Zone 2 minutes" }) as HTMLInputElement | null;
 const kcal = () => screen.getByRole("textbox", { name: "Zone 2 machine calories" });
@@ -108,12 +109,12 @@ describe("Zone2Section", () => {
     expect(minutes()).toBeTruthy();
     // Untick: done goes, the minutes stay (logged: In progress, no Not today).
     await user.click(check());
-    expect(control.patches.at(-1)).toEqual({ zone2Done: false, zone2Minutes: 30 });
+    expect(control.patches.at(-1)).toEqual({ zone2Done: false });
     expect(section().dataset.state).toBe("active");
     expect(notToday()).toBeNull();
   });
 
-  it("summarises machine · minutes · kcal, and folds to that line at a fold moment (never while in use); the chevron opens it", async () => {
+  it("summarises machine · minutes · kcal; folds to that line only when its day is opened or by hand — not when the app comes back; the chevron opens it", async () => {
     const user = userEvent.setup();
     const control = setup();
     await user.selectOptions(machine(), "bike");
@@ -125,15 +126,24 @@ describe("Zone2Section", () => {
     expect(control.patches).toEqual([{ zone2Machine: "bike" }, { zone2Minutes: 35, zone2Done: true }, { zone2Kcal: 320 }]);
     expect(meta()).toBe("Cycling · 35 min · 320 kcal");
     expect(minutes()).toBeTruthy();
+    // Back in the foreground: a section written in stays as it is.
     act(() => {
       hide();
       show();
     });
+    expect(minutes()).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Fold Zone 2" }));
     expect(minutes()).toBeNull();
     expect(meta()).toBe("Cycling · 35 min · 320 kcal");
     await user.click(screen.getByRole("button", { name: "Show Zone 2" }));
     expect(minutes()!.value).toBe("35");
     expect(screen.getByRole("button", { name: "Fold Zone 2" }).getAttribute("aria-expanded")).toBe("true");
+    // Its day opened done (a new page): folded.
+    cleanup();
+    forgetFolds();
+    setup({ days: [ROWED_THU, day(TODAY, { zone2Done: true, zone2Minutes: 35, zone2Kcal: 320, zone2Machine: "bike" })] });
+    expect(minutes()).toBeNull();
+    expect(meta()).toBe("Cycling · 35 min · 320 kcal");
   });
 
   it("a machine alone is not Zone 2: Not today is still offered; a reading is, and takes it away", async () => {
@@ -159,6 +169,7 @@ describe("Zone2Section", () => {
     expect(minutes()).toBeNull();
     expect(screen.queryByRole("button", { name: "Zone 2 complete" })).toBeNull();
     expect(meta()).toBe("30 min planned");
+    expect(section().querySelector("[data-skipped-line]")!.textContent).toBe("30 min · open on Today");
     await vi.waitFor(() => expect(document.activeElement).toBe(bringBack()));
     expect(live()).toContain("Zone 2: not today");
     await user.click(screen.getByRole("button", { name: "Undo" }));
@@ -181,8 +192,8 @@ describe("Zone2Section", () => {
     expect(control.patches).toEqual([{ zone2Minutes: 40, zone2Done: true }]);
     expect(store.data && (store.data as DayData).days.find((d) => d.date === TODAY)?.zone2Machine).toBe("row");
     expect(meta()).toBe("Rowing · 40 min");
-    // In use when hidden (the field still had focus): back in the foreground, it folds — the field's value was saved first.
-    expect(minutes()).toBeNull();
+    // In use when hidden (the field still had focus): back in the foreground it stays open, the field where it was.
+    expect(minutes()).toBeTruthy();
   });
 
   it("typing stays put: the fields are the same elements as values save, and a skip saved elsewhere waits until no field has focus", async () => {
@@ -228,5 +239,69 @@ describe("Zone2Section", () => {
     expect(screen.queryByRole("button", { name: "Zone 2 complete" })).toBeNull();
     expect(notToday()).toBeNull();
     expect(minutes()).toBeNull();
+  });
+
+  it("minutes typed, then the check tapped (the field's blur commit first): Zone 2 ends up done — the tap never undoes the value typed", async () => {
+    const user = userEvent.setup();
+    const control = setup();
+    await user.click(minutes()!);
+    await user.type(minutes()!, "35");
+    await user.click(check());
+    expect(control.patches).toEqual([{ zone2Minutes: 35, zone2Done: true }]);
+    expect(check().getAttribute("aria-pressed")).toBe("true");
+    expect(minutes()!.value).toBe("35");
+  });
+
+  it("minutes typed, then the check tapped with the field still focused (iOS: the click first, the blur after): done, with the minutes typed", async () => {
+    const control = setup();
+    const field = minutes()!;
+    act(() => field.focus());
+    fireEvent.change(field, { target: { value: "35" } });
+    // iOS: a tap on a button doesn't take focus — pointerdown and click land with the field still focused.
+    fireEvent.pointerDown(check());
+    fireEvent.click(check());
+    expect(document.activeElement).toBe(field);
+    act(() => field.blur());
+    expect(control.patches).toEqual([
+      { zone2Done: true, zone2Minutes: 30 },
+      { zone2Minutes: 35, zone2Done: true },
+    ]);
+    expect(check().getAttribute("aria-pressed")).toBe("true");
+    expect((store.data as DayData).days.find((d) => d.date === TODAY)).toMatchObject({ zone2Done: true, zone2Minutes: 35 });
+  });
+
+  it("the check from the keyboard (Enter / Space: no pointer): toggles on the day as it is", async () => {
+    const user = userEvent.setup();
+    const control = setup();
+    check().focus();
+    await user.keyboard("{Enter}");
+    expect(control.patches).toEqual([{ zone2Done: true, zone2Minutes: 30 }]);
+    await user.keyboard(" ");
+    expect(control.patches.at(-1)).toEqual({ zone2Done: false });
+    expect(check().getAttribute("aria-pressed")).toBe("false");
+    // A press that never became a click (the finger moved off) doesn't decide a later key's toggle.
+    fireEvent.pointerDown(check());
+    await user.keyboard("{Enter}");
+    expect(control.patches.at(-1)).toEqual({ zone2Done: true });
+    expect(check().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("logged data beats a stale Not today (two devices): in progress, the minutes visible, nothing hidden", () => {
+    setup({ days: [ROWED_THU, day(TODAY, { zone2Skipped: true, zone2Minutes: 25 })] });
+    expect(section().dataset.state).toBe("active");
+    expect(minutes()!.value).toBe("25");
+    expect(bringBack()).toBeNull();
+    expect(notToday()).toBeNull();
+  });
+
+  it("a past day not done: Not done, its check, and no Skip", () => {
+    setup({ date: "2026-11-09", days: [] });
+    expect(section().dataset.state).toBe("missed");
+    expect(check()).toBeTruthy();
+    expect(notToday()).toBeNull();
+    // Skipped that day: what was skipped, left open on its checklist.
+    cleanup();
+    setup({ date: "2026-11-09", days: [day("2026-11-09", { zone2Skipped: true })] });
+    expect(section().querySelector("[data-skipped-line]")!.textContent).toBe("30 min · left open");
   });
 });

@@ -5,9 +5,10 @@
  * Head: a mono index ("02", lime with a faint glow on the current section), the name as a light
  * title, a meta line under it that truncates and never wraps (its full text is the section's
  * accessible description), and at the right, on the title's line: an optional control (`action`,
- * "Remove"), then "Not today" (`onSkip`), then the state — the caller's check (`check`, Metcon
- * and Zone 2), or what the state says: a count ("5/16"), a lit check once done, NOT TODAY or
- * NOT DONE. The check sits in the same right-hand column as every set's check.
+ * "Remove"), then **Skip** (`onSkip`: a quiet button, so that it never reads as the state), then
+ * the state — the caller's check (`check`, Metcon and Zone 2), or what the state says: a count
+ * ("5/16"), a lit check once done, NOT TODAY or NOT DONE (mono labels: a state, not a control).
+ * The check sits in the same right-hand column as every set's check.
  *
  * Under the head, an optional hairline fills with `progress` (and `sweep` runs one pass of light
  * along it when the section completes). A section that is Not today shows one muted line (what it
@@ -42,7 +43,7 @@ export interface DaySectionProps {
   check?: ReactNode;
   /** A control before the state ("Remove" on an added section). */
   action?: ReactNode;
-  /** Shows "Not today" (pass it only while nothing in the section is logged). */
+  /** Shows **Skip**, which makes it Not today (pass it only on today or the day's draft, while nothing in it is logged). */
   onSkip?: () => void;
   /** A Not-today section's Bring back. */
   onBringBack?: () => void;
@@ -65,7 +66,7 @@ function stateText(state: SectionState, count: DaySectionProps["count"]): { show
   return null;
 }
 
-/** The small mono button of a section head ("Not today", "Bring back"). */
+/** The small mono button of a section head ("Bring back"). */
 function HeadButton({
   onClick,
   label,
@@ -162,9 +163,16 @@ export function DaySection({
           <div className="col-start-3 row-start-1 -my-1.5 flex items-center">
             {action}
             {onSkip && (
-              <HeadButton onClick={onSkip} label={`Not today: ${title}`} last={!check && state !== "done"}>
-                Not today
-              </HeadButton>
+              // A quiet button, in words — unlike NOT TODAY, the state it leads to, in the head's mono labels.
+              // Visibly a pill, 44px to the touch (`chip`'s hit area).
+              <button
+                type="button"
+                onClick={onSkip}
+                aria-label={`Skip ${title}`}
+                className={clsx("chip shrink-0 bg-white/[0.04] text-fg-2", check && "mr-1")}
+              >
+                Skip
+              </button>
             )}
             {check ? (
               <CheckCell>{check}</CheckCell>
@@ -203,7 +211,9 @@ export function DaySection({
 
       {skipped && (skippedLine || onBringBack) && (
         <div className="mt-4 flex min-h-11 items-center justify-between gap-3">
-          <span className="min-w-0 truncate text-[0.9375rem] text-mute">{skippedLine}</span>
+          <span data-skipped-line="" className="min-w-0 truncate text-[0.9375rem] text-mute">
+            {skippedLine}
+          </span>
           {onBringBack && (
             <HeadButton onClick={onBringBack} tone="accent" label={`Bring back ${title}`} last>
               Bring back

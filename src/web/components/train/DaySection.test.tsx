@@ -74,7 +74,7 @@ describe("DaySection", () => {
     expect(within(metcon).queryByText("Done")).toBeNull();
   });
 
-  it("offers Not today while untouched, in place of the count, before the check", () => {
+  it("offers Skip while untouched — a quiet button in words, not the NOT TODAY state label — in place of the count, before the check", () => {
     const onSkip = vi.fn();
     render(
       <DaySection
@@ -89,9 +89,13 @@ describe("DaySection", () => {
       />,
     );
     const buttons = within(region("Metcon")).getAllByRole("button");
-    expect(buttons.map((b) => b.textContent)).toEqual(["Remove", "Not today", "Metcon done"]);
+    expect(buttons.map((b) => b.textContent)).toEqual(["Remove", "Skip", "Metcon done"]);
     expect(within(region("Metcon")).queryByText("0/3")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Not today: Metcon" }));
+    const skip = screen.getByRole("button", { name: "Skip Metcon" });
+    // Not the mono label the state words are drawn in.
+    expect(skip.className).not.toContain("label");
+    expect(skip.className).toContain("chip");
+    fireEvent.click(skip);
     expect(onSkip).toHaveBeenCalledOnce();
   });
 

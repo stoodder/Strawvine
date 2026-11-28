@@ -14,7 +14,7 @@ import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { daySections, type DayData, type SectionKey } from "../../../shared/sections";
 import { fillZone2Machine, zone2MachineFor } from "../../../shared/zone2";
 import { useFolds } from "../train/folds";
-import type { LogSectionInput } from "./LogSection";
+import { logSectionFold, type LogSectionInput } from "./LogSection";
 
 export interface HarnessControl {
   /** Every patch the section saved, in order. */
@@ -69,7 +69,7 @@ export function SectionHarness({
 
   const log = days.find((d) => d.date === date) ?? emptyDayLog(date);
   const section = daySections(date, all, { today, added: added && !removed ? [kind] : [] }).find((s) => s.key === kind);
-  const folds = useFolds(date, [{ id: kind, done: section?.status === "done" }]);
+  const folds = useFolds(date, [logSectionFold(kind, section?.status)]);
   if (!section) return null;
   return (
     <Section

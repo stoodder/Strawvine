@@ -164,12 +164,21 @@ describe("daySections", () => {
     expect(dayComplete(preview)).toBe(false);
   });
 
-  it("metcon and Zone 2: something entered is in progress; a skip is Not today; a check beats a skip", () => {
+  it("metcon and Zone 2: something entered is in progress; a skip is Not today; a check — and data — beat a skip", () => {
     const d = (o: Partial<DayLog>) => [{ ...emptyDayLog(MON), ...o }];
     expect(at(daySections(MON, data([], d({ metconScore: "4:12" })), { today: MON }), "metcon").status).toBe("progress");
     expect(at(daySections(MON, data([], d({ zone2Minutes: 30 })), { today: MON }), "zone2").status).toBe("progress");
     expect(at(daySections(MON, data([], d({ metconSkipped: true })), { today: MON }), "metcon").status).toBe("skipped");
     expect(at(daySections(MON, data([], d({ metconSkipped: true, metconDone: true })), { today: MON }), "metcon").status).toBe("done");
+    // Data beats a stale skip (one device skipped it while another logged): in progress, on a past day too — never
+    // a Not today hiding what was logged.
+    expect(at(daySections(MON, data([], d({ zone2Skipped: true, zone2Minutes: 25 })), { today: MON }), "zone2").status).toBe("progress");
+    expect(at(daySections(MON, data([], d({ zone2Skipped: true, zone2Kcal: 200 })), { today: TUE }), "zone2").status).toBe("progress");
+    expect(at(daySections(MON, data([], d({ metconSkipped: true, metconNotes: "Cindy" })), { today: MON }), "metcon").status).toBe(
+      "progress",
+    );
+    // A machine alone is no data: still Not today.
+    expect(at(daySections(MON, data([], d({ zone2Skipped: true, zone2Machine: "row" })), { today: MON }), "zone2").status).toBe("skipped");
     // A day cached by an older build lacks the new fields: they read as false / null.
     const old = { ...emptyDayLog(MON) } as Partial<DayLog>;
     delete old.metconSkipped;

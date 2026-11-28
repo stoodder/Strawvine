@@ -29,7 +29,7 @@ export type SectionKey = "metcon" | "strength" | "rehab" | "zone2";
  * - `progress`: something logged (a set; a metcon's notes or score, a Zone 2 duration or reading) but not done;
  * - `done`: Metcon / Zone 2 checked, Strength finished (`completedAt`, or its plan finished on
  *   another day: `doneOn`), Rehab with every set not skipped logged;
- * - `skipped`: "Not today" (on purpose);
+ * - `skipped`: "Not today" (on purpose), with nothing of it logged (data wins: logged, it is `progress`);
  * - `notDone`: a past day's section neither done nor skipped;
  * - `notSetUp`: Rehab with no exercises yet (`empty`) on a past day: never "Not done", never missed;
  * - `planned`: a future day (a preview, which never saves).
@@ -105,8 +105,10 @@ export function daySections(date: ISODate, data: DayData, opts: DaySectionsOptio
   const plan = planTargets(settings, date);
   const wd = weekdayOf(date);
   const out: DaySection[] = [];
+  // Data wins: a section with something logged or entered that isn't done is in progress, even with a stale Not today
+  // (two devices: one skipped it while the other logged) — never a skip hiding what was logged.
   const open = (s: { done: boolean; skipped: boolean; progress: boolean }): SectionStatus =>
-    s.done ? "done" : preview ? "planned" : s.skipped ? "skipped" : s.progress ? "progress" : past ? "notDone" : "todo";
+    s.done ? "done" : preview ? "planned" : s.progress ? "progress" : s.skipped ? "skipped" : past ? "notDone" : "todo";
 
   // Metcon
   const metcon = { planned: !!plan.metcon[wd], done: !!day?.metconDone, skipped: !!day?.metconSkipped };
