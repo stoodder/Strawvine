@@ -57,10 +57,24 @@ export const dayLogFields = {
    * TDEE estimate, targets or anything else energy-related (nothing but the Zone 2 row reads it).
    */
   zone2Kcal: z.number().int().min(0).max(3000).nullable(),
+  /**
+   * The machine Zone 2 was done on: a key (`bike`, `row`, `elliptical`, `ski`) or a name of the
+   * owner's own. null = not recorded, which reads as the bike (every day logged before it existed
+   * was cycling). Written with the day's first Zone 2 value; read it through `src/shared/zone2.ts`.
+   * Days cached by an older build lack it: read it with `?? null`.
+   */
+  zone2Machine: safeString().trim().min(1).max(40).nullable(),
+  /**
+   * Zone 2 marked "Not today" on purpose. It does not close the checklist item (streaks are
+   * unchanged). Days cached by an older build lack it: read it with `?? false`.
+   */
+  zone2Skipped: z.boolean(),
   metconDone: z.boolean(),
   metconNotes: safeString().max(5000).nullable(),
   metconBenchmark: safeString().max(120).nullable(),
   metconScore: safeString().max(120).nullable(),
+  /** Metcon marked "Not today" on purpose; like `zone2Skipped` (read it with `?? false`). */
+  metconSkipped: z.boolean(),
   journal: safeString().max(50_000).nullable(),
 };
 
@@ -273,6 +287,27 @@ export type Program = z.infer<typeof programSchema>;
  */
 export const MIN_CALORIES_RANGE = { min: 800, max: 5000 } as const;
 
+/**
+ * A rehab block (SPEC §6.8): a protocol on its own timeline, independent of the strength plans. In
+ * force on `d` when `start ≤ d ≤ min(start + 7·weeks − 1, end)`; planned on `d` when in force and
+ * `days[weekday(d)]` is set. Read and edit it through `src/shared/rehab.ts`, never these fields.
+ */
+export const rehabProgramSchema = z.object({
+  /** Identifies the block across devices (the settings merge pairs blocks by it; rehab blocks in a session name it). */
+  id: safeString().min(1).max(40),
+  name: safeString().max(60),
+  /** Its first day (any weekday). */
+  start: isoDate,
+  weeks: z.number().int().min(1).max(52),
+  /** Which weekdays it is planned, index 0 = Sun (as `schedule`). */
+  days: weekdayFlags,
+  /** What a session's draft starts from: the last session of this block, or the same weekday's. */
+  carry: z.enum(["last", "weekday"]),
+  /** Ended early: its last day (inclusive). */
+  end: isoDate.optional(),
+});
+export type RehabProgram = z.infer<typeof rehabProgramSchema>;
+
 export const settingsSchema = z.object({
   onboarded: z.boolean(),
   /** The latest plan's steps and Zone 2 targets (a date's: `planTargets`, program.ts). */
@@ -333,6 +368,15 @@ export const settingsSchema = z.object({
       accessoryIncrementLb: z.number().min(0).max(50),
     })
     .optional(),
+  /**
+   * Rehab blocks, ordered by start (SPEC §6.8). Optional so settings stored before it existed still
+   * validate; read it through `src/shared/rehab.ts`, never directly.
+   */
+  rehab: z
+    .object({
+      programs: z.array(rehabProgramSchema).max(100),
+    })
+    .optional(),
   /** Display preferences (read through `displayPrefs()`). Optional, like `training`. */
   display: z
     .object({
@@ -380,9 +424,20 @@ export const blockExerciseSchema = z.object({
 });
 export type BlockExercise = z.infer<typeof blockExerciseSchema>;
 
+/**
+ * What a block is: the main lift, an accessory (Strength), or rehab (its own section, outside
+ * strength: a build that doesn't know the kind leaves it alone). Stored in that order (SPEC §6.7).
+ */
+export const blockKind = z.enum(["primary", "accessory", "rehab"]);
+export type BlockKind = z.infer<typeof blockKind>;
+
+/** Strength's subsection an accessory block belongs to. Absent = Accessories. */
+export const blockSection = z.enum(["core"]);
+export type BlockSection = z.infer<typeof blockSection>;
+
 export const blockSchema = z.object({
   id: safeString().max(40),
-  kind: z.enum(["primary", "accessory"]),
+  kind: blockKind,
   /** More than one exercise = superset. */
   exercises: z.array(blockExerciseSchema).min(1).max(6),
   /**
@@ -390,6 +445,13 @@ export const blockSchema = z.object({
    * still be finished. Not part of the plan signature. Absent = not skipped.
    */
   skipped: z.boolean().optional(),
+  /**
+   * Accessory blocks only: "core" files the block under Strength's Core subsection. Absent =
+   * Accessories, as every block saved before subsections existed.
+   */
+  section: blockSection.optional(),
+  /** Rehab blocks only: the rehab block (`RehabProgram.id`) it was logged for. */
+  rehab: safeString().min(1).max(40).optional(),
 });
 export type Block = z.infer<typeof blockSchema>;
 

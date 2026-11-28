@@ -28,10 +28,13 @@ export function emptyDayLog(date: string): DayLog {
     zone2Done: false,
     zone2Minutes: null,
     zone2Kcal: null,
+    zone2Machine: null,
+    zone2Skipped: false,
     metconDone: false,
     metconNotes: null,
     metconBenchmark: null,
     metconScore: null,
+    metconSkipped: false,
     journal: null,
   };
 }
