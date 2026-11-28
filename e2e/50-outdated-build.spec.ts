@@ -14,7 +14,7 @@
  *       OLD=$(mktemp -d) && git archive b4999a8 | tar -x -C "$OLD" && (cd "$OLD" && npm ci && npm run build)
  *       APP=$(mktemp -d) && mkdir "$APP/dist" && cp -r dist/server dist/build-id.txt "$APP/dist/" \
  *         && cp -r "$OLD/dist/web" "$APP/dist/web" && cp -r drizzle "$APP/" && ln -s "$PWD/node_modules" "$APP/node_modules"
- *       E2E_APP_DIR="$APP" npm run e2e -- 47-outdated-build
+ *       E2E_APP_DIR="$APP" npm run e2e -- 50-outdated-build
  */
 import type { Page, Request } from "@playwright/test";
 import { BUILD_LEVEL_HEADER, UPGRADE_REQUIRED, UPGRADE_REQUIRED_MESSAGE } from "../src/shared/buildLevel";
