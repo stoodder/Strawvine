@@ -8,8 +8,18 @@ import { App, applyContrast, CONTRAST_KEY } from "./App";
 import { DockProvider } from "./components/Dock";
 import { ToastProvider } from "./components/Toast";
 import { startServiceWorker, watchForNewBuild } from "./lib/build";
+import { applyFlagParam } from "./lib/features";
 import { initSync, queryClient } from "./lib/sync";
 import "./styles.css";
+
+// `?flags=trainDay,rehab` opts this device in to UI not launched yet (`?flags=` opts out; see
+// lib/features.ts), and leaves the address bar without it.
+try {
+  const rest = applyFlagParam(window.location.search);
+  if (rest !== null) window.history.replaceState(window.history.state, "", `${window.location.pathname}${rest}${window.location.hash}`);
+} catch {
+  /* storage or history unavailable: the flags stay as they were */
+}
 
 // High contrast is a per-account setting; until the data loads (and on the sign-in screen) use
 // what this device last saw, so an outdoor-mode user never gets a low-contrast flash.
