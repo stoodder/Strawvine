@@ -27,7 +27,7 @@ import {
   subsectionState,
   type DaySection,
 } from "./sections";
-import { blankSet, buildSession, buildSessionFrom, sessionCounts, sessionVolume, strengthCounts } from "./session";
+import { blankSet, buildSession, buildSessionFrom, resetStrength, sessionCounts, sessionVolume, strengthCounts } from "./session";
 
 const ids = { bench: 1, deadlift: 2, backSquat: 3, frontSquat: 4, strictPress: 5 };
 const MWF = [false, true, false, true, false, true, false];
@@ -115,6 +115,24 @@ describe("daySections", () => {
     expect(at(first, "rehab")).toMatchObject({ empty: true, status: "todo" });
   });
 
+  it("rehab not set up yet (no exercises) on a past planned day reads Not set up — never Not done, never a miss", () => {
+    const past = daySections("2026-11-02", data([]), { today: MON });
+    expect(at(past, "rehab")).toMatchObject({ empty: true, status: "notSetUp" });
+    // A saved rehab block emptied of exercises can't be (the schema needs one); a day it held with
+    // exercises, nothing logged, is a real Not done.
+    const held = session("2026-11-04", [rehab("R", [ex(22, [open("r1")])])], { label: "Training" });
+    expect(at(daySections("2026-11-04", data([held]), { today: MON }), "rehab").status).toBe("notDone");
+    // Left out of "day complete": the rest done is a complete day.
+    const sections = daySections("2026-11-02", data([], [{ ...emptyDayLog("2026-11-02"), metconDone: true, zone2Done: true }]), {
+      today: MON,
+    });
+    const others = sections.filter((s) => s.key !== "strength");
+    expect(keys(others)).toEqual(["metcon:done", "rehab:notSetUp", "zone2:done"]);
+    expect(dayComplete(others)).toBe(true);
+    // A preview is still Planned.
+    expect(at(daySections("2026-11-02", data([]), { today: "2026-11-01" }), "rehab").status).toBe("planned");
+  });
+
   it("statuses: in progress, done (Strength finished; rehab all logged; checks), Not today, a past day's Not done, a preview's Planned", () => {
     const going = full({ main: [done("p1"), open("p2")], rehab: [done("r1"), open("r2")] });
     expect(keys(daySections(MON, data([going]), { today: MON }))).toEqual([
@@ -191,8 +209,29 @@ describe("daySections", () => {
       planned: true,
       counts: { done: 0, total: 0 },
     });
-    // Every session saved before rehab existed holds strength, whatever it holds.
-    expect(holdsStrength(session(SUN, []))).toBe(true);
+    // Every session saved before rehab existed holds strength — as long as it holds anything of it
+    // (a block, finished, moved, an extra session). A document with no block at all and none of
+    // those (notes only: what Reset to plan keeps on a day whose plan has no strength) holds none:
+    // a Strength section there would have nothing in it and could never be done.
+    expect(holdsStrength(session(SUN, [mainBlock([])]))).toBe(true);
+    expect(holdsStrength(session(SUN, [acc("A", [ex(10, [open("a1")])])]))).toBe(true);
+    expect(holdsStrength(session(SUN, [], { label: EXTRA_SESSION_LABEL }))).toBe(true);
+    expect(holdsStrength(session(SUN, [], { completedAt: "2026-11-15T18:00:00Z" }))).toBe(true);
+    expect(holdsStrength(session(SUN, [], { plannedFor: "2026-11-16" }))).toBe(true);
+    expect(holdsStrength(session(SUN, []))).toBe(false);
+  });
+
+  it("a rest day holding a notes-only document (Reset to plan kept the notes): no Strength section", () => {
+    // An extra session on Sunday, reset with nothing logged: the notes stay, and nothing else.
+    const extra = session(SUN, [acc("A", [ex(10, [open("a1")])])], { label: EXTRA_SESSION_LABEL, notes: "knee sore" });
+    const notesOnly = resetStrength(extra, data())!;
+    expect(notesOnly).toMatchObject({ blocks: [], notes: "knee sore" });
+    expect(holdsStrength(notesOnly)).toBe(false);
+    expect(daySections(SUN, data([notesOnly]), { today: SUN }).map((s) => s.key)).not.toContain("strength");
+    expect(daySections(SUN, data([notesOnly]), { today: "2026-11-16" })).toEqual([]);
+    // On a lifting day Strength is there anyway: the plan's.
+    const mon = { ...notesOnly, date: MON };
+    expect(at(daySections(MON, data([mon]), { today: MON }), "strength")).toMatchObject({ planned: true, status: "todo" });
   });
 
   it("an ended rehab block leaves the day when nothing of it was logged; logged rehab stays (data wins)", () => {

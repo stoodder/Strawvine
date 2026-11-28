@@ -31,9 +31,10 @@ export type SectionKey = "metcon" | "strength" | "rehab" | "zone2";
  *   another day: `doneOn`), Rehab with every set not skipped logged;
  * - `skipped`: "Not today" (on purpose);
  * - `notDone`: a past day's section neither done nor skipped;
+ * - `notSetUp`: Rehab with no exercises yet (`empty`) on a past day: never "Not done", never missed;
  * - `planned`: a future day (a preview, which never saves).
  */
-export type SectionStatus = "todo" | "progress" | "done" | "skipped" | "notDone" | "planned";
+export type SectionStatus = "todo" | "progress" | "done" | "skipped" | "notDone" | "notSetUp" | "planned";
 
 export interface DaySection {
   key: SectionKey;
@@ -67,18 +68,15 @@ const logged = (blocks: ReadonlyArray<Block>) => blocks.some((b) => b.exercises.
 const filled = (v: string | null | undefined) => !!v && v.trim() !== "";
 
 /**
- * Whether a saved session holds Strength: a strength block, finished, a moved plan, an extra
- * session — or simply no rehab (every session saved before rehab existed is a strength session).
- * A session holding only rehab blocks doesn't.
+ * Whether a saved session holds Strength: a strength block (every session saved before rehab
+ * existed that holds anything), finished, a moved plan, an extra session. A session holding only
+ * rehab blocks doesn't — nor one holding no block at all and none of the rest (notes only: what
+ * Reset to plan keeps on a day whose plan has no strength, `resetStrength`), which would otherwise
+ * show a Strength section with nothing in it, never to be done. On a lifting day Strength is there
+ * anyway, as the plan's.
  */
 export function holdsStrength(session: Session): boolean {
-  return (
-    session.blocks.some(isStrengthBlock) ||
-    !!session.completedAt ||
-    !!session.plannedFor ||
-    session.label === EXTRA_SESSION_LABEL ||
-    !session.blocks.some((b) => b.kind === "rehab")
-  );
+  return session.blocks.some(isStrengthBlock) || !!session.completedAt || !!session.plannedFor || session.label === EXTRA_SESSION_LABEL;
 }
 
 const exerciseSkipped = (b: Block, e: BlockExercise) => !!b.skipped || !!e.skipped;
@@ -102,7 +100,7 @@ export function daySections(date: ISODate, data: DayData, opts: DaySectionsOptio
   const preview = date > opts.today;
   const past = date < opts.today;
   const saved = lastOf(data.sessions, date);
-  const view = withRehabDraft(opts.session ?? saved ?? buildSession(date, data), data);
+  const view = withRehabDraft(opts.session ?? saved ?? buildSession(date, data, { core: true }), data);
   const day: Partial<DayLog> | undefined = lastOf(data.days, date);
   const plan = planTargets(settings, date);
   const wd = weekdayOf(date);
@@ -169,13 +167,15 @@ export function daySections(date: ISODate, data: DayData, opts: DaySectionsOptio
     const counts = countsOf(blocks);
     const exercises = blocks.flatMap((b) => b.exercises);
     const planned = !!program && rehabPlanned(settings, date).some((p) => p.id === id);
+    const status = open({
+      done: allLogged(counts),
+      skipped: exercises.length > 0 && exercises.every((e) => e.skipped),
+      progress: counts.done > 0,
+    });
     out.push({
       key: "rehab",
-      status: open({
-        done: allLogged(counts),
-        skipped: exercises.length > 0 && exercises.every((e) => e.skipped),
-        progress: counts.done > 0,
-      }),
+      // Nothing to do yet (B.4: not set up): a past day says so, never "Not done".
+      status: status === "notDone" && exercises.length === 0 ? "notSetUp" : status,
       counts,
       planned,
       added: !planned,
@@ -227,7 +227,7 @@ export type SkipScope = "strength" | "main" | "accessories" | "core" | { rehab: 
 const inScope = (b: Block, scope: SkipScope): boolean => {
   if (typeof scope === "object") return b.kind === "rehab" && (b.rehab ?? "") === scope.rehab;
   if (scope === "strength") return isStrengthBlock(b);
-  return blockGroup(b) === scope;
+  return blockGroup(b, { core: true }) === scope;
 };
 
 /** A part of the day's session as its label row shows it ("2/6", "DONE", "NOT TODAY"). */

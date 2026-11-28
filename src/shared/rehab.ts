@@ -185,16 +185,43 @@ function invalid(p: RehabFields & Pick<RehabProgram, "end">): string | null {
   return null;
 }
 
-/** Why `p` can't sit beside the other blocks (overlap is refused for now), or null. */
-function overlap(p: RehabProgram, others: ReadonlyArray<RehabProgram>): string | null {
-  const last = rehabLastDay(p);
+/** How many days two blocks are both in force (0: none; a block ended before its first day has none). */
+function sharedDays(a: RehabProgram, b: RehabProgram): number {
+  const from = a.start > b.start ? a.start : b.start;
+  const aLast = rehabLastDay(a);
+  const bLast = rehabLastDay(b);
+  const to = aLast < bLast ? aLast : bLast;
+  return to < from || aLast < a.start || bLast < b.start ? 0 : daysBetween(from, to) + 1;
+}
+
+/**
+ * Why `p` can't sit beside the other blocks, or null. Overlap is refused for now — but only what
+ * this edit creates or makes longer: `was` (the block before the edit) may already overlap another
+ * (two devices each started one, then merged, SPEC §6.8), and an edit that doesn't add a shared
+ * day with it (a rename, other weekdays, an earlier end) is let through.
+ */
+function overlap(p: RehabProgram, others: ReadonlyArray<RehabProgram>, was?: RehabProgram): string | null {
   for (const o of rehabPrograms({ rehab: { programs: [...others] } })) {
     if (o.id === p.id) continue;
-    const oLast = rehabLastDay(o);
-    if (oLast < o.start || o.start > last || oLast < p.start) continue;
+    const shared = sharedDays(p, o);
+    if (shared === 0 || (was && shared <= sharedDays(was, o))) continue;
     return o.start <= p.start
-      ? `${nameOf(o)} runs until ${formatShortDate(oLast)}: end it or start this one after.`
+      ? `${nameOf(o)} runs until ${formatShortDate(rehabLastDay(o))}: end it or start this one after.`
       : `${nameOf(o)} starts ${formatShortDate(o.start)}: end this one before it.`;
+  }
+  return null;
+}
+
+/**
+ * Why an edit of `was` into `p` would leave a logged session of it outside the block (a start
+ * moved past it, a block shortened before it), or null: those sessions keep their place in it.
+ */
+function orphans(p: RehabProgram, was: RehabProgram, sessions: ReadonlyArray<Session>): string | null {
+  for (const s of rehabSessions(was, sessions)) {
+    if (!rehabInForce(was, s.date) || rehabInForce(p, s.date)) continue;
+    return s.date < p.start
+      ? `${nameOf(was)} has a session logged ${formatShortDate(s.date)}: start it on or before then.`
+      : `${nameOf(was)} has a session logged ${formatShortDate(s.date)}: end it on or after then.`;
   }
   return null;
 }
@@ -210,7 +237,11 @@ function put(settings: Settings, p: RehabProgram): RehabEdit {
   if (why) return { refused: why };
   const programs = settings.rehab?.programs ?? [];
   const others = programs.filter((o) => o.id !== p.id);
-  const clash = overlap(p, others);
+  const clash = overlap(
+    p,
+    others,
+    programs.find((o) => o.id === p.id),
+  );
   if (clash) return { refused: clash };
   if (others.length >= MAX_REHAB_PROGRAMS) return { refused: "Settings hold up to 100 rehab blocks." };
   const at = programs.findIndex((o) => o.id === p.id);
@@ -243,14 +274,18 @@ export function startRehab(settings: Settings, fields: RehabFields, id: string):
   });
 }
 
-/** The block `id` with `patch` applied (name, start, length, days, carry) — refused like `startRehab`. */
-export function editRehab(settings: Settings, id: string, patch: Partial<RehabFields>): RehabEdit {
+/**
+ * The block `id` with `patch` applied (name, start, length, days, carry) — refused like
+ * `startRehab`, and when it would leave a session logged in it (`sessions`) outside it.
+ */
+export function editRehab(settings: Settings, id: string, patch: Partial<RehabFields>, sessions: ReadonlyArray<Session>): RehabEdit {
   const p = rehabById(settings, id);
   if (!p) return { refused: "That rehab block is gone." };
   const next: RehabProgram = { ...p, ...patch };
   if (patch.name !== undefined) next.name = patch.name.trim();
   if (patch.days !== undefined) next.days = [...patch.days];
-  return put(settings, next);
+  const lost = invalid(next) ?? orphans(next, p, sessions);
+  return lost ? { refused: lost } : put(settings, next);
 }
 
 /** `extendRehab`'s result: also the last day before (`was`) and after (`lastDay`), or why it can't. */
@@ -275,26 +310,46 @@ export function extendRehab(settings: Settings, id: string, weeks = 1): RehabExt
   return "refused" in r ? r : { ...r, was, lastDay };
 }
 
+/** `endRehab`'s result. */
+export interface RehabEnded {
+  settings: Settings;
+  /** The block as it now is; null when it was removed. */
+  program: RehabProgram | null;
+  /** Its last day; null when it was removed. */
+  lastDay: ISODate | null;
+  /**
+   * Today's session, when ending changes it: without its rehab blocks of the block (nothing of
+   * them logged — a draft the first edit saved), to save; null to delete it (nothing else was left
+   * in it). Absent: today's session stays as it is.
+   */
+  today?: Session | null;
+}
+
 /**
  * "End today": the block's last day is `today` when rehab of it is logged today (a set in today's
- * session), otherwise yesterday — so with nothing done, its section leaves Train at once. A block
- * that would then have no day at all (it started today) is removed instead (`lastDay: null`);
- * sessions keep whatever they hold of it. Refused when it isn't in force today.
+ * session), otherwise yesterday — so with nothing done, its section leaves Train at once, and
+ * today's session loses its rehab blocks of it (`today`; unlogged, they are only the draft). A
+ * block that would then have no day at all (it started today) is removed instead
+ * (`lastDay: null`) — unless a session holds a logged set of it (`rehabSessions`): then it is
+ * ended before its first day (`end` the day before `start`: in force on no day), so the sessions
+ * still name a block that settings hold. Refused when it isn't in force today.
  */
 export function endRehab(
   settings: Settings,
   id: string,
   today: ISODate,
   sessions: ReadonlyArray<Session>,
-): { settings: Settings; program: RehabProgram | null; lastDay: ISODate | null } | { refused: string } {
+): RehabEnded | { refused: string } {
   const p = rehabById(settings, id);
   if (!p) return { refused: "That rehab block is gone." };
   if (p.start > today) return { refused: `${nameOf(p)} hasn't started yet: cancel it instead.` };
   if (!rehabInForce(p, today)) return { refused: `${nameOf(p)} ended ${formatShortDate(rehabLastDay(p))}.` };
-  const loggedToday = sessions.some((s) => s.date === today && hasLogged(rehabBlocks(s, p.id)));
+  const saved = sessions.findLast((s) => s.date === today);
+  const loggedToday = !!saved && hasLogged(rehabBlocks(saved, p.id));
   const last = loggedToday ? today : addDays(today, -1);
-  if (last < p.start)
-    return {
+  let out: RehabEnded;
+  if (last < p.start && !rehabSessions(p, sessions).length)
+    out = {
       settings: withPrograms(
         settings,
         settings.rehab!.programs.filter((o) => o.id !== id),
@@ -302,15 +357,23 @@ export function endRehab(
       program: null,
       lastDay: null,
     };
-  const program: RehabProgram = { ...p, end: last };
-  return {
-    settings: withPrograms(
-      settings,
-      settings.rehab!.programs.map((o) => (o.id === id ? program : o)),
-    ),
-    program,
-    lastDay: last,
-  };
+  else {
+    const program: RehabProgram = { ...p, end: last };
+    out = {
+      settings: withPrograms(
+        settings,
+        settings.rehab!.programs.map((o) => (o.id === id ? program : o)),
+      ),
+      program,
+      lastDay: last,
+    };
+  }
+  if (saved && !loggedToday && rehabBlocks(saved, p.id).length) {
+    const blocks = saved.blocks.filter((b) => !(b.kind === "rehab" && b.rehab === p.id));
+    const empty = !blocks.length && !saved.notes && !saved.completedAt && !saved.plannedFor;
+    out.today = empty ? null : { ...saved, blocks };
+  }
+  return out;
 }
 
 /**

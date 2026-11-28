@@ -288,13 +288,51 @@ describe("editing rehab blocks (Program › Rehab)", () => {
   it("edits its fields, refusing what would overlap another", () => {
     const two = startRehab(settings, { ...fields, name: "Hip", start: "2026-12-14", weeks: 2 }, "hip");
     if ("refused" in two) throw new Error(two.refused);
-    const days = editRehab(two.settings, "knee", { days: [false, true, false, false, true, false, false], carry: "weekday" });
+    const days = editRehab(two.settings, "knee", { days: [false, true, false, false, true, false, false], carry: "weekday" }, []);
     if ("refused" in days) throw new Error(days.refused);
     expect(days.program).toMatchObject({ days: [false, true, false, false, true, false, false], carry: "weekday", weeks: 6 });
-    expect(editRehab(two.settings, "knee", { weeks: 7 })).toEqual({ refused: "Hip starts Dec 14: end this one before it." });
-    expect(editRehab(two.settings, "nope", { weeks: 7 })).toEqual({ refused: "That rehab block is gone." });
-    const renamed = editRehab(two.settings, "knee", { name: "  Left knee " });
+    expect(editRehab(two.settings, "knee", { weeks: 7 }, [])).toEqual({ refused: "Hip starts Dec 14: end this one before it." });
+    expect(editRehab(two.settings, "nope", { weeks: 7 }, [])).toEqual({ refused: "That rehab block is gone." });
+    const renamed = editRehab(two.settings, "knee", { name: "  Left knee " }, []);
     expect("program" in renamed && renamed.program.name).toBe("Left knee");
+  });
+
+  it("after two devices' blocks merged into an overlap: edits that add no shared day go through, the rest are refused", () => {
+    // Each device started one; the merge kept both (a "rehab blocks" conflict): Dec 7–13 is shared.
+    const hip: RehabProgram = { ...knee, id: "hip", name: "Hip", start: "2026-12-07", weeks: 2 };
+    const merged: Settings = { ...base, rehab: { programs: [knee, hip] } };
+    const ok = (r: ReturnType<typeof editRehab>) => ("refused" in r ? r.refused : "ok");
+    expect(ok(editRehab(merged, "knee", { name: "Knee" }, []))).toBe("ok");
+    expect(ok(editRehab(merged, "hip", { days: [false, false, true, false, true, false, false], carry: "weekday" }, []))).toBe("ok");
+    // Shorter: less shared. Fine.
+    expect(ok(editRehab(merged, "knee", { weeks: 5 }, []))).toBe("ok");
+    // Longer, or the later one starting earlier: more shared days. Refused.
+    expect(editRehab(merged, "knee", { weeks: 7 }, [])).toEqual({ refused: "Hip starts Dec 7: end this one before it." });
+    expect(editRehab(merged, "hip", { start: "2026-12-01" }, [])).toEqual({
+      refused: "Knee rehab runs until Dec 13: end it or start this one after.",
+    });
+    expect(extendRehab(merged, "knee")).toEqual({ refused: "Hip starts Dec 7: end this one before it." });
+    // A new block over either is still refused.
+    expect(startRehab(merged, { ...fields, name: "Back", start: "2026-12-10", weeks: 1 }, "back")).toHaveProperty("refused");
+  });
+
+  it("refuses an edit that would leave a logged session outside the block; one inside it, or a session not logged, doesn't hold it", () => {
+    const logged = [monday]; // Nov 9, week 2
+    expect(editRehab(settings, "knee", { start: "2026-11-10" }, logged)).toEqual({
+      refused: "Knee rehab has a session logged Nov 9: start it on or before then.",
+    });
+    expect(editRehab(withKnee({ start: "2026-11-09", weeks: 2 }), "knee", { start: "2026-11-10" }, logged)).toHaveProperty("refused");
+    const unlogged = session(MON, [rehabBlock("m", [ex(22, [blankSet({ id: "u1" })])])]);
+    expect(editRehab(settings, "knee", { start: "2026-11-16" }, [unlogged])).not.toHaveProperty("refused");
+    // Ending it earlier than a logged session (a shorter block) is refused the same way.
+    expect(editRehab(settings, "knee", { weeks: 1 }, logged)).toEqual({
+      refused: "Knee rehab has a session logged Nov 9: end it on or after then.",
+    });
+    // Still inside: a later start up to the session, another length.
+    expect(editRehab(settings, "knee", { start: "2026-11-09", weeks: 3 }, logged)).not.toHaveProperty("refused");
+    // A session of another block doesn't count.
+    const hipDay = session(MON, [rehabBlock("h", [ex(22, [done("h1", 10, null)])], "hip")]);
+    expect(editRehab(settings, "knee", { start: "2026-11-16" }, [hipDay])).not.toHaveProperty("refused");
   });
 
   it("+ A week: the last day a week later (the preview's two dates); an early end moves too; refused into the next block", () => {
@@ -330,10 +368,37 @@ describe("editing rehab blocks (Program › Rehab)", () => {
     expect(rehabProgramsAt(nothing.settings, "2026-11-10").map((p) => p.id)).toEqual(["knee"]);
   });
 
-  it("End today on its first day with nothing logged removes it; refused before it starts or after it ended", () => {
+  it("End today drops today's unlogged rehab blocks of it from today's session; logged ones (and other blocks) stay", () => {
+    const strength: Block = { id: "p", kind: "primary", exercises: [ex(1, [blankSet({ id: "p1" })])] };
+    const draft = rehabBlock("w", [ex(22, [blankSet({ id: "w1" })])]);
+    const hip = rehabBlock("h", [ex(20, [blankSet({ id: "h1" })])], "hip");
+    const today = session(WED, [strength, draft, hip], { notes: "sore" });
+    const r = endRehab(settings, "knee", WED, [monday, today]);
+    if ("refused" in r) throw new Error(r.refused);
+    expect(r.today).toEqual({ ...today, blocks: [strength, hip] });
+    // Nothing else in it: today's session goes (the day reads its plan's draft again).
+    const onlyRehab = endRehab(settings, "knee", WED, [monday, session(WED, [draft])]);
+    expect("today" in onlyRehab && onlyRehab.today).toBeNull();
+    // Logged today: it stays in today, and so do its blocks.
+    expect(endRehab(settings, "knee", MON, [monday])).not.toHaveProperty("today");
+    // No rehab of it saved today: today's session is left alone.
+    expect(endRehab(settings, "knee", WED, [monday, session(WED, [strength])])).not.toHaveProperty("today");
+    expect(endRehab(settings, "knee", WED, [monday])).not.toHaveProperty("today");
+  });
+
+  it("End today on its first day: removed when nothing of it is logged, else ended before its first day (its sessions keep their block)", () => {
     const r = endRehab(settings, "knee", "2026-11-02", []);
     expect(r).toMatchObject({ lastDay: null, program: null });
     expect("settings" in r && rehabPrograms(r.settings)).toEqual([]);
+    // A session logged in it before its start (two devices: one moved the start, one logged).
+    const early = session("2026-11-01", [rehabBlock("e", [ex(22, [done("e1", 10, null)])])]);
+    const kept = endRehab(withKnee({ start: "2026-11-02" }), "knee", "2026-11-02", [early]);
+    if ("refused" in kept) throw new Error(kept.refused);
+    expect(kept.program).toEqual({ ...knee, end: "2026-11-01" });
+    expect(rehabPrograms(kept.settings).map((p) => p.id)).toEqual(["knee"]);
+    expect(rehabProgramsAt(kept.settings, "2026-11-02")).toEqual([]);
+    expect(rehabSessions(kept.program!, [early])).toHaveLength(1);
+    expect(settingsSchema.parse(kept.settings).rehab?.programs).toEqual([{ ...knee, end: "2026-11-01" }]);
     expect(endRehab(withKnee({ start: "2026-11-16" }), "knee", MON, [])).toEqual({
       refused: "Knee rehab hasn't started yet: cancel it instead.",
     });
