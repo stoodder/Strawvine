@@ -76,6 +76,10 @@ All fields are optional and can be edited at any time during the day (or later).
   shown), what is typed is committed then, once — but only a readable number inside the field's range that differs
   from the saved one: never an emptied field, a number out of range, or one that leaving the field would round to a
   limit. A sheet's own numbers (the set editor) are saved by its buttons only: closing it abandons what was typed.
+- **A check sets what the finger meant.** A row's done check on Today's checklist decides its value when the finger
+  lands, from the day as it is live then, and writes it only if the day doesn't say so already: a value saved as its
+  field is left (which can tick the row by itself) is never undone by the check that follows. Unticking Zone 2 leaves
+  its minutes; ticking it fills the plan's minutes only when none are entered.
 
 ### 3.1 Fuel bars (Today)
 
@@ -1117,9 +1121,9 @@ storage is settled:
     same day (each device started one) are both kept — nothing logged for either is orphaned — and the merge reports a
     **rehab blocks** conflict; afterwards an edit of either is refused only when it adds shared days;
   - an older build (from before Core and rehab) keeps rehab blocks, `section` (when it copies a block whole) and
-    `settings.rehab`. A block it rebuilds loses `section` and reads as Accessories, with no set lost. Known gap, to be
-    closed before any build writes rehab: when two copies were built without a common ancestor, an older build's merge
-    can pair a rehab block with an accessory block of the same exercises and save them as one;
+    `settings.rehab`. A block it rebuilds loses `section` and reads as Accessories, with no set lost. Its merge can
+    pair a rehab block with an accessory block of the same exercises (two copies built without a common ancestor) and
+    save them as one, so it may not write anything involving rehab (_Outdated builds_, below);
   - edits made while a conflicting save was in flight are re-merged onto the merged copy (never sent over it); every 409
     teaches the device the server's current copy and revision;
   - a save that went out and was never answered (the connection dropped, the request timed out, the app was closed
@@ -1150,8 +1154,37 @@ storage is settled:
   - deleting a workout carries the revision too: when another device changed it since, the delete is refused and that
     device's copy is kept ("…changed on another device, so it wasn't deleted"); a create then delete that never reached
     the server sends nothing; a workout "new" on two devices at once is saved by the first, and the second merges onto it.
+- **Outdated builds.** Every API call carries the app's build level (`x-strawvine-build-level`): a whole number in the
+  source (`BUILD_LEVEL`), raised by hand when older clients become unsafe for some write — never the build id, which is
+  any label and is stamped anew when old code is rebuilt. Builds from before it send none (level 0). A build below the
+  server's minimum for rehab (`MIN_REHAB_BUILD_LEVEL`, default 1: the build that brought this rule; from 1 to the
+  server's own level, else the release phase and the server refuse to start) may not write anything involving rehab:
+  a workout save or delete is refused when the workout sent or the one stored holds a rehab block — checked before the
+  revision, so such a build is never handed a stored rehab workout to merge, and again in the write itself, so one
+  that another save creates meanwhile is neither overwritten nor deleted by it, nor handed to it as a conflict — and a
+  settings save when it would change `settings.rehab` (drop, empty, alter, add or bring back a rehab block); one
+  without the key is saved with the stored rehab blocks kept (after the revision check: a stale copy is a conflict
+  first). The refusal is a 409 with `code: "upgrade-required"` and no document, which no build merges or re-sends on
+  its own: it shows as a change not saved (Retry / Discard) with "This version of the app is out of date. Reopen the
+  app to update; the change is kept."; Retry sends it once more. Everything else such a build writes is accepted as
+  before. The change stays queued on the device: the first build of a higher level to open there puts it back in the
+  queue once (per window and change) and sends it like any save, merged if the document changed since — strength
+  only. The old build never showed rehab, so what its copy says of rehab gives way to what its base (the server's copy
+  it was made from; the device's own copy when it has none) holds: a workout save gets the base's rehab blocks back,
+  matched by id (rehab sets its merge folded into another block are taken out of that block); a delete of a workout
+  whose base holds rehab becomes a save of the base with only its rehab blocks (as Discard keeps them); settings carry
+  the base's `settings.rehab`. The version check and the merge then keep whatever the server changed since. One that
+  can't be based on any copy stays not saved, Retry included. So an outdated build never removes or alters rehab, not
+  even re-sent. A build with this rule that is refused marks the change with its own level (it never re-sends it
+  itself) and shows **Update the app** in the dock until the page reloads; it waits for the newest build's worker and
+  reloads into it. The rule shipped one release before anything writes rehab workouts; never roll back past it, and
+  unset or lower `MIN_REHAB_BUILD_LEVEL` before rolling back below its level.
 - **Forget this device** signs only this device out — its session is revoked on the server too, so a copy of the cookie
   stops working — drops its known-device mark (it's treated like any unknown device at sign-in) and wipes everything the
   app stored on it, after sending what it can (it keeps going while changes get through, shows how many remain, and
   reports how many unsynced changes were discarded).
+- **Settings › Previews**, at the foot of Settings: per-device toggles for features built but not launched (the new
+  Train, rehab), each "Only on this device · still being built", kept in the device's storage and never synced. A
+  link with `?flags=name` turns one on and `?flags=-name` off (merged into what the device has); a toast says what
+  changed. The row and the flags are removed at launch.
 - Pure, unit-tested domain modules for all calculations.

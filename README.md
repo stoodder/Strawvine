@@ -99,7 +99,8 @@ older server refuses (400) every save of a day holding a rehab block, its settin
 (`settings.rehab`) as a key it doesn't know, and an older build's merge can pair a rehab block with an accessory block
 and save it as one. Those releases are roll forward only: fix forward, or restore a backup taken before them. And never
 roll back, from any release, past the one that brought the rehab gate (build level 1, see _Outdated builds and rehab_):
-a server without it lets devices still on an outdated build write rehab.
+a server without it lets devices still on an outdated build write rehab. Unset or lower `MIN_REHAB_BUILD_LEVEL` before
+rolling back below its level: a build refuses to release or boot with a minimum above its own level.
 
 Avoid long table rewrites and locks: a booting dyno waits at most 30 s for the migration lock (Heroku kills a dyno that
 doesn't bind its port within 60 s) and the release phase at most 15 minutes.
@@ -145,16 +146,16 @@ default. The log says exactly what to fix.
 
 ### Environment
 
-| Variable                |                                                                                                                                                                                              |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`          | Postgres connection string (TLS is used automatically for non-local hosts)                                                                                                                   |
-| `APP_PASSWORD`          | the single sign-in password (production: 12+ characters)                                                                                                                                     |
-| `SESSION_SECRET`        | signs session cookies; production requires `openssl rand -hex 32` strength                                                                                                                   |
-| `NODE_ENV`              | `production` in the image: secure `__Host-` cookie, HTTPS redirect, strict secret checks                                                                                                     |
-| `TRUST_PROXY`           | `1` to trust `X-Forwarded-For`/`-Proto` from a TLS-terminating proxy (login rate limiting by client IP, HTTP→HTTPS redirect). Defaults to on when `DYNO` is set (Heroku), off elsewhere      |
-| `BUILD_ID`              | **build time only** (`npm run build` / `docker build --build-arg`): labels the build (see _Builds_). Ignored at runtime                                                                      |
-| `MIN_REHAB_BUILD_LEVEL` | lowest build level that may write workouts or settings involving rehab (default 1; 1 up to the deployed build's own level, else the server refuses to boot). See _Outdated builds and rehab_ |
-| `PORT`                  | default 3000                                                                                                                                                                                 |
+| Variable                |                                                                                                                                                                                                              |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`          | Postgres connection string (TLS is used automatically for non-local hosts)                                                                                                                                   |
+| `APP_PASSWORD`          | the single sign-in password (production: 12+ characters)                                                                                                                                                     |
+| `SESSION_SECRET`        | signs session cookies; production requires `openssl rand -hex 32` strength                                                                                                                                   |
+| `NODE_ENV`              | `production` in the image: secure `__Host-` cookie, HTTPS redirect, strict secret checks                                                                                                                     |
+| `TRUST_PROXY`           | `1` to trust `X-Forwarded-For`/`-Proto` from a TLS-terminating proxy (login rate limiting by client IP, HTTP→HTTPS redirect). Defaults to on when `DYNO` is set (Heroku), off elsewhere                      |
+| `BUILD_ID`              | **build time only** (`npm run build` / `docker build --build-arg`): labels the build (see _Builds_). Ignored at runtime                                                                                      |
+| `MIN_REHAB_BUILD_LEVEL` | lowest build level that may write workouts or settings involving rehab (default 1; 1 up to the deployed build's own level, else the release and the server refuse to start). See _Outdated builds and rehab_ |
+| `PORT`                  | default 3000                                                                                                                                                                                                 |
 
 ### Outdated builds and rehab
 
@@ -172,8 +173,10 @@ refuses, with a 409 `{ "code": "upgrade-required" }` and nothing written, any wr
 Everything else such a build writes (days, exercises, maxes, workouts and settings without rehab) goes through as
 before. The refused change stays on that device, not saved, with "This version of the app is out of date. Reopen the
 app to update; the change is kept." (Retry sends it once more and is refused again; it never loops.) When the app is
-reopened on the new build, it sends the change on its own, merged with whatever changed since. A build with the gate
-that is refused shows **Update the app** in the dock, which reloads into the new version.
+reopened on the new build, it sends the change on its own, strength only, merged with whatever changed since: what the
+old build's copy says of rehab is replaced by the server copy it was made from (a workout delete becomes a save of the
+workout's rehab blocks), so an old build never removes or alters rehab, not even re-sent. A build with the gate that is
+refused shows **Update the app** in the dock, which reloads into the new version.
 
 Deploying:
 
@@ -184,8 +187,9 @@ Deploying:
   Each refusal logs `Outdated build refused {"method":"PUT","route":"/api/sessions/:date","level":0,"min":1}` (no data).
   Refusals that keep coming mean a device is still on an old build: close the app there and open it again.
 - To shut out a build found unsafe later: raise `BUILD_LEVEL` in the fix and deploy it, then
-  `heroku config:set MIN_REHAB_BUILD_LEVEL=<that level>`. The server refuses to boot with a minimum below 1 or above its
-  own build's level (it would refuse its own app).
+  `heroku config:set MIN_REHAB_BUILD_LEVEL=<that level>`. A minimum below 1 or above the build's own level (it would
+  refuse its own app) aborts the release phase (`migrate.js`), and the server refuses to boot with it.
+- Rolling back: unset or lower `MIN_REHAB_BUILD_LEVEL` before rolling back below its level.
 
 ### Sessions
 
