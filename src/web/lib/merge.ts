@@ -10,9 +10,10 @@
  * Whatever this device changed (relative to the ancestor) wins; everything else comes from the
  * server, so the other device's changes are kept.
  */
+import { addDays } from "../../shared/dates";
 import { planList, withPlans } from "../../shared/plans";
 import { byStart, planTimeline } from "../../shared/program";
-import type { Block, BlockExercise, Plan, Session, SetEntry, Settings } from "../../shared/schemas";
+import type { Block, BlockExercise, Plan, RehabProgram, Session, SetEntry, Settings } from "../../shared/schemas";
 import { mainLiftSwap } from "../../shared/session";
 import { derivedBlockId, MAX_BLOCKS, MAX_SETS, MAX_SUPERSET, normalizeMainLift } from "../../shared/sessionStructure";
 
@@ -244,6 +245,8 @@ const SETTINGS_RULES: Record<string, ListRule> = {
   "program.plans.#.weeks": "index",
   "program.plans.#.schedule.metcon": "index",
   "program.plans.#.schedule.zone2": "index",
+  "rehab.programs": "byId",
+  "rehab.programs.#.days": "index",
 };
 
 /** Readable names for settings paths a conflict can be reported on. */
@@ -253,6 +256,7 @@ const SETTINGS_LABELS: Array<[RegExp, string]> = [
   [/^strengthTargets/, "strength targets"],
   [/^program\.plans\.#\.schedule/, "weekly schedule"],
   [/^program\.plans/, "program cycles"],
+  [/^rehab/, "rehab blocks"],
 ];
 
 /**
@@ -266,6 +270,50 @@ function plansShape(s: Settings): Record<string, unknown> {
   const { earlierPlans: _e, planId: _i, name: _n, cycleStartDate: _c, weeks: _w, days: _d, ...rules } = s.program;
   const { targets: _t, schedule: _s, ...rest } = s;
   return { ...rest, program: { ...rules, plans: planList(s) } };
+}
+
+/**
+ * The rehab blocks as the merge sees them: always a list, so blocks started on two devices from
+ * settings without any (`rehab` absent in the ancestor) both survive, matched by id like plans.
+ * Used only when there is an ancestor and one of the three documents has `rehab` at all; otherwise
+ * settings merge as they always did.
+ */
+function rehabShape(shaped: Record<string, unknown>, s: Settings): Record<string, unknown> {
+  return { ...shaped, rehab: { ...s.rehab, programs: s.rehab?.programs ?? [] } };
+}
+
+/** A rehab block's days in force, inclusive (SPEC §6.8); null when it ended before it started. */
+function rehabSpan(p: RehabProgram): { from: string; to: string } | null {
+  const last = addDays(p.start, 7 * p.weeks - 1);
+  const to = p.end !== undefined && p.end < last ? p.end : last;
+  return to < p.start ? null : { from: p.start, to };
+}
+
+/** Pairs of rehab blocks in force on a same day, as "id|id". */
+function rehabOverlaps(programs: readonly RehabProgram[]): Set<string> {
+  const out = new Set<string>();
+  programs.forEach((p, i) => {
+    const a = rehabSpan(p);
+    if (a)
+      for (const q of programs.slice(i + 1)) {
+        const b = rehabSpan(q);
+        if (b && a.from <= b.to && b.from <= a.to) out.add([p.id, q.id].sort().join("|"));
+      }
+  });
+  return out;
+}
+
+/**
+ * The merged rehab blocks, ordered by start (stable). `overlap`: the merge put two blocks in force
+ * on a same day that neither document had together (each device started one) — one block at a time
+ * is the rule, so the merge says so ("rehab blocks"). Both are kept: nothing logged for either is
+ * orphaned.
+ */
+function mergedRehab(programs: RehabProgram[], local: Settings, server: Settings): { list: RehabProgram[]; overlap: boolean } {
+  const list = [...programs].sort((x, y) => (x.start < y.start ? -1 : x.start > y.start ? 1 : 0));
+  const before = new Set([...rehabOverlaps(local.rehab?.programs ?? []), ...rehabOverlaps(server.rehab?.programs ?? [])]);
+  const overlap = [...rehabOverlaps(list)].some((pair) => !before.has(pair));
+  return { list, overlap };
 }
 
 /** `plansShape` back to a settings document (`withPlans`). */
@@ -329,13 +377,24 @@ export interface SettingsMerge {
  */
 export function mergeSettingsDetailed(ancestor: Settings | null | undefined, local: Settings, server: Settings): SettingsMerge {
   const ctx: FieldCtx = { rules: SETTINGS_RULES, conflicts: [] };
-  const merged = mergeAt(ancestor ? plansShape(ancestor) : ancestor, plansShape(local), plansShape(server), "", ctx) as Record<
-    string,
-    unknown
-  >;
+  // Without an ancestor every key is this device's when it has one (`mergeAt`): an empty list made
+  // up for a document without rehab blocks would then replace the server's.
+  const rehab = !!ancestor && !!(ancestor.rehab || local.rehab || server.rehab);
+  const shape = (s: Settings) => (rehab ? rehabShape(plansShape(s), s) : plansShape(s));
+  const merged = mergeAt(ancestor ? shape(ancestor) : ancestor, shape(local), shape(server), "", ctx) as Record<string, unknown>;
   const program = merged.program as { plans: Plan[] };
   const plans = timelineOfPlans(program.plans, local, server, ancestor);
   if (plans.superseded) ctx.conflicts.push("program.plans");
+  if (rehab) {
+    // Only the ancestor had it (no build takes it away; kept for symmetry): stays away.
+    if (!local.rehab && !server.rehab) delete merged.rehab;
+    else {
+      const r = merged.rehab as { programs: RehabProgram[] };
+      const programs = mergedRehab(r.programs, local, server);
+      if (programs.overlap) ctx.conflicts.push("rehab.programs");
+      merged.rehab = { ...r, programs: programs.list };
+    }
+  }
   const value = fromPlansShape({ ...merged, program: { ...program, plans: plans.list } });
   const conflicts = [...new Set(ctx.conflicts.map((p) => SETTINGS_LABELS.find(([re]) => re.test(p))?.[1] ?? p.replace(/\.#/g, "")))];
   return { value, conflicts };
@@ -365,6 +424,9 @@ function mergeSet(a: SetEntry | undefined, l: SetEntry, s: SetEntry): SetEntry {
   return l;
 }
 
+/** Which part of the workout a block is in: strength (main lift, accessories, Core) or rehab. */
+const workoutPart = (b: Block) => (b.kind === "rehab" ? "rehab" : "strength");
+
 /**
  * Exercise identities across the three versions of a session. Set ids are unique within a
  * session and travel with their exercise (moved into or out of a superset, swapped for another
@@ -375,7 +437,8 @@ function mergeSet(a: SetEntry | undefined, l: SetEntry, s: SetEntry): SetEntry {
  * across the whole workout by its lift: in this device's and the server's version, an exercise
  * none of whose sets the ancestor knows (still set-less, or with sets added since) takes the
  * identity of an ancestor set-less exercise of the same lift — first one in the same block (in
- * order), else anywhere in the workout (in workout order), set-less exercises before ones that
+ * order), else anywhere in the same part of the workout (`workoutPart`, in workout order: a lift
+ * in rehab and the same lift in strength are two exercises), set-less exercises before ones that
  * gained sets. So one moved to another block on one device while the other skips it, logs it or
  * moves it elsewhere is still one exercise; the same lift twice on purpose stays twice. One
  * left over (added on this device or the server) is new.
@@ -384,15 +447,16 @@ class Idents {
   private readonly bySet = new Map<string, string>();
   private readonly of: Record<Side, Map<BlockExercise, string>> = { a: new Map(), l: new Map(), s: new Map() };
   /** The ancestor's set-less exercises, in workout order. */
-  private readonly bare: Array<{ t: string; block: string; exerciseId: number }> = [];
+  private readonly bare: Array<{ t: string; block: string; part: string; exerciseId: number }> = [];
   private n = 0;
 
   add(doc: Session | null, side: Side) {
     if (!doc) return;
     const mine = this.of[side];
     const taken = new Set<string>();
-    const open: Array<{ x: BlockExercise; block: string }> = [];
+    const open: Array<{ x: BlockExercise; block: string; part: string }> = [];
     for (const b of doc.blocks) {
+      const part = workoutPart(b);
       for (const x of b.exercises) {
         let t: string | undefined;
         for (const st of x.sets) {
@@ -404,10 +468,10 @@ class Idents {
         }
         if (!t && side === "a" && !x.sets.length) {
           t = `z${this.n++}`;
-          this.bare.push({ t, block: b.id, exerciseId: x.exerciseId });
+          this.bare.push({ t, block: b.id, part, exerciseId: x.exerciseId });
         }
         if (!t && side !== "a") {
-          open.push({ x, block: b.id });
+          open.push({ x, block: b.id, part });
           continue;
         }
         t ??= `t${this.n++}`;
@@ -419,7 +483,9 @@ class Idents {
     for (const sameBlock of [true, false])
       for (const o of order) {
         if (mine.has(o.x)) continue;
-        const z = this.bare.find((e) => !taken.has(e.t) && e.exerciseId === o.x.exerciseId && (!sameBlock || e.block === o.block));
+        const z = this.bare.find(
+          (e) => !taken.has(e.t) && e.exerciseId === o.x.exerciseId && e.part === o.part && (!sameBlock || e.block === o.block),
+        );
         if (z) this.claim(o.x, z.t, side, taken);
       }
     for (const o of open) if (!mine.has(o.x)) this.claim(o.x, `t${this.n++}`, side, taken);
@@ -568,11 +634,14 @@ function mergeExercise(a: BlockExercise | undefined, l: BlockExercise, s: BlockE
 /**
  * How blocks built independently on each device pair up: a main lift with the main lift of the same
  * lift — two different main lifts (one device swapped it, SPEC §6.5) stay two blocks for
- * `oneMainLift` to choose between, never one block holding both — and accessory blocks by their
- * exercises.
+ * `oneMainLift` to choose between, never one block holding both — and other blocks by their kind,
+ * subsection, rehab block and exercises: a rehab block never pairs with an accessory block, nor Core
+ * with Accessories, even holding the same exercises.
  */
 const blockFallback = (b: Block) =>
-  b.kind === "primary" ? `primary:${b.exercises[0]?.exerciseId ?? ""}` : `accessory:${b.exercises.map((e) => e.exerciseId).join(",")}`;
+  b.kind === "primary"
+    ? `primary:${b.exercises[0]?.exerciseId ?? ""}`
+    : `${b.kind}:${b.section ?? ""}:${b.rehab ?? ""}:${b.exercises.map((e) => e.exerciseId).join(",")}`;
 
 function blockMerger(ids: Idents) {
   return (a: Block | undefined, l: Block, s: Block): Block => {
@@ -761,6 +830,19 @@ export interface SessionFit {
 const leftOut = (n: number, what: string, why: string) => `${n} unlogged ${what}${n === 1 ? " was" : "s were"} left out (${why})`;
 
 /**
+ * The block a superset's overflow moves into: of the superset's kind, subsection and rehab block (a
+ * main-lift block never gets here: `normalizeMainLift` splits it first). Not skipped: that flag is
+ * the main lift's.
+ */
+function overflowHead(b: Block): Omit<Block, "id" | "exercises"> {
+  return {
+    kind: b.kind === "primary" ? "accessory" : b.kind,
+    ...(b.section !== undefined && { section: b.section }),
+    ...(b.rehab !== undefined && { rehab: b.rehab }),
+  };
+}
+
+/**
  * Brings a merged workout within the server's limits without losing logged work:
  * - a main-lift block holding more than its lift is split (`normalizeMainLift`);
  * - unlogged sets beyond 30 per exercise are dropped (from the end);
@@ -800,7 +882,7 @@ export function fitSession(input: Session): SessionFit {
     out.push({ block: { ...b, exercises: exercises.filter((_, i) => stays.has(i)) }, overflow: false });
     const extra = exercises.filter((_, i) => !stays.has(i));
     for (let i = 0; i < extra.length; i += maxEx)
-      out.push({ block: { id: derivedBlockId(b.id, taken), kind: "accessory", exercises: extra.slice(i, i + maxEx) }, overflow: true });
+      out.push({ block: { ...overflowHead(b), id: derivedBlockId(b.id, taken), exercises: extra.slice(i, i + maxEx) }, overflow: true });
   }
   const notices: string[] = [];
   if (lostSets) notices.push(leftOut(lostSets, "set", `an exercise holds at most ${maxSets} sets`));

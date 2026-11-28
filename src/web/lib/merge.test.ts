@@ -1329,7 +1329,11 @@ describe("mergeSettings: plans over time", () => {
       ] as const) {
         const m = mergeSettingsDetailed(doc, l, sv);
         expect(timeline(m.value)).toEqual(["first:2026-10-05", "L:2026-11-09", "N:2026-12-14"]);
-        expect([m.value.program.planId, m.value.program.name, m.value.nutrition.proteinGPerLb]).toEqual(["N", "My new program, heavier", 1.1]);
+        expect([m.value.program.planId, m.value.program.name, m.value.nutrition.proteinGPerLb]).toEqual([
+          "N",
+          "My new program, heavier",
+          1.1,
+        ]);
         expect(m.conflicts).toEqual(["program cycles"]);
       }
     });
@@ -1345,5 +1349,294 @@ describe("mergeSettings: plans over time", () => {
       ["first", 12_000],
       ["p2", 15_000],
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The training day's sections (rehab blocks, Core) and rehab programmes
+// ---------------------------------------------------------------------------
+
+describe("mergeSession: rehab blocks and Core", () => {
+  const ex = (exerciseId: number, sets: SetEntry[]) => ({ exerciseId, measure: "reps" as const, sets });
+  const core = (id: string, ...exercises: ReturnType<typeof ex>[]) => ({
+    id,
+    kind: "accessory" as const,
+    section: "core" as const,
+    exercises,
+  });
+  const rehab = (id: string, ...exercises: ReturnType<typeof ex>[]) => ({ id, kind: "rehab" as const, rehab: "knee", exercises });
+  const acc = (id: string, ...exercises: ReturnType<typeof ex>[]) => ({ id, kind: "accessory" as const, exercises });
+  /** Every logged set, by id, with what was logged. */
+  const loggedSets = (s: Session) =>
+    new Map(
+      s.blocks.flatMap((b) => b.exercises.flatMap((e) => e.sets.filter((x) => x.done).map((x) => [x.id, [x.reps, x.weight]] as const))),
+    );
+  /** Every set logged in any of the documents is in the merge, as logged. */
+  const noSetLost = (m: Session, ...docs: Session[]) => {
+    const got = loggedSets(m);
+    for (const d of docs) for (const [id, v] of loggedSets(d)) expect(got.get(id), id).toEqual(v);
+  };
+  const shape = (s: Session) => s.blocks.map((b) => `${b.id}:${b.kind}${b.section ? `/${b.section}` : ""}${b.rehab ? `@${b.rehab}` : ""}`);
+
+  it("built on two devices (no ancestor): rehab pairs with rehab, Core with Core, accessories with accessories — never across", () => {
+    // The same lift (10) in all three places, built with fresh ids on each device.
+    const local = sess([
+      primary([set("p1")], "P1"),
+      acc("A1", ex(10, [set("a1")])),
+      core("C1", ex(10, [set("c1")])),
+      rehab("R1", ex(10, [set("r1")])),
+    ]);
+    const server = sess([
+      primary([set("p2")], "P2"),
+      acc("A2", ex(10, [logged("a2", 8)])),
+      core("C2", ex(10, [logged("c2", 9)])),
+      rehab("R2", ex(10, [logged("r2", 12, 20)])),
+    ]);
+    const m = mergeSession(null, local, server);
+    expect(shape(m)).toEqual(["P1:primary", "A1:accessory", "C1:accessory/core", "R1:rehab@knee"]);
+    expect(m.blocks.map((b) => b.exercises[0]!.sets[0]!.reps)).toEqual([null, 8, 9, 12]);
+    // A Core block and an accessory block of the same lift don't pair up: both are kept.
+    const m2 = mergeSession(null, sess([acc("A1", ex(10, [logged("a1")]))]), sess([core("C2", ex(10, [logged("c2")]))]));
+    // (In the merge's order; the reader groups blocks by section, SPEC §6.7.)
+    expect(shape(m2).sort()).toEqual(["A1:accessory", "C2:accessory/core"]);
+    // Rehab blocks of two different rehab programmes don't either.
+    const other = { ...rehab("R2", ex(10, [logged("r2")])), rehab: "shoulder" };
+    expect(shape(mergeSession(null, sess([rehab("R1", ex(10, [logged("r1")]))]), sess([other]))).sort()).toEqual([
+      "R1:rehab@knee",
+      "R2:rehab@shoulder",
+    ]);
+  });
+
+  it("a rehab block holding the main lift's exercise never pairs with the main lift (the swap's primary:<lift> key holds)", () => {
+    const local = sess([primary([set("p1")], "P1")]);
+    const server = sess([primary([logged("p2")], "P2"), rehab("R", ex(1, [logged("r1")]))]);
+    const m = mergeSession(null, local, server);
+    expect(shape(m)).toEqual(["P1:primary", "R:rehab@knee"]);
+    expect(m.blocks.filter((b) => b.kind === "primary")).toHaveLength(1);
+    expect(setsOf(m, "R").map((x) => [x.id, x.done])).toEqual([["r1", true]]);
+    expect(setsOf(m, "P1")[0]!.done).toBe(true);
+  });
+
+  it("a block moved to Core on one device while the other logs in it: both survive, either way round", () => {
+    const anc = sess([primary([set("p")]), acc("K", ex(30, [set("k1"), set("k2")]))]);
+    const moved = sess([primary([set("p")]), core("K", ex(30, [set("k1"), set("k2")]))]);
+    const logs = sess([primary([set("p")]), acc("K", ex(30, [logged("k1"), set("k2")]))]);
+    for (const [local, server] of [
+      [moved, logs],
+      [logs, moved],
+    ] as const) {
+      const m = mergeSession(anc, local, server);
+      expect(shape(m)).toEqual(["p:primary", "K:accessory/core"]);
+      expect(setsOf(m, "K").map((x) => x.done)).toEqual([true, false]);
+    }
+    // …and moved back to Accessories (section removed) while the other logs: back in Accessories, logged.
+    const back = sess([primary([set("p")]), acc("K", ex(30, [set("k1"), set("k2")]))]);
+    const logsInCore = sess([primary([set("p")]), core("K", ex(30, [logged("k1"), set("k2")]))]);
+    const m = mergeSession(moved, back, logsInCore);
+    expect(shape(m)).toEqual(["p:primary", "K:accessory"]);
+    expect(m.blocks[1]).not.toHaveProperty("section");
+    expect(setsOf(m, "K")[0]!.done).toBe(true);
+  });
+
+  it("an older build's save (blocks rebuilt without `section`, rehab left alone): no set is lost", () => {
+    // The day as the new build saved it: Core superset (30 + 31), a rehab block.
+    const anc = sess([
+      primary([logged("p1"), set("p2")]),
+      acc("A", ex(20, [set("a1")])),
+      core("C", ex(30, [set("c1"), set("c2")]), ex(31, [set("d1"), set("d2")])),
+      rehab("R", ex(40, [set("r1"), set("r2")])),
+    ]);
+    // The older build split 31 out of the superset (its new block has no section), rebuilt the
+    // Core block without it (a literal of the fields it knows), and logged in both.
+    const old = sess([
+      primary([logged("p1"), logged("p2")]),
+      acc("A", ex(20, [set("a1")])),
+      { id: "C", kind: "accessory", exercises: [ex(30, [logged("c1", 11), set("c2")])] },
+      { id: "C-2", kind: "accessory", exercises: [ex(31, [logged("d1", 7), set("d2")])] },
+      rehab("R", ex(40, [set("r1"), set("r2")])),
+    ]);
+    // Meanwhile the new build logged Core and rehab sets on its copy.
+    const fresh = sess([
+      primary([logged("p1"), set("p2")]),
+      acc("A", ex(20, [logged("a1")])),
+      core("C", ex(30, [set("c1"), logged("c2", 12)]), ex(31, [set("d1"), logged("d2", 6)])),
+      rehab("R", ex(40, [logged("r1", 15, 10), set("r2")])),
+    ]);
+    for (const [local, server] of [
+      [old, fresh],
+      [fresh, old],
+    ] as const) {
+      const m = mergeSession(anc, local, server);
+      noSetLost(m, old, fresh);
+      const ids = m.blocks.flatMap((b) => b.exercises.flatMap((e) => e.sets.map((x) => x.id)));
+      expect(new Set(ids).size).toBe(ids.length);
+      // The rehab block is untouched by the older build: kind and rehab block id survive, and
+      // nothing from strength moved into it.
+      expect(m.blocks.find((b) => b.id === "R")).toMatchObject({ kind: "rehab", rehab: "knee" });
+      expect(m.blocks.filter((b) => b.kind === "rehab").flatMap((b) => b.exercises.map((e) => e.exerciseId))).toEqual([40]);
+    }
+    // An older build that only logs (it keeps `section` by spreading the block): stays in Core.
+    const spread = {
+      ...anc,
+      blocks: anc.blocks.map((b) => (b.id === "C" ? { ...b, exercises: [ex(30, [logged("c1"), set("c2")]), b.exercises[1]!] } : b)),
+    };
+    const m = mergeSession(anc, spread, fresh);
+    expect(m.blocks.find((b) => b.id === "C")).toMatchObject({ section: "core" });
+    noSetLost(m, spread, fresh);
+  });
+
+  it("a lift in rehab and the same lift added to the accessories are two exercises (rehab work never moves into strength)", () => {
+    // The ancestor's rehab exercise has no sets yet: it is identified by its lift, within rehab only.
+    const anc = sess([primary([set("p")]), rehab("R", ex(40, []))]);
+    // Here: rehab taken away, the same lift added as an accessory.
+    const local = sess([primary([set("p")]), acc("A", ex(40, [set("n1")]))]);
+    // There: a set added to the rehab exercise and logged.
+    const server = sess([primary([set("p")]), rehab("R", ex(40, [logged("s1", 10, 5)]))]);
+    const m = mergeSession(anc, local, server);
+    expect(shape(m).sort()).toEqual(["A:accessory", "R:rehab@knee", "p:primary"]);
+    expect(setsOf(m, "R").map((x) => [x.id, x.done])).toEqual([["s1", true]]);
+    expect(setsOf(m, "A").map((x) => x.id)).toEqual(["n1"]);
+  });
+
+  it("documents without sections merge exactly as before (no section or rehab keys appear)", () => {
+    const anc = sess([primary([set("a"), set("b")]), acc("x", ex(10, [set("x1")]))]);
+    const local = sess([primary([logged("a"), set("b")]), acc("x", ex(10, [set("x1")]))]);
+    const server = sess([primary([set("a"), set("b")]), acc("x", ex(10, [logged("x1")])), acc("y", ex(11, [set("y1")]))]);
+    const m = mergeSession(anc, local, server);
+    expect(JSON.stringify(m)).not.toMatch(/"section"|"rehab"/);
+    expect(fitSession(m).doc).toBe(m);
+  });
+});
+
+describe("fitSession: overflow keeps the block's kind, subsection and rehab block", () => {
+  const exs = (n: number, prefix: string) =>
+    Array.from({ length: n }, (_, i) => ({ exerciseId: 20 + i, measure: "reps" as const, sets: [set(`${prefix}${i}`)] }));
+
+  it("a Core superset over 6 overflows into Core, a rehab one into the same rehab block, an accessory one into Accessories", () => {
+    const { doc, error } = fitSession(
+      sess([
+        primary([set("p")]),
+        { id: "acc", kind: "accessory", exercises: exs(7, "a") },
+        { id: "core", kind: "accessory", section: "core", exercises: exs(8, "c") },
+        { id: "reh", kind: "rehab", rehab: "knee", exercises: exs(7, "r") },
+      ]),
+    );
+    expect(error).toBeNull();
+    expect(doc.blocks.map(({ exercises, ...head }) => [head, exercises.length])).toEqual([
+      [{ id: "p", kind: "primary" }, 1],
+      [{ id: "acc", kind: "accessory" }, 6],
+      [{ id: "acc-2", kind: "accessory" }, 1],
+      [{ id: "core", kind: "accessory", section: "core" }, 6],
+      [{ id: "core-2", kind: "accessory", section: "core" }, 2],
+      [{ id: "reh", kind: "rehab", rehab: "knee" }, 6],
+      [{ id: "reh-2", kind: "rehab", rehab: "knee" }, 1],
+    ]);
+    // Exactly those keys: an accessory overflow has no section key at all.
+    expect(Object.keys(doc.blocks[2]!).sort()).toEqual(["exercises", "id", "kind"]);
+  });
+});
+
+describe("mergeSettings: rehab programmes", () => {
+  const S0: Settings = { ...settings, onboarded: true };
+  const knee = {
+    id: "knee",
+    name: "Knee rehab",
+    start: "2026-10-19",
+    weeks: 6,
+    days: [false, true, false, true, false, true, false],
+    carry: "last" as const,
+  };
+  const withKnee: Settings = { ...S0, rehab: { programs: [knee] } };
+  const valid = (s: Settings) => expect(settingsSchema.safeParse(s).success).toBe(true);
+
+  it("settings without rehab merge to the same shape (no rehab key appears)", () => {
+    const m = mergeSettingsDetailed(S0, { ...S0, onboarded: false }, { ...S0, targets: { ...S0.targets, steps: 9000 } });
+    expect(m.value).not.toHaveProperty("rehab");
+    expect(m.value).toEqual({ ...S0, onboarded: false, targets: { ...S0.targets, steps: 9000 } });
+    expect(m.conflicts).toEqual([]);
+  });
+
+  it("a block started on one device while the other edits something else: both kept", () => {
+    const m = mergeSettingsDetailed(S0, withKnee, { ...S0, onboarded: false });
+    expect(m.value.rehab).toEqual({ programs: [knee] });
+    expect(m.value.onboarded).toBe(false);
+    expect(m.conflicts).toEqual([]);
+    valid(m.value);
+    // And the other way round.
+    expect(mergeSettings(S0, { ...S0, onboarded: false }, withKnee).rehab).toEqual({ programs: [knee] });
+  });
+
+  it("an older build's save (a copy from before rehab, or one it spread) keeps the rehab blocks", () => {
+    const old = { ...S0, nutrition: { ...S0.nutrition, proteinGPerLb: 1.1 } };
+    const m = mergeSettings(S0, old, withKnee);
+    expect(m.rehab).toEqual(withKnee.rehab);
+    expect(m.nutrition.proteinGPerLb).toBe(1.1);
+    const spread = { ...withKnee, display: { highContrast: true } };
+    expect(mergeSettings(withKnee, spread, withKnee).rehab).toEqual(withKnee.rehab);
+    // Without an ancestor: a copy without rehab blocks never takes the server's away.
+    expect(mergeSettings(null, old, withKnee).rehab).toEqual(withKnee.rehab);
+    expect(mergeSettings(undefined, withKnee, old).rehab).toEqual(withKnee.rehab);
+    expect(mergeSettings(null, old, S0)).not.toHaveProperty("rehab");
+  });
+
+  it("edits of the same block on two devices merge field by field, its days day by day", () => {
+    const here = { ...withKnee, rehab: { programs: [{ ...knee, weeks: 7, days: knee.days.map((d, i) => (i === 3 ? false : d)) }] } };
+    const there = {
+      ...withKnee,
+      rehab: { programs: [{ ...knee, name: "Left knee", days: knee.days.map((d, i) => (i === 2 ? true : d)) }] },
+    };
+    const m = mergeSettingsDetailed(withKnee, here, there);
+    expect(m.value.rehab!.programs).toEqual([
+      { ...knee, name: "Left knee", weeks: 7, days: [false, true, true, false, false, true, false] },
+    ]);
+    expect(m.conflicts).toEqual([]);
+  });
+
+  it("ended on one device, extended on the other: both edits stand", () => {
+    const ended = { ...withKnee, rehab: { programs: [{ ...knee, end: "2026-11-20" }] } };
+    const extended = { ...withKnee, rehab: { programs: [{ ...knee, weeks: 7 }] } };
+    expect(mergeSettings(withKnee, ended, extended).rehab!.programs).toEqual([{ ...knee, weeks: 7, end: "2026-11-20" }]);
+  });
+
+  it("removed here, untouched there: gone; removed here, edited there: the edit keeps it", () => {
+    const none = { ...withKnee, rehab: { programs: [] } };
+    expect(mergeSettings(withKnee, none, withKnee).rehab).toEqual({ programs: [] });
+    const edited = { ...withKnee, rehab: { programs: [{ ...knee, weeks: 8 }] } };
+    expect(mergeSettings(withKnee, none, edited).rehab!.programs).toEqual([{ ...knee, weeks: 8 }]);
+  });
+
+  it("both devices start a block from settings that had none: both kept, ordered by start; overlapping ones are reported", () => {
+    const next = { ...knee, id: "knee-2", name: "Knee, phase 2", start: "2026-12-07", weeks: 4 };
+    const early = { ...knee, id: "hip", name: "Hip", start: "2026-09-01", weeks: 4 };
+    // Apart in time: no conflict.
+    let m = mergeSettingsDetailed(S0, { ...S0, rehab: { programs: [next] } }, { ...S0, rehab: { programs: [early] } });
+    expect(m.value.rehab!.programs.map((p) => p.id)).toEqual(["hip", "knee-2"]);
+    expect(m.conflicts).toEqual([]);
+    valid(m.value);
+    // In force on the same days (each device started one): both kept, and the merge says so.
+    const overlapping = { ...knee, id: "knee-b", start: "2026-11-02" };
+    const other: Settings = { ...S0, rehab: { programs: [overlapping] } };
+    for (const [local, server] of [
+      [withKnee, other],
+      [other, withKnee],
+    ] as Array<[Settings, Settings]>) {
+      m = mergeSettingsDetailed(S0, local, server);
+      expect(m.value.rehab!.programs.map((p) => p.id)).toEqual(["knee", "knee-b"]);
+      expect(m.conflicts).toEqual(["rehab blocks"]);
+    }
+    // One ended before the other starts is not an overlap.
+    const endedEarly = { ...knee, end: "2026-11-01" };
+    m = mergeSettingsDetailed(S0, { ...S0, rehab: { programs: [endedEarly] } }, { ...S0, rehab: { programs: [overlapping] } });
+    expect(m.conflicts).toEqual([]);
+    // An overlap both documents already had isn't reported again.
+    const both = { ...S0, rehab: { programs: [knee, overlapping] } };
+    expect(mergeSettingsDetailed(both, { ...both, onboarded: false }, both).conflicts).toEqual([]);
+  });
+
+  it("a 409 for a settings save reports a rehab blocks conflict", () => {
+    const overlapping = { ...knee, id: "knee-b", start: "2026-11-02" };
+    const s = addOp(emptyOutbox(), { kind: "settings", settings: withKnee, baseRev: "s1", base: S0 }, null);
+    const r = resolveConflict(s, s.entries[0]!.seq, { current: { ...S0, rehab: { programs: [overlapping] } }, rev: "s2" }, true);
+    expect(r).toMatchObject({ kind: "retry", conflicts: ["rehab blocks"] });
   });
 });
