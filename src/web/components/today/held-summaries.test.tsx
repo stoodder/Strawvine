@@ -209,8 +209,8 @@ describe("Today's checklist while typing", () => {
     const zone2 = screen.getByRole("button", { name: "Zone 2 complete" });
     act(() => zone2.click());
     expect(document.activeElement).toBe(field("Journal"));
-    // The day's first Zone 2 value carries the machine shown (none used before: the bike).
-    expect(patches).toEqual([{ zone2Done: true, zone2Minutes: 30, zone2Machine: "bike" }]);
+    // (The day's save adds the machine to it: `useSaveDay`.)
+    expect(patches).toEqual([{ zone2Done: true, zone2Minutes: 30 }]);
     expect(zone2.getAttribute("aria-pressed")).toBe("true");
     expect(value(row(/^Zone 2/))).toBe("30 min");
     expect(row(/^Zone 2/).textContent).toContain("Zone 2");

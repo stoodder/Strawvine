@@ -186,6 +186,10 @@ describe("daySections", () => {
     const logged = daySections(SUN, data([], [{ ...emptyDayLog(SUN), zone2Done: true, zone2Machine: "row" }]), { today: SUN });
     expect(keys(logged)).toEqual(["zone2:done"]);
     expect(at(logged, "zone2")).toMatchObject({ added: true, planned: false });
+    // A machine alone (chosen, nothing logged) holds nothing on a rest day, and starts nothing on a Zone 2 day.
+    const chosen = (date: string) => [{ ...emptyDayLog(date), zone2Machine: "row" }];
+    expect(daySections(SUN, data([], chosen(SUN)), { today: SUN })).toEqual([]);
+    expect(at(daySections(MON, data([], chosen(MON)), { today: MON }), "zone2").status).toBe("todo");
     // Add to the day → Strength saves an extra session; Rehab on a non-rehab day while a block is in force.
     const extra = session(SUN, [], { label: EXTRA_SESSION_LABEL });
     expect(keys(daySections(SUN, data([extra]), { today: SUN }))).toEqual(["strength:todo"]);

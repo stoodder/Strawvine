@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, lt, or, sql } from "drizzle-orm";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
@@ -24,6 +24,7 @@ import {
   sessionSchema,
   settingsSchema,
   type Bootstrap,
+  type DayLogPatch,
   type Revs,
   type Session,
   type Settings,
@@ -49,8 +50,10 @@ import {
   type SessionConfig,
 } from "./auth";
 import { localToday } from "../shared/dates";
+import { emptyDayLog } from "../shared/empty";
 import { exercisePatchRefusal, serverLockDate } from "../shared/exerciseEdit";
 import { MAX_BLOCKS, normalizeMainLift } from "../shared/sessionStructure";
+import { DEFAULT_ZONE2_MACHINE, fillZone2Machine, zone2MachineFor } from "../shared/zone2";
 import { buildExport, toDay, toExercise, toMax } from "./backup";
 import type { Db } from "./db/client";
 import { dayLogs, exercises, maxEntries, seenAchievements, sessions, settings } from "./db/schema";
@@ -310,6 +313,40 @@ export function cspViolations(body: unknown): Array<{ directive: string; blocked
 }
 
 const tooLarge = (c: Context) => c.json({ error: "Request body too large" }, 413);
+
+/**
+ * A day patch that writes the day's first Zone 2 value without a machine (an older build, a screen that doesn't pick
+ * one) gets the default one, as this build's own save does (`fillZone2Machine`): the machine of the last earlier day
+ * with Zone 2 logged (`zone2MachineFor`). So a day with Zone 2 and no machine is only ever one logged before machines.
+ */
+async function withDefaultZone2Machine(tx: Tx, date: string, patch: DayLogPatch): Promise<DayLogPatch> {
+  if (patch.zone2Machine !== undefined) return patch;
+  if (patch.zone2Done === undefined && patch.zone2Minutes === undefined && patch.zone2Kcal === undefined) return patch;
+  const zone2 = {
+    date: dayLogs.date,
+    zone2Machine: dayLogs.zone2Machine,
+    zone2Done: dayLogs.zone2Done,
+    zone2Minutes: dayLogs.zone2Minutes,
+    zone2Kcal: dayLogs.zone2Kcal,
+  };
+  const [day] = await tx.select(zone2).from(dayLogs).where(eq(dayLogs.date, date)).for("update");
+  if (fillZone2Machine(day, patch, DEFAULT_ZONE2_MACHINE) === patch) return patch;
+  const logged = or(eq(dayLogs.zone2Done, true), isNotNull(dayLogs.zone2Minutes), isNotNull(dayLogs.zone2Kcal));
+  const earlier = await tx
+    .select(zone2)
+    .from(dayLogs)
+    .where(and(lt(dayLogs.date, date), logged))
+    .orderBy(desc(dayLogs.date))
+    .limit(1);
+  return fillZone2Machine(
+    day,
+    patch,
+    zone2MachineFor(
+      date,
+      earlier.map((d) => ({ ...emptyDayLog(d.date), ...d })),
+    ).machine,
+  );
+}
 
 /** An exercise patch the locks refuse (`exercisePatchRefusal`); thrown to roll its transaction back. */
 class PatchRefused extends Error {}
@@ -615,14 +652,14 @@ export function createApp(opts: AppOptions) {
     const patch = dayLogPatchSchema.safeParse(await c.req.json().catch(() => null));
     if (!date.success) return c.json(badRequest(date.error), 400);
     if (!patch.success) return c.json(badRequest(patch.error), 400);
-    const values = { ...patch.data, updatedAt: new Date() };
-    const [row] = await write(c, (tx) =>
-      tx
+    const [row] = await write(c, async (tx) => {
+      const values = { ...(await withDefaultZone2Machine(tx, date.data, patch.data)), updatedAt: new Date() };
+      return tx
         .insert(dayLogs)
         .values({ date: date.data, ...values })
         .onConflictDoUpdate({ target: dayLogs.date, set: values })
-        .returning(),
-    );
+        .returning();
+    });
     return c.json(toDay(row!));
   });
 

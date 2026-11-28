@@ -1,20 +1,17 @@
 import clsx from "clsx";
-import { ClipboardPaste, Plus } from "lucide-react";
-import { useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { ChevronDown, ClipboardPaste } from "lucide-react";
+import { useId, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { benchmarkBest, benchmarkNames, isBetterScore, normalizeBenchmark, parseScore, type ParsedScore } from "../../../shared/benchmarks";
-import { formatShortDate, type ISODate } from "../../../shared/dates";
+import { formatShortDate } from "../../../shared/dates";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { nextSubstanceState, SUBSTANCES, type SubstanceKey } from "../../../shared/substances";
 import {
   DEFAULT_ZONE2_MACHINE,
-  isZone2Preset,
   normalizeZone2Machine,
   sameZone2Machine,
   shownZone2Machine,
-  withZone2Machine,
-  zone2Caption,
-  zone2Logged,
+  zone2Activity,
   zone2MachineLabel,
   ZONE2_MACHINE_MAX,
   ZONE2_PRESETS,
@@ -391,164 +388,59 @@ export function StepsEditor({ day, patch, target }: EditorProps & { target: numb
 export interface Zone2MachineProps {
   /** The machine of the last earlier day with Zone 2 (`zone2MachineFor`). Default: none (the bike). */
   last?: LastZone2Machine;
-  /** The chips (`zone2Machines`). Default: the common machines. */
-  chips?: string[];
-  /**
-   * A machine picked on screen and not written yet (null: none). It lives with whoever else may log the day's
-   * first Zone 2 value (the checklist's dot), which writes it. Without `onPick` the editor keeps its own.
-   */
-  pick?: string | null;
-  onPick?: (machine: string | null) => void;
-  /** Today's date: "Your choice today" (on another day, "that day"). Default: the day's own. */
-  today?: ISODate;
+  /** The machines offered (`zone2Machines`). Default: the common ones. */
+  machines?: string[];
 }
 
-const PRESET_CHIPS: string[] = ZONE2_PRESETS.map((p) => p.key);
+const PRESET_MACHINES: string[] = ZONE2_PRESETS.map((p) => p.key);
 const NO_LAST: LastZone2Machine = { machine: DEFAULT_ZONE2_MACHINE, from: null };
+/** The select's value for "Other…": no machine is stored under it (a stored name never starts with a space). */
+const OTHER = " other";
 
 /**
- * The machine (chips: Bike · Row · Elliptical · Ski · the owner's own names used on other days · + Other), then the
- * duration (entering one ticks the session off) and, optionally, the machine's calorie reading. The reading is just
- * that: it never counts toward the day's intake, the TDEE or the targets, and it doesn't tick the session off. A
- * reading out of range is refused, not clamped.
+ * The duration (entering one ticks the session off) and, optionally, the machine's calorie reading, then the machine:
+ * one line, "Machine · Rowing ▾", a native select (Bike · Row · Elliptical · Ski · the owner's own names · Other…).
+ * The reading is just that: it never counts toward the day's intake, the TDEE or the targets, and it doesn't tick the
+ * session off. A reading out of range is refused, not clamped.
  *
- * The machine shown is the day's own once Zone 2 is logged (none recorded: the bike); before that, the one picked
- * here, else the last one used. It is written with the day's first Zone 2 value, never by a chip alone; on a day
- * with Zone 2 logged, a chip writes at once.
+ * The machine shown is the day's own, else (Zone 2 logged before machines were) the bike, else the last one used.
+ * Choosing one writes it to the day at once, even with nothing else logged; the day's first Zone 2 value saved
+ * without one gets the one shown (`fillZone2Machine`, in the day's save). "Other…" shows a name field under the
+ * line — the last thing in the editor, so that it comes and goes under every field — and changes nothing until a
+ * name is given.
  */
-export function Zone2Editor({
-  day,
-  patch,
-  last = NO_LAST,
-  chips = PRESET_CHIPS,
-  pick: pickProp = null,
-  onPick,
-  today = day.date,
-}: EditorProps & Zone2MachineProps) {
-  const [ownPick, setOwnPick] = useState<string | null>(null);
-  const pick = onPick ? pickProp : ownPick;
-  const setPick = onPick ?? setOwnPick;
-  const machine = shownZone2Machine(day, pick, last);
-  const inChips = chips.some((c) => sameZone2Machine(c, machine));
-  // Other is chosen (view state): its name field shows, and stays, until another chip is chosen — so that leaving
-  // the field never takes its line away, whatever was named. It starts chosen for a machine with no chip of its own
-  // (a name used on this day only). Decided by taps, never by a save or a sync: a field that appeared by itself
-  // would move the fields under it (a machine another device writes meanwhile is named in the row, no chip chosen).
-  const [otherOn, setOther] = useState(!inChips);
-  // A name typed here, as typed ("rowing" is stored as the rower): shown while it is the machine in force.
-  const [named, setNamed] = useState<{ typed: string; machine: string } | null>(null);
-  const nameValue =
-    named && sameZone2Machine(named.machine, machine) ? named.typed : isZone2Preset(machine) ? "" : zone2MachineLabel(machine);
-  // Re-mounts the name field, to show what is in force again after an empty name.
-  const [nameKey, setNameKey] = useState(0);
-  const labelId = useId();
-  const captionId = useId();
+export function Zone2Editor({ day, patch, last = NO_LAST, machines = PRESET_MACHINES }: EditorProps & Zone2MachineProps) {
+  const machine = shownZone2Machine(day, last);
+  // The machine shown is always an option (a name of the day's own older than the names offered, or chosen only).
+  const options = machines.some((m) => sameZone2Machine(m, machine)) ? machines : [...machines, machine];
+  const value = options.find((m) => sameZone2Machine(m, machine)) ?? machine;
+  // "Other…" chosen (view state): its name field shows until a machine is chosen in the select. Taking it away as a
+  // name is saved would move what is under it (another row, the journal) as the field is left for it.
+  const [naming, setNaming] = useState(false);
   const nameBox = useRef<HTMLDivElement>(null);
-  const radios = useRef<Array<HTMLButtonElement | null>>([]);
 
-  const logged = zone2Logged(day);
-  /** A Zone 2 value, carrying the machine shown when it is the day's first. */
-  const log = (p: DayLogPatch) => {
-    const withMachine = withZone2Machine(day, p, machine);
-    if (withMachine !== p) setPick(null);
-    patch(withMachine);
-  };
+  /** A machine chosen: written at once (the one recorded already: nothing to write). */
   const choose = (m: string) => {
-    if (!logged) return setPick(m);
     if (day.zone2Machine !== m) patch({ zone2Machine: m });
-    setPick(null);
   };
   const commitName = (typed: string) => {
     const m = normalizeZone2Machine(typed);
-    if (m === null) return setNameKey((k) => k + 1);
-    setNamed({ typed, machine: m });
-    choose(m);
+    if (m === null) return;
+    // A name offered already, spelt another way ("assault-bike"), is that one.
+    choose(options.find((o) => sameZone2Machine(o, m)) ?? m);
   };
-
-  const options = [...chips.map((c) => ({ key: c as string | null, label: zone2MachineLabel(c) })), { key: null, label: "Other" }];
-  const checked = otherOn ? options.length - 1 : options.findIndex((o) => o.key !== null && sameZone2Machine(o.key, machine));
-  /** Chooses an option; Other by a tap also puts the caret in its name. */
-  const select = (i: number, tapped: boolean) => {
-    const key = options[i]!.key;
-    if (key !== null) {
-      setOther(false);
-      setNamed(null);
-      return choose(key);
+  const onSelect = (picked: string) => {
+    if (picked !== OTHER) {
+      setNaming(false);
+      return choose(picked);
     }
-    // Shown at once, so that the tap that chose Other can focus its name: iOS raises the keyboard only for a focus
-    // given inside the tap's own handler.
-    flushSync(() => setOther(true));
-    if (tapped) nameBox.current?.querySelector("input")?.focus();
-  };
-  // A radio group: one tab stop (the chosen chip), arrows move and choose.
-  const onKey = (e: ReactKeyboardEvent, i: number) => {
-    const n = options.length;
-    const keys: Record<string, number> = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: n - 1 };
-    if (!(e.key in keys)) return;
-    e.preventDefault();
-    const to = (keys[e.key]! + n) % n;
-    radios.current[to]?.focus();
-    select(to, false);
+    // Shown at once, so that the choice can put the caret in it.
+    flushSync(() => setNaming(true));
+    nameBox.current?.querySelector("input")?.focus();
   };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <div id={labelId} className="label mb-2">
-          Machine
-        </div>
-        {/* Fixed words, and no field among them: the row wraps by the room alone (onto more lines on a 320 px phone),
-            never as something is typed. A chosen chip keeps its size (its ring is drawn inside, not a border). */}
-        <div role="radiogroup" aria-labelledby={labelId} aria-describedby={captionId} className="flex flex-wrap gap-2">
-          {options.map((o, i) => {
-            const on = i === checked;
-            const isOther = o.key === null;
-            return (
-              <button
-                key={o.key ?? "+other"}
-                ref={(el) => {
-                  radios.current[i] = el;
-                }}
-                type="button"
-                role="radio"
-                aria-checked={on}
-                tabIndex={i === Math.max(0, checked) ? 0 : -1}
-                onClick={() => select(i, true)}
-                onKeyDown={(e) => onKey(e, i)}
-                className={clsx(
-                  "chip max-w-full gap-1.5 px-3.5 text-[0.8125rem] transition-colors",
-                  on
-                    ? "bg-accent/12 text-accent shadow-[inset_0_0_0_1px_rgb(183_243_106/0.35),0_0_18px_-6px_rgb(183_243_106/0.6)]"
-                    : isOther
-                      ? "bg-transparent text-mute shadow-[inset_0_0_0_1px_rgb(255_255_255/0.12)]"
-                      : "bg-white/[0.05] text-fg-2",
-                )}
-              >
-                {isOther && <Plus size={12} strokeWidth={2} aria-hidden className="shrink-0" />}
-                <span className="truncate">{o.label}</span>
-              </button>
-            );
-          })}
-        </div>
-        {/* Always there, always one line: why this machine is the one shown. */}
-        <p id={captionId} className="mt-2 truncate text-xs text-mute">
-          {zone2Caption({ machine, last, date: day.date, today, naming: otherOn && !nameValue })}
-        </p>
-        {/* Other's name: a field of its own width under the chips, never in their row (it would re-wrap it as it grew). */}
-        {otherOn && (
-          <div ref={nameBox} className="mt-3 max-w-[16rem]">
-            <InlineText
-              key={nameKey}
-              ariaLabel="Machine name"
-              value={nameValue}
-              onCommit={commitName}
-              maxLength={ZONE2_MACHINE_MAX}
-              placeholder="Its name, e.g. Assault bike"
-              inputClassName="text-base"
-            />
-          </div>
-        )}
-      </div>
+    <div>
       {/* A container: the two fields sit side by side where both always fit at their widest (600 min, 3000 kcal),
           and one under the other where they wouldn't (a 320 px phone) — decided by the room, never by what is
           typed: a row that wraps would re-wrap, and move the field in use, as a number gains or loses a digit. */}
@@ -558,7 +450,7 @@ export function Zone2Editor({
             <NumberInput
               ariaLabel="Zone 2 minutes"
               value={day.zone2Minutes}
-              onCommit={(v) => log({ zone2Minutes: v, zone2Done: v !== null && v > 0 ? true : day.zone2Done })}
+              onCommit={(v) => patch({ zone2Minutes: v, zone2Done: v !== null && v > 0 ? true : day.zone2Done })}
               placeholder="30"
               inputClassName="text-5xl font-light tracking-tight"
               min={0}
@@ -571,7 +463,7 @@ export function Zone2Editor({
           <NumberInput
             ariaLabel="Zone 2 machine calories"
             value={day.zone2Kcal ?? null}
-            onCommit={(v) => log({ zone2Kcal: v })}
+            onCommit={(v) => patch({ zone2Kcal: v })}
             inputClassName="text-3xl font-light tracking-tight"
             unit={<span className="ml-1 text-sm">kcal</span>}
             min={0}
@@ -583,6 +475,45 @@ export function Zone2Editor({
         {/* The range of a refused reading hangs under its field, where this line is: it makes way. */}
         <p className="text-xs text-mute group-has-[[data-range-hint]]:invisible">Machine reading · not added to intake</p>
       </div>
+      {/* The machine: one line, 44 px tall, the native select laid over all of it (iOS gives its wheel). What it says
+          is drawn beside it and truncated, so neither a long name nor the options change the line's size. While the
+          name field is out it still says the machine in force: "Other…" changes nothing until a name is given. */}
+      <div className="focus-ring-within relative mt-2 flex h-11 max-w-full items-center gap-1.5 rounded-lg text-sm">
+        <span className="shrink-0 text-mute" aria-hidden>
+          Machine ·
+        </span>
+        <span className="min-w-0 truncate text-fg-2" aria-hidden>
+          {zone2Activity(machine)}
+        </span>
+        <ChevronDown size={14} strokeWidth={2} className="shrink-0 text-mute" aria-hidden />
+        <select
+          aria-label="Machine"
+          value={value}
+          onChange={(e) => onSelect(e.target.value)}
+          // text-base: a field under 16 px makes iOS zoom the page as it takes focus.
+          className="absolute inset-0 h-full w-full cursor-pointer appearance-none text-base opacity-0 [color-scheme:dark]"
+        >
+          {options.map((m) => (
+            <option key={m} value={m}>
+              {zone2MachineLabel(m)}
+            </option>
+          ))}
+          <option value={OTHER}>Other…</option>
+        </select>
+      </div>
+      {/* Other's name: under the line, the last thing in the editor. */}
+      {naming && (
+        <div ref={nameBox} className="mt-2 max-w-[16rem]">
+          <InlineText
+            ariaLabel="Machine name"
+            value=""
+            onCommit={commitName}
+            maxLength={ZONE2_MACHINE_MAX}
+            placeholder="Its name, e.g. Assault bike"
+            inputClassName="text-base"
+          />
+        </div>
+      )}
     </div>
   );
 }

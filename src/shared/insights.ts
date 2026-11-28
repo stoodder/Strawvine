@@ -63,8 +63,9 @@ export interface WeeklyCheckin {
    */
   zone2Kcal: number | null;
   /**
-   * What the week's Zone 2 was done on, over the same days: each activity once ("Rowing", "Cycling" — a day with no
-   * machine recorded was on the bike), the most days first (`zone2Activities`).
+   * What the week's Zone 2 was done on, over the same days: each activity once ("Rowing", "Cycling"), the most days
+   * first (`zone2Activities`). A day with no machine recorded (logged before machines were) names none, so a week of
+   * only such days names nothing.
    */
   zone2Activities: string[];
   metcon: { done: number; planned: number };

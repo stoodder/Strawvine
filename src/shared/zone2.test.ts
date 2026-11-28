@@ -4,11 +4,10 @@ import type { DayLog } from "./schemas";
 import {
   normalizeZone2Machine,
   sameZone2Machine,
+  fillZone2Machine,
   shownZone2Machine,
-  withZone2Machine,
   zone2Activities,
   zone2Activity,
-  zone2Caption,
   zone2Logged,
   zone2MachineFor,
   zone2MachineLabel,
@@ -96,99 +95,103 @@ describe("zone2MachineFor (the machine a day starts on)", () => {
   });
 });
 
-describe("zone2Machines (the chips)", () => {
-  it("offers the common machines, then the owner's own names used on other days, the most recent first", () => {
+describe("zone2Machines (the options)", () => {
+  it("offers the common machines, then the owner's own names: the most days used first, then the most recent", () => {
     const days = [
       rode("2026-10-20", "Assault bike"),
       rode("2026-10-22", "Stair climber"),
-      rode("2026-10-25", "assault BIKE"),
+      rode("2026-10-25", "assault-BIKE"),
       rode("2026-10-26", "row"),
-      day("2026-10-27", { zone2Machine: "Not logged" }), // picked, never logged
+      rode("2026-10-28", "Rowing machine"), // a common one by another name
+      day("2026-10-27", { zone2Machine: "Not logged" }), // chosen, never logged
       rode("2026-11-03", "Today's own"),
     ];
-    expect(zone2Machines(days, "2026-11-03")).toEqual(["bike", "row", "elliptical", "ski", "assault BIKE", "Stair climber"]);
-    // The day's own name is not a chip on that day — on any other it is.
-    expect(zone2Machines(days, "2026-11-04")).toContain("Today's own");
+    expect(zone2Machines(days, "2026-11-03")).toEqual(["bike", "row", "elliptical", "ski", "assault-BIKE", "Today's own", "Stair climber"]);
   });
 
-  it("offers at most three names of the owner's own", () => {
-    const days = ["A", "B", "C", "D"].map((n, i) => rode(`2026-10-2${i}`, n));
-    expect(zone2Machines(days, "2026-11-03").slice(4)).toEqual(["D", "C", "B"]);
+  it("folds spellings by case, spacing and punctuation, keeping the most recent one", () => {
+    const days = [rode("2026-10-20", "Assault bike"), rode("2026-10-21", "ASSAULT  BIKE"), rode("2026-10-22", "Assault-Bike.")];
+    expect(zone2Machines(days, "2026-11-03").slice(4)).toEqual(["Assault-Bike."]);
+    expect(sameZone2Machine("AssaultBike", "assault bike")).toBe(true);
+    expect(sameZone2Machine("Ski-Erg", "ski")).toBe(true);
+  });
+
+  it("offers every name used in the last 180 days, even once; not older ones", () => {
+    const days = ["A", "B", "C", "D", "E"].map((n, i) => rode(`2026-10-2${i}`, n));
+    expect(zone2Machines(days, "2026-11-03").slice(4)).toEqual(["E", "D", "C", "B", "A"]);
+    const old = [rode("2026-05-07", "Old"), rode("2026-05-08", "Recent enough")];
+    // The last 180 days are 2026-11-03 and the 179 before it.
+    expect(zone2Machines(old, "2026-11-03").slice(4)).toEqual(["Recent enough"]);
+    expect(zone2Machines(old, "2026-11-02").slice(4)).toEqual(["Recent enough", "Old"]);
   });
 });
 
 describe("shownZone2Machine", () => {
   const last = { machine: "row", from: "2026-11-01" };
-  it("is the day's own once logged (none recorded: the bike), else the pick, else the last one", () => {
-    expect(shownZone2Machine(rode("2026-11-03", "ski"), "elliptical", last)).toBe("ski");
-    expect(shownZone2Machine(rode("2026-11-03"), "elliptical", last)).toBe("bike");
-    expect(shownZone2Machine(legacy("2026-11-03"), null, last)).toBe("bike");
-    expect(shownZone2Machine(day("2026-11-03"), "elliptical", last)).toBe("elliptical");
-    expect(shownZone2Machine(day("2026-11-03"), null, last)).toBe("row");
-    // Recorded, then its Zone 2 cleared: still the one it recorded.
-    expect(shownZone2Machine(day("2026-11-03", { zone2Machine: "ski" }), null, last)).toBe("ski");
+  it("is the day's own; with Zone 2 logged and none recorded, the bike; else the last one", () => {
+    expect(shownZone2Machine(rode("2026-11-03", "ski"), last)).toBe("ski");
+    expect(shownZone2Machine(rode("2026-11-03"), last)).toBe("bike");
+    expect(shownZone2Machine(legacy("2026-11-03"), last)).toBe("bike");
+    expect(shownZone2Machine(day("2026-11-03"), last)).toBe("row");
+    // Chosen with nothing logged, or recorded and its Zone 2 cleared: the one it recorded.
+    expect(shownZone2Machine(day("2026-11-03", { zone2Machine: "ski" }), last)).toBe("ski");
   });
 });
 
-describe("withZone2Machine (written with the first Zone 2 value)", () => {
+describe("fillZone2Machine (the day's first Zone 2 value carries a machine)", () => {
   const empty = day("2026-11-03");
   it("adds the machine to the patch that logs the day's first Zone 2 value: the check, a duration or a reading", () => {
-    expect(withZone2Machine(empty, { zone2Done: true, zone2Minutes: 30 }, "row")).toEqual({
+    expect(fillZone2Machine(empty, { zone2Done: true, zone2Minutes: 30 }, "row")).toEqual({
       zone2Done: true,
       zone2Minutes: 30,
       zone2Machine: "row",
     });
-    expect(withZone2Machine(empty, { zone2Minutes: 25, zone2Done: true }, "Assault bike")).toMatchObject({ zone2Machine: "Assault bike" });
-    expect(withZone2Machine(empty, { zone2Kcal: 320 }, "ski")).toEqual({ zone2Kcal: 320, zone2Machine: "ski" });
+    expect(fillZone2Machine(empty, { zone2Minutes: 25, zone2Done: true }, "Assault bike")).toMatchObject({ zone2Machine: "Assault bike" });
+    expect(fillZone2Machine(empty, { zone2Kcal: 320 }, "ski")).toEqual({ zone2Kcal: 320, zone2Machine: "ski" });
+    // No day yet (nothing logged on it at all), or one cached by an older build.
+    expect(fillZone2Machine(undefined, { zone2Done: true }, "row")).toEqual({ zone2Done: true, zone2Machine: "row" });
+    const { zone2Machine: _m, zone2Kcal: _k, ...old } = empty;
+    expect(fillZone2Machine(old as DayLog, { zone2Minutes: 30 }, "row")).toEqual({ zone2Minutes: 30, zone2Machine: "row" });
   });
 
   it("leaves every other patch alone", () => {
     const p = { zone2Kcal: 300 };
-    // Already logged: the machine stays as it is (an older build's day stays the bike).
-    expect(withZone2Machine(rode("2026-11-03"), p, "row")).toBe(p);
+    // Already logged without a machine: logged before machines were, it stays the bike.
+    expect(fillZone2Machine(rode("2026-11-03"), p, "row")).toBe(p);
+    // The day has its own (chosen with nothing logged yet): that one stands.
+    const minutes = { zone2Minutes: 30, zone2Done: true };
+    expect(fillZone2Machine(day("2026-11-03", { zone2Machine: "ski" }), minutes, "row")).toBe(minutes);
     // Nothing logged by it (a cleared field, an unchecked dot).
     const cleared = { zone2Minutes: null };
-    expect(withZone2Machine(empty, cleared, "row")).toBe(cleared);
-    expect(withZone2Machine(empty, { zone2Done: false }, "row")).toEqual({ zone2Done: false });
-    // Not about Zone 2 at all.
-    expect(withZone2Machine(empty, { steps: 9000 }, "row")).toEqual({ steps: 9000 });
-    // A machine of its own.
-    expect(withZone2Machine(empty, { zone2Done: true, zone2Machine: "ski" }, "row")).toEqual({ zone2Done: true, zone2Machine: "ski" });
-  });
-});
-
-describe("zone2Caption", () => {
-  const base = { date: "2026-11-03", today: "2026-11-03" };
-  it("says the machine is the last one, and when", () => {
-    expect(zone2Caption({ ...base, machine: "row", last: { machine: "row", from: "2026-10-29" } })).toBe("Same as last time · Thu");
-    expect(zone2Caption({ ...base, machine: "row", last: { machine: "row", from: "2026-10-27" } })).toBe("Same as last time · Oct 27");
-    expect(zone2Caption({ ...base, date: "2027-01-04", machine: "row", last: { machine: "row", from: "2026-12-20" } })).toBe(
-      "Same as last time · Dec 20, 2026",
-    );
-  });
-
-  it("says another one is a choice, and the default without a history", () => {
-    expect(zone2Caption({ ...base, machine: "ski", last: { machine: "row", from: "2026-10-29" } })).toBe("Your choice today");
-    expect(zone2Caption({ ...base, date: "2026-11-02", machine: "ski", last: { machine: "row", from: "2026-10-29" } })).toBe(
-      "Your choice that day",
-    );
-    expect(zone2Caption({ ...base, machine: "bike", last: { machine: "bike", from: null } })).toBe("Bike unless you pick another");
-    expect(zone2Caption({ ...base, machine: "row", last: { machine: "bike", from: null } })).toBe("Your choice today");
-    expect(zone2Caption({ ...base, machine: "row", last: { machine: "row", from: "2026-10-29" }, naming: true })).toBe("Name it below");
+    expect(fillZone2Machine(empty, cleared, "row")).toBe(cleared);
+    expect(fillZone2Machine(empty, { zone2Done: false }, "row")).toEqual({ zone2Done: false });
+    // Not about Zone 2 at all; a skip is not Zone 2 logged.
+    expect(fillZone2Machine(empty, { steps: 9000 }, "row")).toEqual({ steps: 9000 });
+    expect(fillZone2Machine(empty, { zone2Skipped: true }, "row")).toEqual({ zone2Skipped: true });
+    // A machine of its own (or one cleared on purpose).
+    expect(fillZone2Machine(empty, { zone2Done: true, zone2Machine: "ski" }, "row")).toEqual({ zone2Done: true, zone2Machine: "ski" });
+    expect(fillZone2Machine(empty, { zone2Done: true, zone2Machine: null }, "row")).toEqual({ zone2Done: true, zone2Machine: null });
   });
 });
 
 describe("zone2Activities (the check-in)", () => {
-  it("names each activity once, the most days first, then the most recent; no machine recorded is cycling", () => {
+  it("names each activity once, the most days first, then the most recent", () => {
     const days = [
       rode("2026-10-27", "row"),
-      legacy("2026-10-28"),
       rode("2026-10-29", "Row"),
       rode("2026-10-30", "ski"),
       rode("2026-10-31", "row"),
+      rode("2026-11-01", "bike"),
     ];
-    expect(zone2Activities(days)).toEqual(["Rowing", "Ski erg", "Cycling"]);
+    expect(zone2Activities(days)).toEqual(["Rowing", "Cycling", "Ski erg"]);
     expect(zone2Activities([rode("2026-10-27", "ski"), rode("2026-10-28", "Assault bike")])).toEqual(["Assault bike", "Ski erg"]);
+    expect(zone2Activities([rode("2026-10-27", "Assault bike"), rode("2026-10-28", "assault-bike")])).toEqual(["assault-bike"]);
     expect(zone2Activities([])).toEqual([]);
+  });
+
+  it("names nothing for a day with no machine recorded (logged before machines were)", () => {
+    expect(zone2Activities([rode("2026-10-27", "row"), legacy("2026-10-28"), rode("2026-10-29")])).toEqual(["Rowing"]);
+    // A week of such days names no activity at all.
+    expect(zone2Activities([legacy("2026-10-28"), rode("2026-10-29")])).toEqual([]);
   });
 });

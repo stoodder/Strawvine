@@ -896,11 +896,13 @@ for (const viewport of [
       await expect(kcal).toHaveValue("310");
     });
 
-    test("Today: Zone 2's machine — a chip, a name typed, the first value: the caption keeps its line, the chips their rows, no field moves", async ({
+    test("Today: Zone 2's machine — chosen, Other… named key by key, the first value: nothing above the minutes moves, no field moves", async ({
       page,
+      context,
     }) => {
+      await watchOps(context);
       await onboardedOn(page, MONDAY);
-      // Last Friday's ride (no machine recorded: the bike), so the caption has a day to name.
+      // Last Friday's ride (no machine recorded: the bike), so the day starts on a machine of the owner's history.
       expect((await page.request.put("/api/days/2026-10-23", { data: { zone2Done: true, zone2Minutes: 30 } })).ok()).toBe(true);
       await page.reload();
       await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
@@ -909,71 +911,111 @@ for (const viewport of [
       await row.tap();
       await row.evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 72));
       const editor = page.getByRole("group", { name: "Zone 2 details" });
-      const chips = editor.getByRole("radiogroup", { name: "Machine" });
-      const caption = editor.locator("p").first();
+      const machine = editor.getByRole("combobox", { name: "Machine" });
       const minutes = editor.getByRole("textbox", { name: "Zone 2 minutes" });
       const kcal = editor.getByRole("textbox", { name: "Zone 2 machine calories" });
-      await expect(caption).toHaveText("Same as last time · Fri");
-      await page.waitForTimeout(700);
-      const box = async () => ({
-        row: (await row.boundingBox())!.height,
-        chips: (await chips.boundingBox())!.height,
-        caption: (await caption.boundingBox())!.height,
-      });
-      const start = { ...(await box()), minutes: await place(minutes) };
-      expect(start.caption, "the caption is one line").toBeLessThanOrEqual(17);
-
-      // A chip on a day with nothing logged: the caption and the row's word change, in their lines.
-      await chips.getByRole("radio", { name: "Ski" }).tap();
-      await expect(caption).toHaveText("Your choice today");
-      await expect(row).toContainText("Ski erg");
-      await settled(page);
-      expect(await box()).toEqual({ row: start.row, chips: start.chips, caption: start.caption });
-      expect(Math.abs((await place(minutes)).top - start.minutes.top)).toBeLessThanOrEqual(0.5);
-
-      // Other: its name field comes under the chips (the tap asked for it) and takes the caret.
-      await chips.getByRole("radio", { name: "Other" }).tap();
       const name = editor.getByRole("textbox", { name: "Machine name" });
+      await expect(machine).toHaveValue("bike");
+      await page.waitForTimeout(700);
+      const box = async () => ({ row: (await row.boundingBox())!.height, line: (await machine.boundingBox())!.height });
+      const start = { ...(await box()), minutes: await place(minutes), machine: await place(machine) };
+      expect(start.line, "the machine's line is a 44 px target").toBeGreaterThanOrEqual(44);
+
+      // Chosen on a day with nothing logged: written at once; the line and the row say it, in their lines.
+      await machine.selectOption("row");
+      await expect(row).toContainText("Rowing");
+      await expectSynced(page);
+      expect(await opsWriting(page, "zone2Machine")).toEqual([{ kind: "day", date: MONDAY_ISO, patch: { zone2Machine: "row" } }]);
+      await settled(page);
+      expect(await box()).toEqual({ row: start.row, line: start.line });
+      for (const f of ["minutes", "machine"] as const)
+        expect(Math.abs((await place(f === "minutes" ? minutes : machine)).top - start[f].top), f).toBeLessThanOrEqual(0.5);
+
+      // Other…: its name field comes under the line, the last thing in the editor, and takes the caret; the line still
+      // says the machine in force, and nothing is written.
+      await machine.selectOption({ label: "Other…" });
       await expect(name).toBeFocused();
-      await expect(caption).toHaveText("Name it below");
-      let was = { name: await place(name), minutes: await place(minutes), ...(await box()) };
-      // Key by key, a name longer than the field: nothing moves, up, down or sideways; the chips keep their rows.
+      await expect(machine).toHaveValue("row");
+      expect((await name.boundingBox())!.y, "the name field is under the machine's line").toBeGreaterThanOrEqual(
+        (await machine.boundingBox())!.y + start.line - 0.5,
+      );
+      await settled(page);
+      expect(Math.abs((await place(minutes)).top - start.minutes.top), "the minutes moved as the name field came").toBeLessThanOrEqual(0.5);
+      expect(Math.abs((await place(machine)).top - start.machine.top), "the line moved as the name field came").toBeLessThanOrEqual(0.5);
+      expect(await opsWriting(page, "zone2Machine")).toHaveLength(1);
+
+      // Key by key, a name longer than the field: nothing moves, up, down or sideways.
+      let was = { name: await place(name), minutes: await place(minutes), machine: await place(machine), ...(await box()) };
       for (const ch of "A very long machine name, longer than it") {
         await press(page, ch);
         await settled(page);
-        const now = { name: await place(name), minutes: await place(minutes), ...(await box()) };
-        for (const f of ["name", "minutes"] as const) {
+        const now = { name: await place(name), minutes: await place(minutes), machine: await place(machine), ...(await box()) };
+        for (const f of ["name", "minutes", "machine"] as const) {
           expect(Math.abs(now[f].top - was[f].top), `${f} moved up or down for "${ch}"`).toBeLessThanOrEqual(0.5);
           expect(Math.abs(now[f].left - was[f].left), `${f} moved sideways for "${ch}"`).toBeLessThanOrEqual(0.5);
         }
-        expect(now.chips, `the chips re-wrapped for "${ch}"`).toBe(was.chips);
-        expect(now.caption, `the caption changed height for "${ch}"`).toBe(was.caption);
+        expect(now.row, `the row changed height for "${ch}"`).toBe(was.row);
         was = now;
       }
-      // Saved as the minutes are tapped: the name's line stays, nothing moves.
+      // Saved as the minutes are tapped: the line and the row say the name, the name's field stays, nothing moves.
       await minutes.tap();
       await expect(minutes).toBeFocused();
-      await expect(caption).toHaveText("Your choice today");
       await expect(row).toContainText("A very long machine name, longer than it");
+      await expect(machine).toHaveValue("A very long machine name, longer than it");
       await settled(page);
       expect(Math.abs((await place(minutes)).top - was.minutes.top)).toBeLessThanOrEqual(0.5);
-      expect(await box()).toEqual({ row: was.row, chips: was.chips, caption: was.caption });
+      expect(await box()).toEqual({ row: was.row, line: was.line });
       await expect(name).toBeVisible();
 
-      // The day's first value, saved as the reading is tapped, writes the machine: nothing moves.
+      // The day's first value, saved as the reading is tapped: the machine named goes with the day; nothing moves.
       for (const ch of "45") await press(page, ch);
-      const before = { kcal: await place(kcal), minutes: await place(minutes) };
+      const before = { kcal: await place(kcal), minutes: await place(minutes), name: await place(name) };
       await kcal.tap();
       await expect(kcal).toBeFocused();
       await expect(page.getByRole("button", { name: "Zone 2 complete" })).toHaveAttribute("aria-pressed", "true");
       await settled(page);
-      expect(Math.abs((await place(kcal)).top - before.kcal.top), "the reading moved as the first value was saved").toBeLessThanOrEqual(
-        0.5,
-      );
-      expect(Math.abs((await place(minutes)).top - before.minutes.top)).toBeLessThanOrEqual(0.5);
-      expect(await box()).toEqual({ row: was.row, chips: was.chips, caption: was.caption });
+      for (const f of ["kcal", "minutes", "name"] as const)
+        expect(
+          Math.abs((await place(f === "kcal" ? kcal : f === "minutes" ? minutes : name)).top - before[f].top),
+          `${f} moved as the first value was saved`,
+        ).toBeLessThanOrEqual(0.5);
+      expect(await box()).toEqual({ row: was.row, line: was.line });
       await expect(row).toContainText("A very long machine name, longer than it");
-      await expect(chips.getByRole("radio", { name: "Other" })).toHaveAttribute("aria-checked", "true");
+      await expectSynced(page);
+      expect((await serverData(page)).days.find((d) => d.date === MONDAY_ISO)).toMatchObject({
+        zone2Done: true,
+        zone2Minutes: 45,
+        zone2Machine: "A very long machine name, longer than it",
+      });
+    });
+
+    test("Today: a Zone 2 machine's name typed and not yet left is saved — once — when the app is hidden", async ({ page, context }) => {
+      await watchOps(context);
+      await onboardedOn(page, MONDAY);
+      const row = page.locator("button[aria-controls]").filter({ hasText: /^Zone 2/ });
+      await row.tap();
+      const editor = page.getByRole("group", { name: "Zone 2 details" });
+      const machine = editor.getByRole("combobox", { name: "Machine" });
+      await machine.selectOption({ label: "Other…" });
+      const name = editor.getByRole("textbox", { name: "Machine name" });
+      await expect(name).toBeFocused();
+      for (const ch of "Stair climber") await press(page, ch);
+      expect(await opsWriting(page, "zone2Machine")).toHaveLength(0);
+      await hidden(page, true);
+      await expectSynced(page);
+      expect(await opsWriting(page, "zone2Machine")).toEqual([{ kind: "day", date: MONDAY_ISO, patch: { zone2Machine: "Stair climber" } }]);
+      // Back: as it was left; leaving it saves nothing a second time.
+      await hidden(page, false);
+      await expect(name).toBeFocused();
+      await name.press("Enter");
+      await page.waitForTimeout(300);
+      await expectSynced(page);
+      expect(await opsWriting(page, "zone2Machine")).toHaveLength(1);
+      await expect(machine).toHaveValue("Stair climber");
+      expect((await serverData(page)).days.find((d) => d.date === MONDAY_ISO)).toMatchObject({
+        zone2Machine: "Stair climber",
+        zone2Done: false,
+      });
     });
 
     test("Today: a number typed and not yet committed is saved — once — when the app is hidden, its editor closed, or another day shown", async ({

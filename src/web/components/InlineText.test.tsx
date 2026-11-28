@@ -71,6 +71,62 @@ describe("InlineText", () => {
     expect(onCommit).toHaveBeenCalledExactlyOnceWith("Deadl");
   });
 
+  describe("what is typed isn't lost with the field", () => {
+    const hide = () => {
+      Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    };
+
+    it("commits when the app is hidden while it has focus — once, the blur after it adding nothing", async () => {
+      const user = userEvent.setup();
+      const onCommit = vi.fn();
+      render(
+        <>
+          <InlineText ariaLabel="Name" value="Bench" onCommit={onCommit} />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      const input = screen.getByRole("textbox", { name: "Name" });
+      await user.type(input, " press ");
+      hide();
+      expect(onCommit).toHaveBeenCalledExactlyOnceWith("Bench press");
+      hide();
+      window.dispatchEvent(new Event("pagehide"));
+      await user.click(screen.getByRole("button", { name: "elsewhere" }));
+      expect(onCommit).toHaveBeenCalledOnce();
+    });
+
+    it("commits when it goes away while it has focus", async () => {
+      const user = userEvent.setup();
+      const onCommit = vi.fn();
+      const { rerender } = render(<InlineText ariaLabel="Name" value="" onCommit={onCommit} />);
+      await user.type(screen.getByRole("textbox", { name: "Name" }), "Assault bike");
+      rerender(<></>);
+      expect(onCommit).toHaveBeenCalledExactlyOnceWith("Assault bike");
+    });
+
+    it("commits nothing unchanged, invalid, cancelled or not in focus", async () => {
+      const user = userEvent.setup();
+      const onCommit = vi.fn();
+      const { rerender } = render(<InlineText ariaLabel="Name" value="Bench" required maxLength={10} onCommit={onCommit} />);
+      const input = screen.getByRole("textbox", { name: "Name" });
+      await user.click(input);
+      hide(); // unchanged
+      await user.type(input, "  "); // the same, trimmed
+      hide();
+      await user.clear(input); // empty, and required
+      hide();
+      await user.type(input, "Squat{Escape}"); // cancelled: no longer in focus
+      hide();
+      expect(onCommit).not.toHaveBeenCalled();
+      // Typed, then left with an invalid value it couldn't save: nothing by the field going away either.
+      await user.clear(input);
+      rerender(<></>);
+      expect(onCommit).not.toHaveBeenCalled();
+    });
+  });
+
   it("follows outside changes while not editing", () => {
     const { rerender } = render(<InlineText ariaLabel="Name" value="A" onCommit={() => {}} />);
     rerender(<InlineText ariaLabel="Name" value="B" onCommit={() => {}} />);

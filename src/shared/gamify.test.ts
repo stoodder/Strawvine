@@ -533,3 +533,26 @@ describe("scheduledProgramDay", () => {
         expect(scheduledProgramDay(program, date)).toBe(cyclePosition(program, date) ? programDayFor(program, date) : null);
   });
 });
+
+describe("a Zone 2 machine alone counts nowhere (SPEC §3.5)", () => {
+  // Every box but Zone 2 checked, the rower chosen on each day and nothing of Zone 2 logged.
+  const dates = dateRange("2026-11-02", "2026-11-15");
+  const without = dates.map((d) => ({ ...fullDay(d), zone2Done: false }));
+  const chosen = without.map((d) => ({ ...d, zone2Machine: "row" }));
+
+  it("doesn't tick Zone 2, close a day, keep a streak or earn anything", () => {
+    for (const date of dates) {
+      const items = dayChecklist(date, appData({ days: chosen }));
+      const zone2 = items.find((i) => i.key === "zone2");
+      if (zone2) expect(zone2, date).toMatchObject({ done: false });
+      expect(isClosed(items), date).toBe(isClosed(dayChecklist(date, appData({ days: without }))));
+    }
+    expect([...closedDates(appData({ days: chosen }), "2026-11-15")]).toEqual([...closedDates(appData({ days: without }), "2026-11-15")]);
+    expect(streaks(appData({ days: chosen }), "2026-11-15")).toEqual(streaks(appData({ days: without }), "2026-11-15"));
+    expect(achievements(appData({ days: chosen }), "2026-11-15")).toEqual(achievements(appData({ days: without }), "2026-11-15"));
+    // The check-in counts no Zone 2 done, and names no activity, for it.
+    const checkin = buildModel(appData({ days: chosen }), "2026-11-16").checkin;
+    expect(checkin.zone2.done).toBe(0);
+    expect(checkin.zone2Activities).toEqual([]);
+  });
+});

@@ -21,6 +21,7 @@ import {
   type StreakInfo,
 } from "../../shared/gamify";
 import type { Bootstrap, DayLogPatch, Exercise, MaxEntry, MaxSource, Session, Settings } from "../../shared/schemas";
+import { fillZone2Machine, zone2MachineFor } from "../../shared/zone2";
 import {
   clearRefused,
   currentData,
@@ -122,9 +123,16 @@ export function useAppData(): AppData {
 /** How long a create waits for the server's id before resolving with the local (temporary) row. */
 const CREATE_WAIT_MS = 3000;
 
+/**
+ * Saves a day patch. The day's first Zone 2 value saved without a machine gets the one the day shows — the last one
+ * used (`fillZone2Machine`), here so that it shows at once, offline too; the server does the same for a writer that
+ * didn't.
+ */
 export function useSaveDay() {
   return useCallback((date: string, patch: DayLogPatch) => {
-    enqueue({ kind: "day", date, patch });
+    const days = currentData()?.days ?? [];
+    const day = days.find((d) => d.date === date);
+    enqueue({ kind: "day", date, patch: fillZone2Machine(day, patch, zone2MachineFor(date, days).machine) });
   }, []);
 }
 

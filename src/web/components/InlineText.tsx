@@ -2,14 +2,16 @@
  * Inline text editing: an input that reads as text over a faint hairline (the editable cue, at
  * rest too, for touch), which turns lime on focus. The tap target is 44px tall without taking
  * more room than a line of text (see the `inline-text` utility). Commits on blur / Enter
- * (trimmed, only when changed), Escape reverts.
+ * (trimmed, only when changed), Escape reverts. Like `NumberInput`, what is typed isn't lost with the field: if the app
+ * is hidden while it has focus (backgrounded, closed), or the field goes away while it has focus, what is typed is
+ * committed then — once, and only when it is valid and differs from the saved value.
  * `required` keeps an empty value from being saved and says why; `maxLength` caps the length.
  *
  *   <InlineText ariaLabel="Program name" value={program.name} required maxLength={60}
  *     requiredMessage="Give the program a name." onCommit={(name) => setProgram({ name })} />
  */
 import clsx from "clsx";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useFieldIds } from "./ui";
 
 export function InlineText({
@@ -72,6 +74,32 @@ export function InlineText({
       onCommit(t);
     }
   };
+
+  /** Commit what is typed, should the field not live to be left: valid and changed only, and only once (`saved`). */
+  const flushPending = () => {
+    if (!focused.current) return;
+    const t = text.trim();
+    if (validate(t) || t === saved.current) return;
+    saved.current = t;
+    onCommit(t);
+  };
+  const latestFlush = useRef(flushPending);
+  useLayoutEffect(() => {
+    latestFlush.current = flushPending;
+  });
+  useEffect(() => {
+    const flush = () => latestFlush.current();
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, []);
 
   const describedBy = [field?.describedBy, error ? errorId : null].filter(Boolean).join(" ") || undefined;
 

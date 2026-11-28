@@ -2,7 +2,7 @@
  * The Zone 2 machine kcal reading (SPEC §3.5): logged in the Zone 2 editor beside the duration,
  * summarised in the Zone 2 row and totalled in the weekly check-in — and never part of the day's
  * calories: Today's targets, intake, macros and TDEE read exactly as before. Out of range it is
- * refused. Nothing overflows a 320 px phone with the editor open (its machine chips included).
+ * refused. Nothing overflows a 320 px phone with the editor open (its machine's line included).
  */
 import type { Locator, Page } from "@playwright/test";
 import { dismissCelebrations, expect, expectSynced, fillNumber, login, pageOverflow, serverData, startClockAt, test } from "./helpers";
@@ -42,12 +42,11 @@ test("Zone 2 machine kcal is logged beside the duration and leaves Today's calor
   const fuelBefore = await fuel.innerText();
   const nutritionBefore = await page.getByRole("button", { name: /^Nutrition/ }).innerText();
 
-  // The editor: the machine (Tuesday's ride, from before machines were: the bike), the duration, then the
-  // machine's reading next to it.
+  // The editor: the duration, the machine's reading next to it, then the machine (Tuesday's ride, put without one —
+  // as an older build does — and given the default by the server: the bike).
   await zone2Row(page).click();
-  const machine = page.getByRole("radiogroup", { name: "Machine" });
-  await expect(machine.getByRole("radio", { name: "Bike" })).toHaveAttribute("aria-checked", "true");
-  await expect(machine).toHaveAccessibleDescription("Same as last time · Tue");
+  const machine = page.getByRole("combobox", { name: "Machine" });
+  await expect(machine).toHaveValue("bike");
   const kcal = page.getByRole("textbox", { name: "Zone 2 machine calories", exact: true });
   await expect(page.getByText("Machine reading · not added to intake")).toBeVisible();
   await fillNumber(page, "Zone 2 minutes", "30");
@@ -65,8 +64,11 @@ test("Zone 2 machine kcal is logged beside the duration and leaves Today's calor
   // Nothing sticks out of a 320 px phone, the hint showing.
   await page.setViewportSize({ width: 320, height: 568 });
   expect(await pageOverflow(page)).toBeNull();
-  const chips = await Promise.all((await machine.getByRole("radio").all()).map((r) => r.boundingBox()));
-  for (const box of [await page.getByRole("textbox", { name: "Zone 2 minutes" }).boundingBox(), await kcal.boundingBox(), ...chips])
+  for (const box of [
+    await page.getByRole("textbox", { name: "Zone 2 minutes" }).boundingBox(),
+    await kcal.boundingBox(),
+    await machine.boundingBox(),
+  ])
     expect(box!.x + box!.width).toBeLessThanOrEqual(320 - 16 + 0.5);
   await fillNumber(page, "Zone 2 machine calories", "320");
   await expect(kcal).not.toHaveAttribute("aria-invalid", "true");
@@ -74,7 +76,7 @@ test("Zone 2 machine kcal is logged beside the duration and leaves Today's calor
   await expectSynced(page);
 
   const day = (await serverData(page)).days.find((d) => d.date === TODAY);
-  // The machine shown went with the day's first Zone 2 value.
+  // The machine shown (the last one used) went with the day's first Zone 2 value.
   expect(day).toMatchObject({ zone2Done: true, zone2Minutes: 30, zone2Kcal: 320, zone2Machine: "bike", calories: 1800, proteinG: 150 });
 
   // The row: done, with the minutes and the reading.

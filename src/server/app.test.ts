@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Bootstrap, Session, Settings } from "../shared/schemas";
+import type { Bootstrap, DayLog, Session, Settings } from "../shared/schemas";
 import { blankSet, buildSession, buildSessionFrom } from "../shared/session";
 import { savedAlready } from "../web/lib/outbox-core";
 import { maxPrs, effectiveMaxHistory } from "../shared/gamify";
@@ -427,6 +427,29 @@ describe("sections, rehab and skips", () => {
     // A day that never had them reads as not recorded / not skipped.
     expect(b.days.find((d) => d.date === "2026-11-02")).toMatchObject({ zone2Machine: null, zone2Skipped: false, metconSkipped: false });
     expect(b.days.every((d) => "zone2Machine" in d && "zone2Skipped" in d && "metconSkipped" in d)).toBe(true);
+  });
+
+  it("a first Zone 2 value written without a machine (an older build's) gets the last one used; nothing else does", async () => {
+    const put = async (date: string, body: unknown) => {
+      const res = await req(`/api/days/${date}`, json("PUT", body));
+      expect(res.status, `${date} ${JSON.stringify(body)}`).toBe(200);
+      return (await res.json()) as DayLog;
+    };
+    // The last day with Zone 2 logged is 11-04, on the "Assault bike": 11-05 (a machine and a skip) and 11-07 (a
+    // machine chosen, nothing logged) are passed over.
+    await put("2026-11-07", { zone2Machine: "ski" });
+    expect(await put("2026-11-08", { zone2Done: true, zone2Minutes: 30 })).toMatchObject({ zone2Machine: "Assault bike" });
+    expect(await put("2026-11-09", { zone2Kcal: 250 })).toMatchObject({ zone2Machine: "Assault bike", zone2Done: false });
+    // The day's own machine, chosen before anything was logged, stands; one in the patch too.
+    expect(await put("2026-11-07", { zone2Minutes: 40, zone2Done: true })).toMatchObject({ zone2Machine: "ski" });
+    expect(await put("2026-11-10", { zone2Done: true, zone2Machine: "elliptical" })).toMatchObject({ zone2Machine: "elliptical" });
+    // Not a first value (a day logged before machines: it stays the bike), nothing logged, or not Zone 2: untouched.
+    await db.execute(sql`insert into day_logs (date, zone2_done, zone2_minutes) values ('2026-11-11', true, 30)`);
+    expect(await put("2026-11-11", { zone2Kcal: 300 })).toMatchObject({ zone2Machine: null });
+    expect(await put("2026-11-12", { zone2Done: false, zone2Minutes: null })).toMatchObject({ zone2Machine: null });
+    expect(await put("2026-11-13", { steps: 9000, zone2Skipped: true })).toMatchObject({ zone2Machine: null });
+    // A day before any Zone 2 at all: the bike.
+    expect(await put("2026-10-20", { zone2Done: true })).toMatchObject({ zone2Machine: "bike" });
   });
 
   it("refuses a malformed machine or flag", async () => {
@@ -1374,7 +1397,8 @@ describe("export & restore", () => {
       vo2Max: 52.3,
       thc: true,
       zone2Kcal: 320,
-      zone2Machine: null,
+      // Its first Zone 2 value came without a machine: the server gave it the default, nothing being logged before.
+      zone2Machine: "bike",
       zone2Skipped: false,
       metconSkipped: false,
     });
@@ -1574,7 +1598,17 @@ describe("export & restore", () => {
     const current = await buildExport(db);
     expect(current.version).toBe(6);
     const touched = current.days.filter((d) => d.zone2Machine !== null || d.zone2Skipped || d.metconSkipped).map((d) => d.date);
-    expect(touched).toEqual(["2026-11-04", "2026-11-05"]);
+    expect(touched).toEqual([
+      "2026-10-20",
+      "2026-11-03",
+      "2026-11-04",
+      "2026-11-05",
+      "2026-11-07",
+      "2026-11-08",
+      "2026-11-09",
+      "2026-11-10",
+      "2026-11-13",
+    ]);
     // v6: exactly as exported.
     await restoreExport(db, current, { force: true });
     const again = await buildExport(db);

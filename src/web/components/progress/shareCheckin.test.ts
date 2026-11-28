@@ -88,10 +88,15 @@ describe("checkinText", () => {
 
   it("names what Zone 2 was done on, the most days first, and nothing when none was done", () => {
     const at = (c: Partial<WeeklyCheckin>) => checkinText({ ...base, ...c }, { today: "2026-11-02" }).split("\n")[5];
+    // More than one machine named: the kcal were on the machines.
     expect(at({ zone2: { done: 3, planned: 3 }, zone2Activities: ["Rowing", "Cycling", "Assault bike"], zone2Kcal: 960 })).toBe(
-      "Lifts 3/4 · Metcon 2/3 · Zone 2 3/3 (Rowing, Cycling, Assault bike · 960 kcal on the machine)",
+      "Lifts 3/4 · Metcon 2/3 · Zone 2 3/3 (Rowing, Cycling, Assault bike · 960 kcal on the machines)",
     );
     expect(at({ zone2: { done: 0, planned: 2 }, zone2Activities: [] })).toBe("Lifts 3/4 · Metcon 2/3 · Zone 2 0/2");
+    // A week with no machine recorded (logged before machines were) names none: the reading alone.
+    expect(at({ zone2: { done: 2, planned: 2 }, zone2Activities: [], zone2Kcal: 640 })).toBe(
+      "Lifts 3/4 · Metcon 2/3 · Zone 2 2/2 (640 kcal on the machine)",
+    );
   });
 
   it("drops what isn't known yet", () => {

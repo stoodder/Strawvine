@@ -11,7 +11,7 @@ import { cycleLabel, cyclePosition, planTargets, programDayFor, type CyclePositi
 import { emptyDayLog } from "../../shared/empty";
 import type { DayLog, DayLogPatch } from "../../shared/schemas";
 import { buildSession, nextSession, sessionDoneEarly, strengthCounts } from "../../shared/session";
-import { zone2MachineFor, zone2Machines as zone2MachineChips } from "../../shared/zone2";
+import { zone2MachineFor, zone2Machines as zone2MachineList } from "../../shared/zone2";
 import { Bar, Section, severityClass, severityColor, Stat } from "../components/ui";
 import { Calibration } from "../components/Calibration";
 import { FloorNote } from "../components/FloorNote";
@@ -94,10 +94,10 @@ export function TodayScreen() {
   const { done: setsDone, total: setsTotal } = sess ? strengthCounts(sess) : { done: 0, total: 0 };
   // Only on today: what's coming up next on the program (links to its preview on Train).
   const upcoming = useMemo(() => (isToday ? nextSession(today, data) : null), [isToday, today, data]);
-  // The Zone 2 machine a day starts on (the last one used) and the chips: from the other days, never stored.
+  // The Zone 2 machine a day starts on (the last one used) and the machines offered: from the day logs, never stored.
   const zone2Machines = useMemo(
-    () => ({ last: zone2MachineFor(date, data.days), chips: zone2MachineChips(data.days, date), today }),
-    [date, data.days, today],
+    () => ({ last: zone2MachineFor(date, data.days), machines: zone2MachineList(data.days, date) }),
+    [date, data.days],
   );
 
   const lift: LiftSummary = {

@@ -187,7 +187,8 @@ export function daySections(date: ISODate, data: DayData, opts: DaySectionsOptio
   // Zone 2
   const zone2 = { planned: !!plan.zone2[wd], done: !!day?.zone2Done, skipped: !!day?.zone2Skipped };
   const zone2Data = day?.zone2Minutes != null || day?.zone2Kcal != null;
-  if (zone2.planned || zone2.done || zone2.skipped || zone2Data || day?.zone2Machine != null || added.has("zone2"))
+  // A machine alone (chosen, nothing logged) neither holds Zone 2 on the day nor starts it: only done, minutes or kcal.
+  if (zone2.planned || zone2.done || zone2.skipped || zone2Data || added.has("zone2"))
     out.push({
       key: "zone2",
       status: open({ ...zone2, progress: zone2Data }),
