@@ -144,3 +144,34 @@ describe("0006 exercise weighted backfill", () => {
     expect(await db.execute(sql`select id from exercises`)).toHaveLength(0);
   });
 });
+
+describe("0009 day sections", () => {
+  it("adds the Zone 2 machine (null) and the Not today flags (false) to every existing day, and changes nothing else", async () => {
+    await db.execute(sql`drop schema if exists public cascade; drop schema if exists drizzle cascade; create schema public;`);
+    await migrateUpTo("0008_day_zone2_kcal");
+    // Days as the app wrote them before: one full, one with only a weight, one with Zone 2 and a metcon.
+    await db.execute(sql`
+      insert into day_logs (date, weight_lb, calories, zone2_done, zone2_minutes, zone2_kcal, metcon_done, metcon_benchmark, journal)
+      values ('2026-11-02', 200.4, 2300, true, 40, 320, true, 'Fran', 'ok'),
+             ('2026-11-03', 199.8, null, false, null, null, false, null, null),
+             ('2026-11-04', null, null, true, 35.5, null, true, null, null)`);
+    const before = await db.execute<Record<string, unknown>>(sql`select * from day_logs order by date`);
+    await runMigrations(db);
+    const after = await db.execute<Record<string, unknown>>(sql`select * from day_logs order by date`);
+    expect(after.map((r) => [r.zone2_machine, r.zone2_skipped, r.metcon_skipped])).toEqual([
+      [null, false, false],
+      [null, false, false],
+      [null, false, false],
+    ]);
+    expect(after.map(({ zone2_machine: _m, zone2_skipped: _z, metcon_skipped: _s, ...r }) => r)).toEqual([...before]);
+    // New rows default the same way; the machine holds at most 40 characters; the flags are never null.
+    await db.execute(sql`insert into day_logs (date) values ('2026-11-05')`);
+    const [fresh] = await db.execute<Record<string, unknown>>(
+      sql`select zone2_machine, zone2_skipped, metcon_skipped from day_logs where date = '2026-11-05'`,
+    );
+    expect(fresh).toEqual({ zone2_machine: null, zone2_skipped: false, metcon_skipped: false });
+    await expect(db.execute(sql`update day_logs set zone2_machine = ${"x".repeat(41)} where date = '2026-11-05'`)).rejects.toThrow();
+    await expect(db.execute(sql`update day_logs set zone2_skipped = null where date = '2026-11-05'`)).rejects.toThrow();
+    await expect(db.execute(sql`update day_logs set metcon_skipped = null where date = '2026-11-05'`)).rejects.toThrow();
+  });
+});

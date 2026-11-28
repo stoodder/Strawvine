@@ -63,7 +63,7 @@ export const dayLogFields = {
    * was cycling). Written with the day's first Zone 2 value; read it through `src/shared/zone2.ts`.
    * Days cached by an older build lack it: read it with `?? null`.
    */
-  zone2Machine: safeString().trim().min(1).max(40).nullable(),
+  zone2Machine: safeString().min(1).max(40).nullable(),
   /**
    * Zone 2 marked "Not today" on purpose. It does not close the checklist item (streaks are
    * unchanged). Days cached by an older build lack it: read it with `?? false`.

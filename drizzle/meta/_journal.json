@@ -64,6 +64,13 @@
       "when": 1793723345591,
       "tag": "0008_day_zone2_kcal",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795877217806,
+      "tag": "0009_day_sections",
+      "breakpoints": true
     }
   ]
 }

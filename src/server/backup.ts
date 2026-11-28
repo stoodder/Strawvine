@@ -43,9 +43,13 @@ export const EXPORT_FORMAT = "strawvine-export";
  * v4: adds days[].restingHrBpm, vo2Max, alcohol, nicotine, thc and caffeine (absent in older
  * exports: restored as null, not recorded).
  * v5: adds days[].zone2Kcal (older exports: restored as null).
+ * v6: adds days[].zone2Machine, metconSkipped and zone2Skipped (older exports: restored as null,
+ * false and false — not recorded, nothing skipped). Its sessions and settings may hold rehab blocks,
+ * Core blocks and rehab programmes, which older versions never had (the documents' own schemas are
+ * unchanged for everything else).
  * A restore refuses versions newer than this one (fields it would silently drop).
  */
-export const EXPORT_VERSION = 5;
+export const EXPORT_VERSION = 6;
 
 /** A day as exports hold it: fields added after v1 may be missing from older files (read as null). */
 const exportDaySchema = dayLogSchema.extend({
@@ -56,6 +60,9 @@ const exportDaySchema = dayLogSchema.extend({
   thc: dayLogFields.thc.default(null),
   caffeine: dayLogFields.caffeine.default(null),
   zone2Kcal: dayLogFields.zone2Kcal.default(null),
+  zone2Machine: dayLogFields.zone2Machine.default(null),
+  zone2Skipped: dayLogFields.zone2Skipped.default(false),
+  metconSkipped: dayLogFields.metconSkipped.default(false),
 });
 
 export interface ExportFile {

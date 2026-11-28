@@ -8,11 +8,12 @@
  *
  * 1. starts the production server (dist/server/index.js) on a fresh database A and signs in;
  * 2. seeds a dataset through the API with every column non-null (or true) somewhere: day logs
- *    with micros, sleep score, HRV, energy/soreness, zone 2 (with machine kcal), metcon notes and
- *    benchmarks, unicode journal; exercises of every measure, one archived, tracked lifts; max entries of every source
+ *    with micros, sleep score, HRV, energy/soreness, zone 2 (with machine kcal and the machine),
+ *    metcon notes and benchmarks, metcon / Zone 2 marked not today, unicode journal; exercises of every measure, one archived, tracked lifts; max entries of every source
  *    (incl. a correction); settings with a weight goal, strength targets, training and display
- *    prefs; sessions with an applied AMRAP bump, a superset, a skipped exercise, a skipped main
- *    lift, a moved session (plannedFor) and a plan signature; seen achievements;
+ *    prefs, rehab blocks (one ended early); sessions with an applied AMRAP bump, a superset, a
+ *    skipped exercise, a skipped main lift, a Core block, a rehab block, a moved session
+ *    (plannedFor) and a plan signature; seen achievements;
  * 3. GET /api/export → A.json, checked to really have every field set somewhere;
  * 4. restores A.json into a second fresh database B with dist/server/restore.js;
  * 5. starts the server on B, signs in, exports again → B.json;
@@ -185,6 +186,10 @@ async function seed(call) {
       zone2Done: i % 2 === 0,
       zone2Minutes: i % 2 === 0 ? 40 + i : null,
       zone2Kcal: i % 2 === 0 ? 300 + i * 7 : null,
+      // The machine: a key, the owner's own name, not recorded; Not today on a few days.
+      zone2Machine: i % 2 === 0 ? (i % 4 === 0 ? "row" : "Assault bike \u{1F6B4}") : null,
+      zone2Skipped: i % 6 === 1,
+      metconSkipped: i % 4 === 2,
       ...(i % 4 === 0
         ? {
             metconDone: true,
@@ -222,6 +227,12 @@ async function seed(call) {
     program: { ...boot.settings.program, name: "Restore check program", cycleStartDate: "2026-08-31" },
     training: { restSecondsMain: 210, restSecondsAccessory: 75, accessoryIncrementLb: 2.5 },
     display: { highContrast: true },
+    rehab: {
+      programs: [
+        { id: "rc-hip", name: "Hip", start: "2026-07-06", weeks: 4, days: [false, true, false, false, true, false, false], carry: "weekday", end: "2026-07-24" },
+        { id: "rc-knee", name: "Knee rehab", start: "2026-08-31", weeks: 6, days: [false, true, false, true, false, true, false], carry: "last" },
+      ],
+    },
   });
 
   const set = (id, done, extra = {}) => ({
@@ -258,6 +269,8 @@ async function seed(call) {
         ],
       },
       { id: "b3", kind: "accessory", exercises: [{ exerciseId: plank.id, measure: "seconds", sets: [set("s6", false)], skipped: true }] },
+      { id: "b5", kind: "accessory", section: "core", exercises: [{ exerciseId: plank.id, measure: "seconds", sets: [set("s8", true, { targetReps: 45, reps: 45 })] }] },
+      { id: "b6", kind: "rehab", rehab: "rc-knee", exercises: [{ exerciseId: curl.id, measure: "reps", sets: [set("s9", true, { reps: 15, weight: 12.5 })] }] },
     ],
     notes: "Restore check",
     completedAt: `${addDays(start, 7)}T18:00:00.000Z`,
@@ -303,6 +316,10 @@ function checkCoverage(exp) {
   everyKey([exp.settings], "settings");
   everyKey([exp.settings.weightGoal ?? {}], "settings.weightGoal");
   everyKey([exp.settings.nutrition], "settings.nutrition");
+  everyKey(exp.settings.rehab?.programs ?? [], "settings.rehab.programs");
+  if (!exp.settings.rehab?.programs?.length) missing.push("settings.rehab.programs");
+  for (const kind of ["primary", "accessory", "rehab"])
+    if (!exp.sessions.some((s) => s.blocks.some((b) => b.kind === kind))) missing.push(`blocks.kind=${kind}`);
   for (const source of ["initial", "manual", "amrap", "correction"])
     if (!exp.maxEntries.some((m) => m.source === source)) missing.push(`maxEntries.source=${source}`);
   for (const measure of ["reps", "seconds", "meters"])

@@ -387,6 +387,165 @@ describe("settings preferences", () => {
   });
 });
 
+/**
+ * The training day's sections (SPEC §6.7, §6.8): rehab blocks and Core in the session document, rehab
+ * programmes in settings, the Zone 2 machine and the Not today flags on the day log. What these
+ * tests save stays for the export tests below.
+ */
+describe("sections, rehab and skips", () => {
+  const knee = {
+    id: "knee",
+    name: "Knee rehab",
+    start: "2026-10-19",
+    weeks: 6,
+    days: [false, true, false, true, false, true, false],
+    carry: "last",
+  };
+
+  it("stores the Zone 2 machine and the Not today flags field by field, and returns them in the bootstrap", async () => {
+    let res = await req("/api/days/2026-11-04", json("PUT", { zone2Done: true, zone2Minutes: 40, zone2Machine: "Assault bike" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ zone2Machine: "Assault bike", zone2Skipped: false, metconSkipped: false });
+    // A patch without them (an older build's, or another field) leaves them alone.
+    res = await req("/api/days/2026-11-04", json("PUT", { metconSkipped: true }));
+    expect(await res.json()).toMatchObject({ zone2Machine: "Assault bike", zone2Minutes: 40, metconSkipped: true, zone2Skipped: false });
+    res = await req("/api/days/2026-11-04", json("PUT", { steps: 9000 }));
+    expect(await res.json()).toMatchObject({ zone2Machine: "Assault bike", metconSkipped: true, steps: 9000 });
+    res = await req("/api/days/2026-11-05", json("PUT", { zone2Skipped: true, zone2Machine: "row" }));
+    expect(await res.json()).toMatchObject({ zone2Skipped: true, zone2Machine: "row", zone2Done: false, metconSkipped: false });
+    // Brought back, then skipped again; the machine cleared and set again.
+    res = await req("/api/days/2026-11-05", json("PUT", { zone2Skipped: false, zone2Machine: null }));
+    expect(await res.json()).toMatchObject({ zone2Skipped: false, zone2Machine: null });
+    res = await req("/api/days/2026-11-05", json("PUT", { zone2Skipped: true, zone2Machine: "row" }));
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(b.days.find((d) => d.date === "2026-11-04")).toMatchObject({ zone2Machine: "Assault bike", metconSkipped: true, zone2Skipped: false });
+    expect(b.days.find((d) => d.date === "2026-11-05")).toMatchObject({ zone2Machine: "row", zone2Skipped: true, metconSkipped: false });
+    // A day that never had them reads as not recorded / not skipped.
+    expect(b.days.find((d) => d.date === "2026-11-02")).toMatchObject({ zone2Machine: null, zone2Skipped: false, metconSkipped: false });
+    expect(b.days.every((d) => "zone2Machine" in d && "zone2Skipped" in d && "metconSkipped" in d)).toBe(true);
+  });
+
+  it("refuses a malformed machine or flag", async () => {
+    for (const zone2Machine of ["", "x".repeat(41), 5, true, "a\u0000b"])
+      expect((await req("/api/days/2026-11-04", json("PUT", { zone2Machine }))).status, JSON.stringify(zone2Machine)).toBe(400);
+    for (const flag of ["metconSkipped", "zone2Skipped"])
+      for (const v of [null, "true", 1])
+        expect((await req("/api/days/2026-11-04", json("PUT", { [flag]: v }))).status, `${flag}=${JSON.stringify(v)}`).toBe(400);
+    expect((await req("/api/days/2026-11-04", json("PUT", { zone2Machine: "x".repeat(40) }))).status).toBe(200);
+    expect((await req("/api/days/2026-11-04", json("PUT", { zone2Machine: "Assault bike" }))).status).toBe(200);
+  });
+
+  it("a workout with Core and rehab blocks round-trips; one without them saves as it always did", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const built = buildSession("2026-11-18", b);
+    const core = b.exercises.at(-1)!;
+    const plain = { ...built, notes: "no sections" };
+    // Without them: what comes back (and what every device downloads) is what was sent, key for key.
+    let res = await req("/api/sessions/2026-11-18", json("PUT", plain));
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toMatch(/"section"|"rehab"/);
+    expect(JSON.parse(text)).toEqual(JSON.parse(JSON.stringify(plain)));
+    let after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.sessions.find((s) => s.date === "2026-11-18")).toEqual(JSON.parse(JSON.stringify(plain)));
+
+    const withSections: Session = {
+      ...plain,
+      blocks: [
+        ...plain.blocks,
+        { id: "core-1", kind: "accessory", section: "core", exercises: [{ exerciseId: core.id, measure: core.measure, sets: [blankSet({ id: "cs1", targetReps: 45 })] }] },
+        {
+          id: "rehab-1",
+          kind: "rehab",
+          rehab: "knee",
+          exercises: [
+            { exerciseId: core.id, measure: core.measure, sets: [blankSet({ id: "rs1", targetReps: 30, done: true, reps: 30 })] },
+            { exerciseId: b.exercises[1]!.id, measure: "reps", sets: [blankSet({ id: "rs2", targetReps: 15 })], skipped: true },
+          ],
+        },
+      ],
+    };
+    res = await req("/api/sessions/2026-11-18", json("PUT", withSections));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(JSON.parse(JSON.stringify(withSections)));
+    after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const stored = after.sessions.find((s) => s.date === "2026-11-18")!;
+    expect(stored).toEqual(JSON.parse(JSON.stringify(withSections)));
+    expect(stored.blocks.slice(-2).map((x) => [x.kind, x.section, x.rehab])).toEqual([
+      ["accessory", "core", undefined],
+      ["rehab", undefined, "knee"],
+    ]);
+  });
+
+  it("refuses an unknown block kind or section, and a malformed rehab block id, with a 400 (nothing written)", async () => {
+    const before = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    const doc = before.sessions.find((s) => s.date === "2026-11-18")!;
+    const withBlock = (extra: Record<string, unknown>) => ({
+      ...doc,
+      blocks: [...doc.blocks, { id: "bad", kind: "accessory", exercises: [{ exerciseId: 1, measure: "reps", sets: [] }], ...extra }],
+    });
+    for (const extra of [
+      { kind: "cardio" },
+      { kind: "Rehab" },
+      { kind: null },
+      { section: "rehab" },
+      { section: "accessories" },
+      { section: null },
+      { kind: "rehab", rehab: "" },
+      { kind: "rehab", rehab: "x".repeat(41) },
+      { kind: "rehab", rehab: 7 },
+    ]) {
+      const res = await req("/api/sessions/2026-11-18", json("PUT", withBlock(extra)));
+      expect(res.status, JSON.stringify(extra)).toBe(400);
+      expect((await res.json()).error, JSON.stringify(extra)).toBe("invalid");
+    }
+    const after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.sessions).toEqual(before.sessions);
+    // Rehab blocks count toward the 30-block limit like any other.
+    const full = {
+      ...doc,
+      blocks: [
+        doc.blocks[0]!,
+        ...Array.from({ length: 30 }, (_, i) => ({ id: `r${i}`, kind: "rehab", exercises: [{ exerciseId: 1, measure: "reps", sets: [] }] })),
+      ],
+    };
+    expect((await req("/api/sessions/2026-11-18", json("PUT", full))).status).toBe(400);
+  });
+
+  it("settings round-trip rehab programmes, and settings without them stay without them", async () => {
+    const b = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(b.settings).not.toHaveProperty("rehab");
+    const ended = { ...knee, id: "hip", name: "Hip", start: "2026-08-03", weeks: 4, carry: "weekday", end: "2026-08-20" };
+    const withRehab = { ...b.settings, rehab: { programs: [ended, knee] } };
+    let res = await req("/api/settings", json("PUT", withRehab));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(withRehab);
+    let after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.settings).toEqual(withRehab);
+    for (const bad of [
+      { programs: [{ ...knee, weeks: 0 }] },
+      { programs: [{ ...knee, weeks: 53 }] },
+      { programs: [{ ...knee, weeks: 2.5 }] },
+      { programs: [{ ...knee, days: [true, false] }] },
+      { programs: [{ ...knee, carry: "first" }] },
+      { programs: [{ ...knee, id: "" }] },
+      { programs: [{ ...knee, start: "2026-02-30" }] },
+      { programs: [{ ...knee, end: null }] },
+      { programs: Array.from({ length: 101 }, (_, i) => ({ ...knee, id: `k${i}` })) },
+      { programs: null },
+      {},
+    ])
+      expect((await req("/api/settings", json("PUT", { ...withRehab, rehab: bad }))).status, JSON.stringify(bad).slice(0, 80)).toBe(400);
+    // Without it again (as every settings document before it).
+    res = await req("/api/settings", json("PUT", b.settings));
+    expect(res.status).toBe(200);
+    after = (await (await req("/api/bootstrap")).json()) as Bootstrap;
+    expect(after.settings).not.toHaveProperty("rehab");
+    // Left in place for the export tests.
+    expect((await req("/api/settings", json("PUT", withRehab))).status).toBe(200);
+  });
+});
+
 describe("idempotent creates", () => {
   const withKey = (key: string, body: unknown) => ({ ...json("POST", body), headers: { "idempotency-key": key } });
   const count = async (table: "exercises" | "max_entries") =>
@@ -721,9 +880,31 @@ describe("a saved document comes back exactly as the app sent it", () => {
       completedAt: new Date().toISOString(),
     };
     const moved = { ...buildSessionFrom("2026-12-08", date, b), notes: "done a day early" };
+    // Core and rehab blocks (SPEC §6.7): a Core superset, a rehab block with a logged set.
+    const sectioned: Session = {
+      ...moved,
+      blocks: [
+        ...moved.blocks,
+        {
+          id: "core-1",
+          kind: "accessory",
+          section: "core",
+          exercises: [
+            { exerciseId: b.exercises.at(-1)!.id, measure: "seconds", sets: [blankSet({ targetReps: 45 })] },
+            { exerciseId: b.exercises[1]!.id, measure: "reps", sets: [blankSet({ targetReps: 12 })] },
+          ],
+        },
+        {
+          id: "rehab-1",
+          kind: "rehab",
+          rehab: "knee-\ud83e\uddb5",
+          exercises: [{ exerciseId: b.exercises[1]!.id, measure: "reps", sets: [blankSet({ targetReps: 15, reps: 15, weight: 12.5, done: true })] }],
+        },
+      ],
+    };
 
     let precondition: Record<string, string> = { "If-None-Match": "*" };
-    for (const [name, doc] of Object.entries({ built, logged, edited, finished, moved })) {
+    for (const [name, doc] of Object.entries({ built, logged, edited, finished, moved, sectioned })) {
       const res = await put(`/api/sessions/${date}`, doc, precondition);
       expect(res.status, name).toBe(200);
       const rev = tag(res);
@@ -781,6 +962,15 @@ describe("a saved document comes back exactly as the app sent it", () => {
         display: { highContrast: true },
       },
       cleared: { ...s0, weightGoal: null },
+      rehab: {
+        ...s0,
+        rehab: {
+          programs: [
+            { id: "hip", name: "Hip", start: "2026-08-03", weeks: 4, days: [false, true, false, false, true, false, false], carry: "weekday", end: "2026-08-20" },
+            { id: "knee", name: "Knee rehab \ud83e\uddb5", start: "2026-10-19", weeks: 6, days: [false, true, false, true, false, true, false], carry: "last" },
+          ],
+        },
+      },
     };
     let rev = b.revs!.settings;
     for (const [name, settings] of Object.entries(edits)) {
@@ -1139,13 +1329,24 @@ describe("export & restore", () => {
     const res = await req("/api/export");
     expect(res.headers.get("content-disposition")).toMatch(/^attachment; filename="strawvine-export-\d{4}-\d{2}-\d{2}\.json"$/);
     const exported = await res.json();
-    expect(exported).toMatchObject({ format: "strawvine-export", version: 5 });
+    expect(exported).toMatchObject({ format: "strawvine-export", version: 6 });
     expect(exported.days.find((d: { date: string }) => d.date === "2026-11-03")).toMatchObject({
       restingHrBpm: 48,
       vo2Max: 52.3,
       thc: true,
       zone2Kcal: 320,
+      zone2Machine: null,
+      zone2Skipped: false,
+      metconSkipped: false,
     });
+    expect(exported.days.find((d: { date: string }) => d.date === "2026-11-04")).toMatchObject({ zone2Machine: "Assault bike", metconSkipped: true });
+    expect(exported.days.find((d: { date: string }) => d.date === "2026-11-05")).toMatchObject({ zone2Machine: "row", zone2Skipped: true });
+    expect(exported.settings.rehab.programs.map((p: { id: string }) => p.id)).toEqual(["hip", "knee"]);
+    const day = exported.sessions.find((x: Session) => x.date === "2026-11-18") as Session;
+    expect(day.blocks.map((x) => [x.kind, x.section ?? null, x.rehab ?? null]).slice(-2)).toEqual([
+      ["accessory", "core", null],
+      ["rehab", null, "knee"],
+    ]);
     expect(exported.seenAchievements.map((s: { key: string }) => s.key)).toEqual(["calib-1", "etag-test", "streak-3"]);
     expect(exported.exercises[0].createdAt).toMatch(/Z$/);
     expect(exported.exercises.find((e: { name: string }) => e.name === "Pull-up")).toMatchObject({ weighted: false });
@@ -1240,10 +1441,10 @@ describe("export & restore", () => {
 
   it("restores a v2 export (before the weighted flag) as weighted, and refuses newer versions", async () => {
     const current = await buildExport(db);
-    expect(current.version).toBe(5);
+    expect(current.version).toBe(6);
     expect(current.exercises.some((e) => !e.weighted)).toBe(true);
     const v2 = { ...current, version: 2, exercises: current.exercises.map(({ weighted: _w, ...e }) => e) };
-    await expect(restoreExport(db, { ...current, version: 6 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
+    await expect(restoreExport(db, { ...current, version: 7 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
     await restoreExport(db, v2, { force: true });
     const after = await buildExport(db);
     expect(after.exercises.map((e) => e.weighted)).toEqual(current.exercises.map(() => true));
@@ -1293,12 +1494,12 @@ describe("export & restore", () => {
     expect((await buildExport(db)).days).toEqual(current.days);
   });
 
-  it("restores a v4 export (days before the Zone 2 kcal reading) with it as null, and refuses v6", async () => {
+  it("restores a v4 export (days before the Zone 2 kcal reading) with it as null, and refuses v7", async () => {
     const current = await buildExport(db);
     const day = current.days.find((d) => d.date === "2026-11-03")!;
     expect(day).toMatchObject({ zone2Minutes: 30, zone2Kcal: 320 });
     const v4 = { ...current, version: 4, days: current.days.map(({ zone2Kcal: _z, ...d }) => d) };
-    await expect(restoreExport(db, { ...current, version: 6 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
+    await expect(restoreExport(db, { ...current, version: 7 }, { force: true })).rejects.toThrow(/Not a valid Strawvine export/);
     await restoreExport(db, v4, { force: true });
     const after = await buildExport(db);
     expect(after.days.find((d) => d.date === "2026-11-03")).toMatchObject({
@@ -1313,6 +1514,48 @@ describe("export & restore", () => {
       const bad = { ...current, days: current.days.map((d) => (d.date === "2026-11-03" ? { ...d, zone2Kcal } : d)) };
       await expect(restoreExport(db, bad, { force: true }), JSON.stringify(zone2Kcal)).rejects.toThrow(/days\.\d+\.zone2Kcal/);
     }
+    // Back to the data as it was, for the tests below.
+    await restoreExport(db, current, { force: true });
+    expect((await buildExport(db)).days).toEqual(current.days);
+  });
+
+  it("v6 round-trips the Zone 2 machine, the Not today flags, rehab and Core; a v5 export restores them as null / false", async () => {
+    const current = await buildExport(db);
+    expect(current.version).toBe(6);
+    const touched = current.days.filter((d) => d.zone2Machine !== null || d.zone2Skipped || d.metconSkipped).map((d) => d.date);
+    expect(touched).toEqual(["2026-11-04", "2026-11-05"]);
+    // v6: exactly as exported.
+    await restoreExport(db, current, { force: true });
+    const again = await buildExport(db);
+    expect(again.days).toEqual(current.days);
+    expect(again.sessions).toEqual(current.sessions);
+    expect(again.settings).toEqual(current.settings);
+    // v5: days without the new fields (and documents without sections) restore as not recorded / not skipped.
+    const v5 = {
+      ...current,
+      version: 5,
+      days: current.days.map(({ zone2Machine: _m, zone2Skipped: _z, metconSkipped: _s, ...d }) => d),
+    };
+    await restoreExport(db, v5, { force: true });
+    const after = await buildExport(db);
+    expect(after.days.every((d) => d.zone2Machine === null && !d.zone2Skipped && !d.metconSkipped)).toBe(true);
+    const strip = ({ zone2Machine: _m, zone2Skipped: _z, metconSkipped: _s, ...d }: (typeof current.days)[number]) => d;
+    expect(after.days.map(strip)).toEqual(current.days.map(strip));
+    // A current export refuses malformed values.
+    for (const [field, value] of [
+      ["zone2Machine", ""],
+      ["zone2Machine", "x".repeat(41)],
+      ["zone2Skipped", null],
+      ["metconSkipped", "yes"],
+    ] as const) {
+      const bad = { ...current, days: current.days.map((d) => (d.date === "2026-11-04" ? { ...d, [field]: value } : d)) };
+      await expect(restoreExport(db, bad, { force: true }), `${field}=${JSON.stringify(value)}`).rejects.toThrow(new RegExp(`days\\.\\d+\\.${field}`));
+    }
+    const badKind = {
+      ...current,
+      sessions: current.sessions.map((x) => (x.date === "2026-11-18" ? { ...x, blocks: [...x.blocks, { ...x.blocks.at(-1)!, kind: "cardio" }] } : x)),
+    };
+    await expect(restoreExport(db, badKind, { force: true })).rejects.toThrow(/sessions\.\d+\.blocks\.\d+\.kind/);
     // Back to the data as it was, for the tests below.
     await restoreExport(db, current, { force: true });
     expect((await buildExport(db)).days).toEqual(current.days);

@@ -27,10 +27,16 @@ export const dayLogs = pgTable("day_logs", {
   zone2Minutes: doublePrecision("zone2_minutes"),
   /** The Zone 2 machine's calorie reading (whole kcal); never part of intake or the TDEE. */
   zone2Kcal: integer("zone2_kcal"),
+  /** The Zone 2 machine (a key or the owner's own name); null = not recorded (reads as the bike). */
+  zone2Machine: varchar("zone2_machine", { length: 40 }),
+  /** Zone 2 marked "Not today" (doesn't close the day's item). */
+  zone2Skipped: boolean("zone2_skipped").notNull().default(false),
   metconDone: boolean("metcon_done").notNull().default(false),
   metconNotes: text("metcon_notes"),
   metconBenchmark: varchar("metcon_benchmark", { length: 120 }),
   metconScore: varchar("metcon_score", { length: 120 }),
+  /** Metcon marked "Not today" (doesn't close the day's item). */
+  metconSkipped: boolean("metcon_skipped").notNull().default(false),
   journal: text("journal"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

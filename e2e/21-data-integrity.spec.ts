@@ -6,14 +6,22 @@
  *   (b) reverting a moved session from a stale device doesn't delete the session the other device
  *       has logged into since — a calm conflict message, the session kept;
  *   (c) "Do this session today" credits the day it was planned for (its Lift item is done, Train
- *       says "Done Sun · Push"), and the rest day that received it shows a Lift item.
+ *       says "Done Sun · Push"), and the rest day that received it shows a Lift item;
+ *   (d) the day sections' data (the Zone 2 machine, Not today, rehab blocks, Core) goes through
+ *       an export (Settings › Export JSON) and a restore (`restore.js`) unchanged, and a v5 export
+ *       restores it as not recorded / not skipped.
  */
+import { spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import type { Browser, Page, Route } from "@playwright/test";
+import type { DayLog, Session, Settings } from "../src/shared/schemas";
 import {
   dismissCelebrations,
   expect,
   expectSynced,
   keepAnimationsOnTheRealTimeline,
+  login,
   MONDAY,
   MONDAY_ISO,
   onboardedOn,
@@ -173,4 +181,135 @@ test("(c) a session done early credits the day it was planned for; the rest day 
   await expect(page.getByText(/Done Sun · Push/)).toBeVisible();
   await expect(page.getByRole("link", { name: "View Sunday's Push session" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Log a session anyway|Start a session anyway/ })).toBeVisible();
+});
+
+/** The export as the app downloads it (Settings › Data › Export JSON). */
+async function downloadExport(
+  page: Page,
+): Promise<{ file: string; data: Record<string, unknown> & { days: DayLog[]; sessions: Session[]; settings: Settings } }> {
+  await page.goto("/settings");
+  const downloading = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Export JSON" }).click();
+  const download = await downloading;
+  mkdirSync(test.info().outputDir, { recursive: true });
+  const file = path.join(test.info().outputDir, `export-${Date.now()}.json`);
+  await download.saveAs(file);
+  return { file, data: JSON.parse(readFileSync(file, "utf8")) };
+}
+
+/** `npm run restore -- <file> --force` against the e2e database (as an operator would on the server). */
+function restoreCli(file: string) {
+  const databaseUrl = process.env.E2E_DATABASE_URL ?? "postgres://postgres@localhost:5432/strawvine_e2e";
+  const out = spawnSync(process.execPath, ["dist/server/restore.js", file, "--force"], {
+    cwd: path.resolve(process.env.E2E_APP_DIR ?? "."),
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    encoding: "utf8",
+  });
+  expect(out.status, `restore: ${out.stderr}`).toBe(0);
+  expect(out.stdout).toMatch(/^Restored \d+ days, \d+ sessions/);
+}
+
+test("(d) the Zone 2 machine, Not today, rehab and Core survive an export and a restore; a v5 export restores them as not recorded", async ({
+  page,
+}) => {
+  await onboardedOn(page, MONDAY);
+  const before = await serverData(page);
+  const api = async (url: string, data: unknown) => {
+    const res = await page.request.put(url, { data });
+    expect(res.ok(), `PUT ${url} → ${res.status()} ${await res.text()}`).toBe(true);
+  };
+  // Days: a Zone 2 on the rower (Sunday), metcon and Zone 2 not today (Monday).
+  await api(`/api/days/${SUNDAY_ISO}`, { zone2Done: true, zone2Minutes: 35, zone2Kcal: 290, zone2Machine: "row" });
+  await api(`/api/days/${MONDAY_ISO}`, { metconSkipped: true, zone2Skipped: true });
+  // Settings: a rehab block in force (Mon / Wed / Fri, six weeks from last Monday).
+  const knee = {
+    id: "knee",
+    name: "Knee rehab",
+    start: "2026-10-19",
+    weeks: 6,
+    days: [false, true, false, true, false, true, false],
+    carry: "last",
+  };
+  await api("/api/settings", { ...before.settings, rehab: { programs: [knee] } });
+  // A session (last Friday) with a Core block and a rehab block, each with a logged set.
+  const [bench, other] = [before.exercises.find((e) => e.name === "Bench press")!, before.exercises.find((e) => !e.tracksMax)!];
+  const loggedSet = (id: string) => ({
+    id,
+    targetReps: 10,
+    targetWeight: 20,
+    reps: 10,
+    weight: 20,
+    done: true,
+    amrap: false,
+    appliedProgressionLb: null,
+  });
+  const friday = "2026-10-23";
+  const session = {
+    date: friday,
+    label: "Extra session",
+    cycle: null,
+    week: null,
+    deload: false,
+    primaryMaxLb: null,
+    blocks: [
+      {
+        id: "core-1",
+        kind: "accessory",
+        section: "core",
+        exercises: [{ exerciseId: other.id, measure: other.measure, sets: [loggedSet("c1")] }],
+      },
+      { id: "rehab-1", kind: "rehab", rehab: "knee", exercises: [{ exerciseId: bench.id, measure: "reps", sets: [loggedSet("r1")] }] },
+    ],
+    notes: "",
+    completedAt: null,
+  };
+  await api(`/api/sessions/${friday}`, session);
+  // This build opens on that data (Today, and that day's Train) as it did before.
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+  await page.goto(`/train/${friday}`);
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+
+  // v6: everything comes back from a restore exactly as exported.
+  const first = await downloadExport(page);
+  expect(first.data.version).toBe(6);
+  expect(first.data.days.find((d) => d.date === SUNDAY_ISO)).toMatchObject({
+    zone2Machine: "row",
+    zone2Skipped: false,
+    metconSkipped: false,
+  });
+  expect(first.data.days.find((d) => d.date === MONDAY_ISO)).toMatchObject({ zone2Machine: null, zone2Skipped: true, metconSkipped: true });
+  expect(first.data.settings.rehab).toEqual({ programs: [knee] });
+  expect(first.data.sessions.find((s) => s.date === friday)).toEqual(session);
+  restoreCli(first.file);
+  await login(page); // a restore signs every device out
+  const restored = await serverData(page);
+  expect(restored.settings).toEqual(first.data.settings);
+  expect(restored.sessions).toEqual(first.data.sessions);
+  expect(restored.days).toEqual(first.data.days);
+  const second = await downloadExport(page);
+  const { exportedAt: _a, ...a } = first.data;
+  const { exportedAt: _b, ...b } = second.data;
+  expect(b).toEqual(a);
+
+  // v5 (an export from before these fields): the days restore with no machine and nothing skipped.
+  const v5 = {
+    ...first.data,
+    version: 5,
+    days: first.data.days.map(({ zone2Machine: _m, zone2Skipped: _z, metconSkipped: _s, ...d }) => d),
+  };
+  mkdirSync(test.info().outputDir, { recursive: true });
+  const v5File = path.join(test.info().outputDir, "export-v5.json");
+  writeFileSync(v5File, JSON.stringify(v5));
+  restoreCli(v5File);
+  await login(page);
+  const fromV5 = await serverData(page);
+  expect(fromV5.days.find((d) => d.date === SUNDAY_ISO)).toMatchObject({
+    zone2Done: true,
+    zone2Minutes: 35,
+    zone2Kcal: 290,
+    zone2Machine: null,
+  });
+  expect(fromV5.days.find((d) => d.date === MONDAY_ISO)).toMatchObject({ zone2Skipped: false, metconSkipped: false });
+  expect(fromV5.days.every((d) => d.zone2Machine === null && !d.zone2Skipped && !d.metconSkipped)).toBe(true);
 });
