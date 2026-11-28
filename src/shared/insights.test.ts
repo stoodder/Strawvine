@@ -696,4 +696,13 @@ describe("Zone 2 machine kcal", () => {
     const notCounted = week.map((d, i) => (i === 1 || i === 4 || i === 5 ? d : { ...d, zone2Kcal: null }));
     expect(weeklyCheckin(data(notCounted), series, today).zone2Kcal).toBeNull();
   });
+
+  it("names what the counted days' Zone 2 was done on, the most days first (none recorded: cycling)", () => {
+    // Default plan: Mon-Fri. The week is Tue 11-24 .. Mon 11-30: Tue, Thu, Fri, Mon counted.
+    const machines = ["row", "ski", null, "row", "Assault bike", "Assault bike", "Assault bike"];
+    const week = daysBefore(7, (i) => ({ zone2Done: i !== 1, zone2Minutes: 30, zone2Machine: machines[i] }));
+    const series = computeEnergySeries(week, addDays(today, -120), today, 3500);
+    expect(weeklyCheckin(data(week), series, today).zone2Activities).toEqual(["Rowing", "Assault bike", "Cycling"]);
+    expect(weeklyCheckin(data([]), series, today).zone2Activities).toEqual([]);
+  });
 });

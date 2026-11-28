@@ -2,10 +2,18 @@ import clsx from "clsx";
 import { AnimatePresence, motion } from "motion/react";
 import { Fragment, useId, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
-import { weekdayName } from "../../../shared/dates";
+import { weekdayName, type ISODate } from "../../../shared/dates";
 import type { ChecklistItem } from "../../../shared/gamify";
 import type { DayLog, DayLogPatch } from "../../../shared/schemas";
 import { substanceSummary } from "../../../shared/substances";
+import {
+  DEFAULT_ZONE2_MACHINE,
+  shownZone2Machine,
+  withZone2Machine,
+  zone2Activity,
+  ZONE2_PRESETS,
+  type LastZone2Machine,
+} from "../../../shared/zone2";
 import { compactSteps, fmt, minutesToHM } from "../../lib/format";
 import { Bar, CheckDot } from "../ui";
 import { useHeldWhile } from "../useHeldWhileTyping";
@@ -34,6 +42,18 @@ export interface LiftSummary {
   today?: string;
 }
 
+/** What the Zone 2 row and editor need to offer machines (SPEC §3.5), derived from the day logs. */
+export interface Zone2Machines {
+  /** `zone2MachineFor(date, days)`: the machine of the last earlier day with Zone 2. */
+  last: LastZone2Machine;
+  /** `zone2Machines(days, date)`: the chips. */
+  chips: string[];
+  /** "Your choice today" on this date (on another, "that day"). Default: the checklist's day. */
+  today?: ISODate;
+}
+
+const NO_MACHINES: Zone2Machines = { last: { machine: DEFAULT_ZONE2_MACHINE, from: null }, chips: ZONE2_PRESETS.map((p) => p.key) };
+
 /**
  * "Close the day": one row per checklist item. Render it with `key={date}` so the expanded
  * editor (and every field in it) belongs to exactly one day.
@@ -49,6 +69,7 @@ export function DayChecklist({
   stepTarget,
   zone2Minutes,
   lift,
+  zone2Machines = NO_MACHINES,
   holding = false,
   saved,
 }: {
@@ -58,6 +79,8 @@ export function DayChecklist({
   stepTarget: number;
   zone2Minutes: number;
   lift: LiftSummary;
+  /** The Zone 2 machine's chips and the last one used (absent: none used before, the common ones). */
+  zone2Machines?: Zone2Machines;
   /**
    * A field is being typed in (`useTyping`): no row gains or loses a line meanwhile — its note
    * line, the steps bar — so that a value saved as its field is left can't move the field moved to.
@@ -69,7 +92,10 @@ export function DayChecklist({
 }) {
   const [open, setOpen] = useState<string | null>(null);
   const toggle = (k: string) => setOpen((o) => (o === k ? null : k));
-  const summaries = new Map(items.map((item) => [item.key, summaryFor(item, day, stepTarget, lift)]));
+  // A Zone 2 machine picked and not written yet: written with the day's first Zone 2 value, from the editor or the dot.
+  const [zone2Pick, setZone2Pick] = useState<string | null>(null);
+  const zone2Machine = shownZone2Machine(day, zone2Pick, zone2Machines.last);
+  const summaries = new Map(items.map((item) => [item.key, summaryFor(item, day, stepTarget, lift, zone2Machine)]));
   // The lines each row has now, and — while typing — the lines it had when typing began.
   const now = new Map(items.map((item) => [item.key, rowLines(item, summaries.get(item.key)!)]));
   const lines = useHeldWhile(now, holding);
@@ -92,11 +118,18 @@ export function DayChecklist({
           item.key === "metcon"
             ? () => rowPatch({ metconDone: !day.metconDone })
             : item.key === "zone2"
-              ? () =>
-                  rowPatch({
-                    zone2Done: !day.zone2Done,
-                    zone2Minutes: !day.zone2Done && day.zone2Minutes === null ? zone2Minutes : day.zone2Minutes,
-                  })
+              ? () => {
+                  const p = withZone2Machine(
+                    day,
+                    {
+                      zone2Done: !day.zone2Done,
+                      zone2Minutes: !day.zone2Done && day.zone2Minutes === null ? zone2Minutes : day.zone2Minutes,
+                    },
+                    zone2Machine,
+                  );
+                  if (p.zone2Machine !== undefined) setZone2Pick(null);
+                  rowPatch(p);
+                }
               : null;
         return (
           <ChecklistRow
@@ -112,7 +145,17 @@ export function DayChecklist({
             {item.key === "morning" && <MorningEditor day={day} patch={rowPatch} />}
             {item.key === "fuel" && <FuelEditor day={day} patch={rowPatch} />}
             {item.key === "steps" && <StepsEditor day={day} patch={rowPatch} target={stepTarget} />}
-            {item.key === "zone2" && <Zone2Editor day={day} patch={rowPatch} />}
+            {item.key === "zone2" && (
+              <Zone2Editor
+                day={day}
+                patch={rowPatch}
+                last={zone2Machines.last}
+                chips={zone2Machines.chips}
+                pick={zone2Pick}
+                onPick={setZone2Pick}
+                today={zone2Machines.today}
+              />
+            )}
             {item.key === "metcon" && <MetconEditor day={day} patch={rowPatch} />}
           </ChecklistRow>
         );
@@ -193,7 +236,7 @@ function morningSummary(day: DayLog): { sub: ReactNode; note?: ReactNode } {
   return { sub: lines[0], note: lines[1] };
 }
 
-function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: LiftSummary): Summary {
+function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: LiftSummary, zone2Machine: string): Summary {
   switch (item.key) {
     case "morning":
       return {
@@ -222,8 +265,9 @@ function summaryFor(item: ChecklistItem, day: DayLog, stepTarget: number, lift: 
     case "zone2":
       return {
         value: day.zone2Done ? <Value n={fmt(day.zone2Minutes)} unit="min" /> : null,
-        // The machine's reading, once logged (`!= null`: absent on a day cached by an older build).
-        sub: day.zone2Kcal != null ? `Cycling · ${fmt(day.zone2Kcal)} kcal` : "Cycling",
+        // The activity of the machine shown ("Rowing"; not recorded: "Cycling"), and the machine's reading once logged
+        // (`!= null`: absent on a day cached by an older build). One line, whatever it says.
+        sub: day.zone2Kcal != null ? `${zone2Activity(zone2Machine)} · ${fmt(day.zone2Kcal)} kcal` : zone2Activity(zone2Machine),
       };
     case "metcon":
       return {

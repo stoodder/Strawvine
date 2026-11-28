@@ -14,7 +14,7 @@ import { formatProjectedRange } from "../projection";
  *   Intake 2,310 kcal avg · 5/7 days on target · protein 188 g
  *   Steps 9,820 avg · sleep 7h 20m · HRV 52 ms · resting HR 48 bpm
  *   VO2 max 52.3 (+1.2 since Oct 2)
- *   Lifts 3/4 · Metcon 2/3 · Zone 2 1/2 (640 kcal on the machine)
+ *   Lifts 3/4 · Metcon 2/3 · Zone 2 1/2 (Rowing · 640 kcal on the machine)
  *   Next week 2,400 kcal/day · P 200 · C 220 · F 70
  *   Held at your 1,500 kcal minimum.                      (only while the minimum holds the target up)
  *   Goal 185 lb projected Dec 19 – Jan 8, 2027
@@ -50,9 +50,10 @@ export function checkinText(c: WeeklyCheckin, opts: { today: ISODate; goalLb?: n
   // A group with nothing planned and nothing done (e.g. no lifting days set up) says nothing.
   const count = (name: string, v: { done: number; planned: number }) => (v.planned > 0 || v.done > 0) && `${name} ${v.done}/${v.planned}`;
   const zone2 = count("Zone 2", c.zone2);
-  // The week's machine calorie readings, once any were logged (a reading, not intake).
-  const zone2Kcal = c.zone2Kcal !== null ? ` (${fmt(c.zone2Kcal)} kcal on the machine)` : "";
-  lines.push(join([count("Lifts", c.lifts), count("Metcon", c.metcon), zone2 && `${zone2}${zone2Kcal}`]));
+  // What it was done on ("Rowing, Cycling"), and the week's machine calorie readings once any were logged (a
+  // reading, not intake), in brackets after the count.
+  const zone2Of = join([c.zone2Activities.join(", "), c.zone2Kcal !== null && `${fmt(c.zone2Kcal)} kcal on the machine`]);
+  lines.push(join([count("Lifts", c.lifts), count("Metcon", c.metcon), zone2 && (zone2Of ? `${zone2} (${zone2Of})` : zone2)]));
   if (c.next && c.daysLogged > 0)
     lines.push(
       `Next week ${fmt(c.next.calories)} kcal/day · P ${fmt(c.next.macros.proteinG)} · C ${fmt(c.next.macros.carbsG)} · F ${fmt(c.next.macros.fatG)}`,

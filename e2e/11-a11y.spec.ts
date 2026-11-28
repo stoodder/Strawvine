@@ -107,6 +107,7 @@ test.describe("axe: no serious or critical violations", () => {
     ["Morning check-in", "Morning weight"],
     ["Nutrition", "Calories"],
     ["Steps", "Steps"],
+    ["Zone 2", "Zone 2 minutes"],
   ] as const)
     test(`Today with the ${row} editor open`, async ({ page }) => {
       await page.goto("/");

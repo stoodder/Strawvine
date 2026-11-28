@@ -17,6 +17,7 @@ const base: WeeklyCheckin = {
   stepTarget: 15000,
   zone2: { done: 1, planned: 2 },
   zone2Kcal: null,
+  zone2Activities: ["Rowing"],
   metcon: { done: 2, planned: 3 },
   lifts: { done: 3, planned: 4 },
   avgSleepMinutes: 440,
@@ -71,7 +72,7 @@ describe("checkinText", () => {
         "Intake 2,310 kcal avg · 71% of days on target · protein 188 g",
         "Steps 9,820 avg · sleep 7h 20m · HRV 52 ms · resting HR 48 bpm",
         "VO2 max 52.3 (+1.2 since Oct 2)",
-        "Lifts 3/4 · Metcon 2/3 · Zone 2 1/2",
+        "Lifts 3/4 · Metcon 2/3 · Zone 2 1/2 (Rowing)",
         "Next week 2,400 kcal/day · P 200 · C 220 · F 70",
         "Goal 185 lb projected Dec 19 – Jan 8, 2027",
       ].join("\n"),
@@ -80,9 +81,17 @@ describe("checkinText", () => {
 
   it("adds the week's Zone 2 machine kcal to the Zone 2 count, once logged", () => {
     const text = checkinText({ ...base, zone2Kcal: 1240 }, { today: "2026-11-02" });
-    expect(text).toContain("\nLifts 3/4 · Metcon 2/3 · Zone 2 1/2 (1,240 kcal on the machine)\n");
+    expect(text).toContain("\nLifts 3/4 · Metcon 2/3 · Zone 2 1/2 (Rowing · 1,240 kcal on the machine)\n");
     // Not part of intake.
     expect(text).toContain("\nIntake 2,310 kcal avg · ");
+  });
+
+  it("names what Zone 2 was done on, the most days first, and nothing when none was done", () => {
+    const at = (c: Partial<WeeklyCheckin>) => checkinText({ ...base, ...c }, { today: "2026-11-02" }).split("\n")[5];
+    expect(at({ zone2: { done: 3, planned: 3 }, zone2Activities: ["Rowing", "Cycling", "Assault bike"], zone2Kcal: 960 })).toBe(
+      "Lifts 3/4 · Metcon 2/3 · Zone 2 3/3 (Rowing, Cycling, Assault bike · 960 kcal on the machine)",
+    );
+    expect(at({ zone2: { done: 0, planned: 2 }, zone2Activities: [] })).toBe("Lifts 3/4 · Metcon 2/3 · Zone 2 0/2");
   });
 
   it("drops what isn't known yet", () => {
@@ -106,9 +115,12 @@ describe("checkinText", () => {
       { today: "2026-11-02", goalLb: null },
     );
     expect(text).toBe(
-      ["Strawvine check-in · Oct 26 – Nov 1", "trend 201.3 lb", "Intake 2,310 kcal avg · 3/7 days logged", "Metcon 2/3 · Zone 2 1/2"].join(
-        "\n",
-      ),
+      [
+        "Strawvine check-in · Oct 26 – Nov 1",
+        "trend 201.3 lb",
+        "Intake 2,310 kcal avg · 3/7 days logged",
+        "Metcon 2/3 · Zone 2 1/2 (Rowing)",
+      ].join("\n"),
     );
   });
 });

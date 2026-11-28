@@ -10,6 +10,7 @@ import { planTargets, scheduledProgramDay } from "./program";
 import type { DayLog, Settings } from "./schemas";
 import { recoveryInsight, vo2MaxTrend, type Vo2Trend } from "./recovery";
 import { planDateOf, sessionDoneEarly } from "./session";
+import { zone2Activities } from "./zone2";
 
 export interface DayTargets {
   /** The engine state the targets were built from (the previous day — today is still in progress). */
@@ -61,6 +62,11 @@ export interface WeeklyCheckin {
    * counts (planned and done); null when none of them has one.
    */
   zone2Kcal: number | null;
+  /**
+   * What the week's Zone 2 was done on, over the same days: each activity once ("Rowing", "Cycling" — a day with no
+   * machine recorded was on the bike), the most days first (`zone2Activities`).
+   */
+  zone2Activities: string[];
   metcon: { done: number; planned: number };
   lifts: { done: number; planned: number };
   avgSleepMinutes: number | null;
@@ -157,6 +163,7 @@ export function weeklyCheckin(data: AppData, series: ReadonlyArray<EnergyDay>, t
     stepTarget: Math.round(mean(dates.map((d) => planTargets(settings, d).steps)) ?? planTargets(settings, to).steps),
     zone2: { planned: zone2.planned.length, done: zone2.done.length },
     zone2Kcal: sumOrNull(zone2Readings),
+    zone2Activities: zone2Activities(zone2.done.map((d) => byDate.get(d)!)),
     metcon: count(
       (d) => !!planTargets(settings, d).metcon[weekdayOf(d)],
       (d) => !!byDate.get(d)?.metconDone,
